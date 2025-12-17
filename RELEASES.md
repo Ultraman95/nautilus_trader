@@ -65,6 +65,8 @@ This release adds support for Python 3.14 with the following limitations:
 - Fixed code scanning security alerts
 
 ### Fixes
+- Fixed `uint64_t` truncation bug in `determine_trade_fill_qty` for trade execution with `high-precision` mode
+- Fixed stop market order fill price in `L1_MBP` mode
 - Fixed cache dropped same-timestamp market data on insert
 - Fixed race condition in InstrumentProvider causing duplicate instrument initialization in shared providers
 - Fixed portfolio statistics various bugs and edge cases
@@ -124,6 +126,7 @@ This release adds support for Python 3.14 with the following limitations:
 - Added Deribit HTTP client with instrument support (#3288), thanks @filipmacek
 - Added Deribit account balance and credential management (#3295), thanks @filipmacek
 - Added Deribit WebSocket client with market data support (#3297), thanks @filipmacek
+- Added Deribit WebSocket auth and raw data stream support (#3304), thanks @filipmacek
 - Added dYdX v4 crate (#3138), thanks @nicolad
 - Added dYdX v4 WebSocket in Rust (#3158), thanks @nicolad
 - Added dYdX v4 DataClient in Rust (#3162), thanks @nicolad
@@ -203,7 +206,7 @@ This release adds support for Python 3.14 with the following limitations:
 - Repaired Bybit `set_position_mode` (#3220), thanks @sunlei
 - Upgraded implied-vol crate (#3115), thanks @faysou
 - Upgraded Rust (MSRV) to 1.92.0
-- Upgraded Cython to v3.2.2
+- Upgraded Cython to v3.2.3
 - Upgraded `databento` crate to v0.37.0
 - Upgraded `datafusion` crate to v51.0.0
 - Upgraded `msgspec` to 0.20.0
@@ -215,12 +218,13 @@ This release adds support for Python 3.14 with the following limitations:
 - Added Polymarket historical data loading docs
 - Added visualization docs for `bars_with_fills` tearsheet feature
 - Added order state flow diagram with lifecycle documentation
+- Added fee rate sign convention in instruments concept guide
+- Added fill price determination to backtesting concept guide
 - Improved concept docs with Mermaid diagrams replacing ASCII diagrams
 - Improved execution concept guide with overfills explanation
 - Improved backtesting concept guide to clarify bar execution behavior
 - Improved documentation for uv-installed Python environments, thanks to @faysou for investigating and reporting
 - Improved notebook path handling and fix quickstart data loading, thanks for reporting @semihtekten
-- Documented fee rate sign convention in instruments concept guide
 
 ### Deprecations
 None

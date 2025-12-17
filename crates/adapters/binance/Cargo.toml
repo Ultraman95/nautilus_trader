@@ -21,6 +21,10 @@ workspace = true
 name = "nautilus_binance"
 crate-type = ["rlib", "cdylib"]
 
+[[bin]]
+name = "binance-spot-http-public"
+path = "bin/http_public.rs"
+
 [features]
 default = []
 extension-module = [
@@ -66,6 +70,7 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
+ed25519-dalek = { workspace = true }
 dotenvy = { workspace = true }
 futures-util = { workspace = true }
 hex = { workspace = true }

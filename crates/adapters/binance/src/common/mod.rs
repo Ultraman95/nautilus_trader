@@ -20,6 +20,7 @@ pub mod credential;
 pub mod enums;
 pub mod models;
 pub mod parse;
+pub mod sbe;
 pub mod urls;
 
 #[cfg(test)]
