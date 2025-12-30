@@ -40,7 +40,7 @@
 //! correctness and safety at the highest level, with the aim of supporting mission-critical trading
 //! system backtesting and live deployment workloads.
 //!
-//! # Feature flags
+//! # Feature Flags
 //!
 //! This crate provides feature flags to control source code inclusion during compilation,
 //! depending on the intended use case, i.e. whether to provide Python bindings
@@ -63,6 +63,7 @@ pub mod config;
 pub mod data;
 pub mod error;
 pub mod execution;
+pub mod factories;
 pub mod grpc;
 pub mod http;
 pub mod proto;
@@ -72,7 +73,6 @@ pub mod websocket;
 #[cfg(feature = "python")]
 pub mod python;
 
-// Re-exports
 pub use crate::{
     common::{
         enums::{
@@ -83,6 +83,7 @@ pub use crate::{
     },
     data::DydxDataClient,
     error::DydxError,
+    factories::{DydxDataClientFactory, DydxExecutionClientFactory},
     http::{
         client::DydxHttpClient,
         error::DydxHttpError,

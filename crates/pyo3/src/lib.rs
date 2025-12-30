@@ -28,7 +28,7 @@
 //! NautilusTrader's design, architecture, and implementation philosophy prioritizes software correctness and safety at the
 //! highest level, with the aim of supporting mission-critical, trading system backtesting and live deployment workloads.
 //!
-//! # Feature flags
+//! # Feature Flags
 //!
 //! This crate is primarily intended to be built for Python via
 //! [maturin](https://github.com/PyO3/maturin) and therefore provides a broad set of feature flags
@@ -211,6 +211,13 @@ fn _libnautilus(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     let n = "databento";
     let submodule = pyo3::wrap_pymodule!(nautilus_databento::python::databento);
+    m.add_wrapped(submodule)?;
+    sys_modules.set_item(format!("{module_name}.{n}"), m.getattr(n)?)?;
+    #[cfg(feature = "cython-compat")]
+    re_export_module_attributes(m, n)?;
+
+    let n = "deribit";
+    let submodule = pyo3::wrap_pymodule!(nautilus_deribit::python::deribit);
     m.add_wrapped(submodule)?;
     sys_modules.set_item(format!("{module_name}.{n}"), m.getattr(n)?)?;
     #[cfg(feature = "cython-compat")]

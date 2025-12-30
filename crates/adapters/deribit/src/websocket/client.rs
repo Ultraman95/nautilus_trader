@@ -32,7 +32,7 @@ use std::{
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use futures_util::Stream;
-use nautilus_common::live::runtime::get_runtime;
+use nautilus_common::live::get_runtime;
 use nautilus_core::{
     consts::NAUTILUS_USER_AGENT, env::get_or_env_var_opt, time::get_atomic_clock_realtime,
 };
@@ -73,6 +73,10 @@ const AUTHENTICATION_TIMEOUT_SECS: u64 = 30;
 
 /// WebSocket client for connecting to Deribit.
 #[derive(Clone)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.deribit")
+)]
 pub struct DeribitWebSocketClient {
     url: String,
     is_testnet: bool,
@@ -226,6 +230,12 @@ impl DeribitWebSocketClient {
         self.connection_mode() == ConnectionMode::Active
     }
 
+    /// Returns the WebSocket URL.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
     /// Returns whether the client is closed.
     #[must_use]
     pub fn is_closed(&self) -> bool {
@@ -286,7 +296,7 @@ impl DeribitWebSocketClient {
             let tx = self.cmd_tx.clone();
             let inst = self.instruments_cache.get(&symbol).map(|r| r.clone());
             if let Some(inst) = inst {
-                tokio::spawn(async move {
+                get_runtime().spawn(async move {
                     let _ = tx
                         .read()
                         .await
@@ -321,8 +331,6 @@ impl DeribitWebSocketClient {
             headers: vec![(USER_AGENT.to_string(), NAUTILUS_USER_AGENT.to_string())],
             heartbeat: self.heartbeat_interval,
             heartbeat_msg: None, // Deribit uses JSON-RPC heartbeat, not text ping
-            message_handler: Some(message_handler),
-            ping_handler: Some(ping_handler),
             reconnect_timeout_ms: Some(5_000),
             reconnect_delay_initial_ms: None,
             reconnect_delay_max_ms: None,
@@ -337,6 +345,8 @@ impl DeribitWebSocketClient {
         // Connect the WebSocket
         let ws_client = WebSocketClient::connect(
             config,
+            Some(message_handler),
+            Some(ping_handler),
             None, // post_reconnection
             keyed_quotas,
             Some(*DERIBIT_WS_SUBSCRIPTION_QUOTA), // Default quota

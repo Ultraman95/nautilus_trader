@@ -42,33 +42,16 @@ const MAX_MILLIS_FOR_NANOS: f64 = u64::MAX as f64 / NANOSECONDS_IN_MILLISECOND a
 const MAX_MICROS_FOR_NANOS: f64 = u64::MAX as f64 / NANOSECONDS_IN_MICROSECOND as f64;
 
 // Compile-time checks for time constants to prevent accidental modification
-#[cfg(test)]
-mod compile_time_checks {
-    use static_assertions::const_assert_eq;
-
-    use super::*;
-
-    // [STATIC_ASSERT] Core time constant relationships
-    const_assert_eq!(NANOSECONDS_IN_SECOND, 1_000_000_000);
-    const_assert_eq!(NANOSECONDS_IN_MILLISECOND, 1_000_000);
-    const_assert_eq!(NANOSECONDS_IN_MICROSECOND, 1_000);
-    const_assert_eq!(MILLISECONDS_IN_SECOND, 1_000);
-
-    // [STATIC_ASSERT] Mathematical relationships between constants
-    const_assert_eq!(
-        NANOSECONDS_IN_SECOND,
-        MILLISECONDS_IN_SECOND * NANOSECONDS_IN_MILLISECOND
-    );
-    const_assert_eq!(
-        NANOSECONDS_IN_MILLISECOND,
-        NANOSECONDS_IN_MICROSECOND * 1_000
-    );
-    const_assert_eq!(NANOSECONDS_IN_SECOND / NANOSECONDS_IN_MILLISECOND, 1_000);
-    const_assert_eq!(
-        NANOSECONDS_IN_SECOND / NANOSECONDS_IN_MICROSECOND,
-        1_000_000
-    );
-}
+const _: () = {
+    assert!(NANOSECONDS_IN_SECOND == 1_000_000_000);
+    assert!(NANOSECONDS_IN_MILLISECOND == 1_000_000);
+    assert!(NANOSECONDS_IN_MICROSECOND == 1_000);
+    assert!(MILLISECONDS_IN_SECOND == 1_000);
+    assert!(NANOSECONDS_IN_SECOND == MILLISECONDS_IN_SECOND * NANOSECONDS_IN_MILLISECOND);
+    assert!(NANOSECONDS_IN_MILLISECOND == NANOSECONDS_IN_MICROSECOND * 1_000);
+    assert!(NANOSECONDS_IN_SECOND / NANOSECONDS_IN_MILLISECOND == 1_000);
+    assert!(NANOSECONDS_IN_SECOND / NANOSECONDS_IN_MICROSECOND == 1_000_000);
+};
 
 /// List of weekdays (Monday to Friday).
 pub const WEEKDAYS: [Weekday; 5] = [
@@ -465,13 +448,17 @@ pub fn subtract_n_years_nanos(unix_nanos: UnixNanos, n: u32) -> anyhow::Result<U
 }
 
 /// Returns the last valid day of `(year, month)`.
+///
+/// Returns `None` if `month` is not in the range 1..=12.
 #[must_use]
-pub const fn last_day_of_month(year: i32, month: u32) -> u32 {
+pub const fn last_day_of_month(year: i32, month: u32) -> Option<u32> {
     // Validate month range 1-12
-    assert!(month >= 1 && month <= 12, "`month` must be in 1..=12");
+    if month < 1 || month > 12 {
+        return None;
+    }
 
     // February leap-year logic
-    match month {
+    Some(match month {
         2 => {
             if is_leap_year(year) {
                 29
@@ -481,7 +468,7 @@ pub const fn last_day_of_month(year: i32, month: u32) -> u32 {
         }
         4 | 6 | 9 | 11 => 30,
         _ => 31, // January, March, May, July, August, October, December
-    }
+    })
 }
 
 /// Basic leap-year check
@@ -490,13 +477,21 @@ pub const fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
+/// Convert optional DateTime to optional UnixNanos timestamp.
+pub fn datetime_to_unix_nanos(value: Option<DateTime<Utc>>) -> Option<UnixNanos> {
+    value
+        .and_then(|dt| dt.timestamp_nanos_opt())
+        .and_then(|nanos| u64::try_from(nanos).ok())
+        .map(UnixNanos::from)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::float_cmp,
     reason = "Exact float comparisons acceptable in tests"
 )]
 mod tests {
-    use chrono::{DateTime, TimeDelta, TimeZone, Utc};
+    use chrono::{DateTime, TimeDelta, TimeZone, Timelike, Utc};
     use rstest::rstest;
 
     use super::*;
@@ -582,9 +577,10 @@ mod tests {
     }
 
     #[rstest]
-    #[should_panic(expected = "`month` must be in 1..=12")]
-    fn test_last_day_of_month_invalid_month() {
-        let _ = last_day_of_month(2024, 0);
+    #[case(2024, 0)] // Month below range
+    #[case(2024, 13)] // Month above range
+    fn test_last_day_of_month_invalid_month(#[case] year: i32, #[case] month: u32) {
+        assert!(last_day_of_month(year, month).is_none());
     }
 
     #[rstest]
@@ -800,7 +796,7 @@ mod tests {
     #[case(2024, 12, 31)] // December
     #[case(2023, 11, 30)] // November
     fn test_last_day_of_month(#[case] year: i32, #[case] month: u32, #[case] expected: u32) {
-        let result = last_day_of_month(year, month);
+        let result = last_day_of_month(year, month).unwrap();
         assert_eq!(result, expected);
     }
 
@@ -864,5 +860,52 @@ mod tests {
         // Adding years to epoch should never produce negative, but the check is there
         let result = add_n_years_nanos(start, 1);
         assert!(result.is_ok());
+    }
+
+    #[rstest]
+    fn test_datetime_to_unix_nanos_at_epoch() {
+        // Unix epoch (1970-01-01 00:00:00 UTC) should return 0 nanoseconds
+        let epoch = Utc.timestamp_opt(0, 0).unwrap();
+        let result = datetime_to_unix_nanos(Some(epoch));
+        assert_eq!(result, Some(UnixNanos::from(0)));
+    }
+
+    #[rstest]
+    fn test_datetime_to_unix_nanos_typical_datetime() {
+        let dt = Utc
+            .with_ymd_and_hms(2024, 1, 15, 13, 30, 45)
+            .unwrap()
+            .with_nanosecond(123_456_789)
+            .unwrap();
+        let result = datetime_to_unix_nanos(Some(dt));
+
+        // Expected: 1705325445123456789 nanoseconds
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().as_u64(), 1_705_325_445_123_456_789);
+    }
+
+    #[rstest]
+    fn test_datetime_to_unix_nanos_before_epoch() {
+        // Pre-epoch datetime (1969-12-31 23:59:59 UTC) should return None
+        // because negative timestamps can't be converted to u64
+        let before_epoch = Utc.with_ymd_and_hms(1969, 12, 31, 23, 59, 59).unwrap();
+        let result = datetime_to_unix_nanos(Some(before_epoch));
+        assert_eq!(result, None);
+    }
+
+    #[rstest]
+    fn test_datetime_to_unix_nanos_one_second_after_epoch() {
+        // 1970-01-01 00:00:01 UTC = 1_000_000_000 nanoseconds
+        let dt = Utc.timestamp_opt(1, 0).unwrap();
+        let result = datetime_to_unix_nanos(Some(dt));
+        assert_eq!(result, Some(UnixNanos::from(1_000_000_000)));
+    }
+
+    #[rstest]
+    fn test_datetime_to_unix_nanos_with_subsecond_precision() {
+        // Test with microseconds: 1970-01-01 00:00:00.000001 UTC
+        let dt = Utc.timestamp_opt(0, 1_000).unwrap(); // 1 microsecond = 1000 nanos
+        let result = datetime_to_unix_nanos(Some(dt));
+        assert_eq!(result, Some(UnixNanos::from(1_000)));
     }
 }

@@ -101,8 +101,26 @@ pub struct DeribitTickSizeStep {
 }
 
 /// Deribit instrument kind.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::AsRefStr,
+    strum::Display,
+    strum::EnumIter,
+    strum::EnumString,
+    Serialize,
+    Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.deribit")
+)]
 pub enum DeribitInstrumentKind {
     /// Future contract
     Future,
@@ -119,8 +137,25 @@ pub enum DeribitInstrumentKind {
 }
 
 /// Deribit currency.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::AsRefStr,
+    strum::EnumIter,
+    strum::EnumString,
+    Serialize,
+    Deserialize,
+)]
 #[serde(rename_all = "UPPERCASE")]
+#[strum(serialize_all = "UPPERCASE")]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.deribit")
+)]
 pub enum DeribitCurrency {
     /// Bitcoin
     BTC,
@@ -132,11 +167,32 @@ pub enum DeribitCurrency {
     USDT,
     /// Euro stablecoin
     EURR,
+    /// All currencies
+    #[serde(rename = "any")]
+    ANY,
 }
 
 /// Deribit option type.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::AsRefStr,
+    strum::Display,
+    strum::EnumIter,
+    strum::EnumString,
+    Serialize,
+    Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.deribit")
+)]
 pub enum DeribitOptionType {
     /// Call option
     Call,
@@ -154,6 +210,7 @@ impl DeribitCurrency {
             Self::USDC => "USDC",
             Self::USDT => "USDT",
             Self::EURR => "EURR",
+            Self::ANY => "any",
         }
     }
 }
@@ -392,4 +449,170 @@ pub struct DeribitAccountSummaryExtended {
     /// Block RFQ self match prevention
     #[serde(default)]
     pub block_rfq_self_match_prevention: Option<bool>,
+}
+
+/// Deribit public trade data from the market data API.
+///
+/// Represents a single trade returned by `/public/get_last_trades_by_instrument_and_time`
+/// and other trade-related endpoints.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeribitPublicTrade {
+    /// Trade amount. For perpetual and inverse futures the amount is in USD units.
+    /// For options and linear futures it is the underlying base currency coin.
+    pub amount: f64,
+    /// Trade size in contract units (optional, may be absent in historical trades).
+    #[serde(default)]
+    pub contracts: Option<f64>,
+    /// Direction of the trade: "buy" or "sell"
+    pub direction: String,
+    /// Index Price at the moment of trade.
+    pub index_price: f64,
+    /// Unique instrument identifier.
+    pub instrument_name: String,
+    /// Option implied volatility for the price (Option only).
+    #[serde(default)]
+    pub iv: Option<f64>,
+    /// Optional field (only for trades caused by liquidation).
+    #[serde(default)]
+    pub liquidation: Option<String>,
+    /// Mark Price at the moment of trade.
+    pub mark_price: f64,
+    /// Price in base currency.
+    pub price: f64,
+    /// Direction of the "tick" (0 = Plus Tick, 1 = Zero-Plus Tick, 2 = Minus Tick, 3 = Zero-Minus Tick).
+    pub tick_direction: i32,
+    /// The timestamp of the trade (milliseconds since the UNIX epoch).
+    pub timestamp: i64,
+    /// Unique (per currency) trade identifier.
+    pub trade_id: String,
+    /// The sequence number of the trade within instrument.
+    pub trade_seq: i64,
+    /// Block trade id - when trade was part of a block trade.
+    #[serde(default)]
+    pub block_trade_id: Option<String>,
+    /// Block trade leg count - when trade was part of a block trade.
+    #[serde(default)]
+    pub block_trade_leg_count: Option<i32>,
+    /// ID of the Block RFQ - when trade was part of the Block RFQ.
+    #[serde(default)]
+    pub block_rfq_id: Option<i64>,
+    /// Optional field containing combo instrument name if the trade is a combo trade.
+    #[serde(default)]
+    pub combo_id: Option<String>,
+    /// Optional field containing combo trade identifier if the trade is a combo trade.
+    #[serde(default)]
+    pub combo_trade_id: Option<f64>,
+}
+
+/// Response wrapper for trades endpoints.
+///
+/// Contains the trades array and pagination information.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeribitTradesResponse {
+    /// Whether there are more trades available.
+    pub has_more: bool,
+    /// Array of trade objects.
+    pub trades: Vec<DeribitPublicTrade>,
+}
+
+/// Response from `public/get_tradingview_chart_data` endpoint.
+///
+/// Contains OHLCV data in array format where each array element corresponds
+/// to a single candle at the index in the `ticks` array.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeribitTradingViewChartData {
+    /// List of prices at close (one per candle)
+    pub close: Vec<f64>,
+    /// List of cost bars (volume in quote currency, one per candle)
+    #[serde(default)]
+    pub cost: Vec<f64>,
+    /// List of highest price levels (one per candle)
+    pub high: Vec<f64>,
+    /// List of lowest price levels (one per candle)
+    pub low: Vec<f64>,
+    /// List of prices at open (one per candle)
+    pub open: Vec<f64>,
+    /// Status of the query: "ok" or "no_data"
+    pub status: String,
+    /// Values of the time axis given in milliseconds since UNIX epoch
+    pub ticks: Vec<i64>,
+    /// List of volume bars (in base currency, one per candle)
+    pub volume: Vec<f64>,
+}
+
+/// Response from `public/get_order_book` endpoint.
+///
+/// Contains the current order book state with bids, asks, and market data.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeribitOrderBook {
+    /// The timestamp of the order book (milliseconds since UNIX epoch)
+    pub timestamp: i64,
+    /// Unique instrument identifier
+    pub instrument_name: String,
+    /// List of bids as [price, amount] pairs
+    pub bids: Vec<[f64; 2]>,
+    /// List of asks as [price, amount] pairs
+    pub asks: Vec<[f64; 2]>,
+    /// The state of the order book: "open" or "closed"
+    pub state: String,
+    /// The current best bid price (null if there aren't any bids)
+    #[serde(default)]
+    pub best_bid_price: Option<f64>,
+    /// The current best ask price (null if there aren't any asks)
+    #[serde(default)]
+    pub best_ask_price: Option<f64>,
+    /// The order size of all best bids
+    #[serde(default)]
+    pub best_bid_amount: Option<f64>,
+    /// The order size of all best asks
+    #[serde(default)]
+    pub best_ask_amount: Option<f64>,
+    /// The mark price for the instrument
+    #[serde(default)]
+    pub mark_price: Option<f64>,
+    /// The price for the last trade
+    #[serde(default)]
+    pub last_price: Option<f64>,
+    /// Current index price
+    #[serde(default)]
+    pub index_price: Option<f64>,
+    /// The total amount of outstanding contracts
+    #[serde(default)]
+    pub open_interest: Option<f64>,
+    /// The maximum price for the future
+    #[serde(default)]
+    pub max_price: Option<f64>,
+    /// The minimum price for the future
+    #[serde(default)]
+    pub min_price: Option<f64>,
+    /// Current funding (perpetual only)
+    #[serde(default)]
+    pub current_funding: Option<f64>,
+    /// Funding 8h (perpetual only)
+    #[serde(default)]
+    pub funding_8h: Option<f64>,
+    /// The settlement price for the instrument (when state = open)
+    #[serde(default)]
+    pub settlement_price: Option<f64>,
+    /// The settlement/delivery price for the instrument (when state = closed)
+    #[serde(default)]
+    pub delivery_price: Option<f64>,
+    /// (Only for option) implied volatility for best bid
+    #[serde(default)]
+    pub bid_iv: Option<f64>,
+    /// (Only for option) implied volatility for best ask
+    #[serde(default)]
+    pub ask_iv: Option<f64>,
+    /// (Only for option) implied volatility for mark price
+    #[serde(default)]
+    pub mark_iv: Option<f64>,
+    /// Underlying price for implied volatility calculations (options only)
+    #[serde(default)]
+    pub underlying_price: Option<f64>,
+    /// Name of the underlying future, or index_price (options only)
+    #[serde(default)]
+    pub underlying_index: Option<serde_json::Value>,
+    /// Interest rate used in implied volatility calculations (options only)
+    #[serde(default)]
+    pub interest_rate: Option<f64>,
 }

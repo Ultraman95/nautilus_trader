@@ -754,7 +754,7 @@ impl BitmexRawHttpClient {
 #[derive(Debug)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.adapters")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.bitmex")
 )]
 pub struct BitmexHttpClient {
     inner: Arc<BitmexRawHttpClient>,
@@ -1205,6 +1205,10 @@ impl BitmexHttpClient {
                 );
                 Ok(None)
             }
+            InstrumentParseResult::Inactive { symbol, state } => {
+                tracing::debug!("Instrument {symbol} is inactive (state={state}), returning None");
+                Ok(None)
+            }
             InstrumentParseResult::Failed {
                 symbol,
                 instrument_type,
@@ -1232,6 +1236,7 @@ impl BitmexHttpClient {
 
         let mut parsed_instruments = Vec::new();
         let mut skipped_count = 0;
+        let mut inactive_count = 0;
         let mut failed_count = 0;
         let total_count = instruments.len();
 
@@ -1249,6 +1254,10 @@ impl BitmexHttpClient {
                         "Skipping unsupported instrument type: symbol={symbol}, type={instrument_type:?}"
                     );
                 }
+                InstrumentParseResult::Inactive { symbol, state } => {
+                    inactive_count += 1;
+                    tracing::debug!("Skipping inactive instrument: symbol={symbol}, state={state}");
+                }
                 InstrumentParseResult::Failed {
                     symbol,
                     instrument_type,
@@ -1265,6 +1274,12 @@ impl BitmexHttpClient {
         if skipped_count > 0 {
             tracing::info!(
                 "Skipped {skipped_count} unsupported instrument type(s) out of {total_count} total"
+            );
+        }
+
+        if inactive_count > 0 {
+            tracing::info!(
+                "Skipped {inactive_count} inactive instrument(s) out of {total_count} total"
             );
         }
 

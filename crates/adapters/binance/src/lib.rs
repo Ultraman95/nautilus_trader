@@ -38,7 +38,7 @@
 //! correctness and safety at the highest level, with the aim of supporting mission-critical
 //! trading system backtesting and live deployment workloads.
 //!
-//! # Feature flags
+//! # Feature Flags
 //!
 //! This crate provides feature flags to control source code inclusion during compilation,
 //! depending on the intended use case (Rust-only builds vs. Python bindings through PyO3).
@@ -63,6 +63,7 @@ pub mod config;
 pub mod data;
 pub mod error;
 pub mod execution;
+pub mod futures;
 pub mod http;
 pub mod spot;
 pub mod websocket;

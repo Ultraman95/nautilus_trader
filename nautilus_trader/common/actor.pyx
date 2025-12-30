@@ -1283,6 +1283,7 @@ cdef class Actor(Component):
 
         # TODO during a backtest, use any ClientId for subscribing to custom data from a catalog when not using instrument_id
         if client_id is None and instrument_id is None:
+            self.log.error("`Actor.subscribe_data`: `client_id` or `instrument_id` need to be specified")
             return
 
         params = params or {}
@@ -2019,6 +2020,7 @@ cdef class Actor(Component):
 
         # TODO during a backtest, use any ClientId for subscribing to custom data from a catalog when not using instrument_id
         if client_id is None and instrument_id is None:
+            self.log.error("`Actor.unsubscribe_data`: `client_id` or `instrument_id` need to be specified")
             return
 
         cdef UnsubscribeData command = UnsubscribeData(
@@ -2698,6 +2700,7 @@ cdef class Actor(Component):
         bint update_catalog = False,
         dict[str, object] params = None,
         bint join_request = False,
+        UUID4 request_id = None,
     ):
         """
         Request custom data for the given data type from the given data client.
@@ -2732,6 +2735,8 @@ cdef class Actor(Component):
             Additional parameters potentially used by a specific client.
         join_request: bool, optional, default to False
             If a request should be joined and sorted with another one by using request_join.
+        request_id : UUID4, optional
+            The UUID to use for the request ID. If `None`, a new UUID will be generated.
 
         Returns
         -------
@@ -2763,7 +2768,7 @@ cdef class Actor(Component):
         params["update_catalog"] = update_catalog
         params["join_request"] = join_request
 
-        cdef UUID4 request_id = UUID4()
+        cdef UUID4 used_request_id = request_id if request_id else UUID4()
         cdef RequestData request = RequestData(
             data_type=data_type,
             instrument_id=instrument_id,
@@ -2773,12 +2778,12 @@ cdef class Actor(Component):
             client_id=client_id,
             venue=None,
             callback=self._handle_data_response,
-            request_id=request_id,
+            request_id=used_request_id,
             ts_init=self._clock.timestamp_ns(),
             params=params,
         )
-        self._requests[request_id] = request
-        self._pending_requests[request_id] = callback
+        self._requests[used_request_id] = request
+        self._pending_requests[used_request_id] = callback
 
         self._msgbus.subscribe(
             topic=self._topic_cache.get_custom_data_topic(data_type, instrument_id, historical=True),
@@ -2787,7 +2792,7 @@ cdef class Actor(Component):
 
         self._send_data_req(request)
 
-        return request_id
+        return used_request_id
 
     cpdef UUID4 request_instrument(
         self,
@@ -2799,6 +2804,7 @@ cdef class Actor(Component):
         bint update_catalog = False,
         dict[str, object] params = None,
         bint join_request = False,
+        UUID4 request_id = None,
     ):
         """
         Request `Instrument` data for the given instrument ID.
@@ -2832,6 +2838,8 @@ cdef class Actor(Component):
             Additional parameters potentially used by a specific client.
         join_request: bool, optional, default to False
             If a request should be joined and sorted with another one by using request_join.
+        request_id : UUID4, optional
+            The UUID to use for the request ID. If `None`, a new UUID will be generated.
 
         Returns
         -------
@@ -2869,7 +2877,7 @@ cdef class Actor(Component):
         params["update_catalog"] = update_catalog
         params["join_request"] = join_request
 
-        cdef UUID4 request_id = UUID4()
+        cdef UUID4 used_request_id = request_id if request_id else UUID4()
         cdef RequestInstrument request = RequestInstrument(
             instrument_id=instrument_id,
             start=start,
@@ -2877,12 +2885,12 @@ cdef class Actor(Component):
             client_id=client_id,
             venue=instrument_id.venue,
             callback=self._handle_instruments_response,
-            request_id=request_id,
+            request_id=used_request_id,
             ts_init=self._clock.timestamp_ns(),
             params=params,
         )
-        self._requests[request_id] = request
-        self._pending_requests[request_id] = callback
+        self._requests[used_request_id] = request
+        self._pending_requests[used_request_id] = callback
 
         self._msgbus.subscribe(
             topic=self._topic_cache.get_instrument_topic(instrument_id),
@@ -2891,7 +2899,7 @@ cdef class Actor(Component):
 
         self._send_data_req(request)
 
-        return request_id
+        return used_request_id
 
     cpdef UUID4 request_instruments(
         self,
@@ -2903,6 +2911,7 @@ cdef class Actor(Component):
         bint update_catalog = False,
         dict[str, object] params = None,
         bint join_request = False,
+        UUID4 request_id = None,
     ):
         """
         Request all `Instrument` data for the given venue.
@@ -2937,6 +2946,8 @@ cdef class Actor(Component):
             - `only_last` (default `True`) retains only the latest instrument record per instrument_id, based on the most recent ts_init.
         join_request: bool, optional, default to False
             If a request should be joined and sorted with another one by using request_join.
+        request_id : UUID4, optional
+            The UUID to use for the request ID. If `None`, a new UUID will be generated.
 
         Returns
         -------
@@ -2974,19 +2985,19 @@ cdef class Actor(Component):
         params["update_catalog"] = update_catalog
         params["join_request"] = join_request
 
-        cdef UUID4 request_id = UUID4()
+        cdef UUID4 used_request_id = request_id if request_id else UUID4()
         cdef RequestInstruments request = RequestInstruments(
             start=start,
             end=end,
             client_id=client_id,
             venue=venue,
             callback=self._handle_instruments_response,
-            request_id=request_id,
+            request_id=used_request_id,
             ts_init=self._clock.timestamp_ns(),
             params=params,
         )
-        self._requests[request_id] = request
-        self._pending_requests[request_id] = callback
+        self._requests[used_request_id] = request
+        self._pending_requests[used_request_id] = callback
 
         self._msgbus.subscribe(
             topic=self._topic_cache.get_instruments_topic(venue),
@@ -2995,7 +3006,7 @@ cdef class Actor(Component):
 
         self._send_data_req(request)
 
-        return request_id
+        return used_request_id
 
     cpdef UUID4 request_order_book_snapshot(
         self,
@@ -3005,6 +3016,7 @@ cdef class Actor(Component):
         callback: Callable[[UUID4], None] | None = None,
         dict[str, object] params = None,
         bint join_request = False,
+        UUID4 request_id = None,
     ):
         """
         Request an order book snapshot.
@@ -3029,6 +3041,8 @@ cdef class Actor(Component):
             Additional parameters potentially used by a specific client.
         join_request: bool, optional, default to False
             If a request should be joined and sorted with another one by using request_join.
+        request_id : UUID4, optional
+            The UUID to use for the request ID. If `None`, a new UUID will be generated.
 
         Returns
         -------
@@ -3050,21 +3064,28 @@ cdef class Actor(Component):
         params = params or {}
         params["join_request"] = join_request
 
-        cdef UUID4 request_id = UUID4()
+        cdef UUID4 used_request_id = request_id if request_id else UUID4()
         cdef RequestOrderBookSnapshot request = RequestOrderBookSnapshot(
             instrument_id=instrument_id,
             limit=limit,
             client_id=client_id,
             venue=instrument_id.venue,
-            callback=self._handle_data_response,
-            request_id=request_id,
+            callback=self._handle_order_book_snapshot_response,
+            request_id=used_request_id,
             ts_init=self._clock.timestamp_ns(),
             params=params,
         )
-        self._pending_requests[request_id] = callback
+        self._requests[used_request_id] = request
+        self._pending_requests[used_request_id] = callback
+
+        self._msgbus.subscribe(
+            topic=self._topic_cache.get_deltas_topic(instrument_id, historical=True),
+            handler=self.handle_historical_data,
+        )
+
         self._send_data_req(request)
 
-        return request_id
+        return used_request_id
 
     cpdef UUID4 request_order_book_depth(
         self,
@@ -3078,6 +3099,7 @@ cdef class Actor(Component):
         bint update_catalog = False,
         dict[str, object] params = None,
         bint join_request = False,
+        UUID4 request_id = None,
     ):
         """
         Request historical `OrderBookDepth10` snapshots.
@@ -3111,6 +3133,8 @@ cdef class Actor(Component):
             Additional parameters potentially used by a specific client.
         join_request: bool, optional, default to False
             If a request should be joined and sorted with another one by using request_join.
+        request_id : UUID4, optional
+            The UUID to use for the request ID. If `None`, a new UUID will be generated.
 
         Returns
         -------
@@ -3135,7 +3159,7 @@ cdef class Actor(Component):
         params["update_catalog"] = update_catalog
         params["join_request"] = join_request
 
-        cdef UUID4 request_id = UUID4()
+        cdef UUID4 used_request_id = request_id if request_id else UUID4()
         cdef RequestOrderBookDepth request = RequestOrderBookDepth(
             instrument_id=instrument_id,
             start=start,
@@ -3145,12 +3169,12 @@ cdef class Actor(Component):
             client_id=client_id,
             venue=instrument_id.venue,
             callback=self._handle_order_book_depth_response,
-            request_id=request_id,
+            request_id=used_request_id,
             ts_init=self._clock.timestamp_ns(),
             params=params,
         )
-        self._requests[request_id] = request
-        self._pending_requests[request_id] = callback
+        self._requests[used_request_id] = request
+        self._pending_requests[used_request_id] = callback
 
         self._msgbus.subscribe(
             topic=self._topic_cache.get_depth_topic(instrument_id, historical=True),
@@ -3159,7 +3183,7 @@ cdef class Actor(Component):
 
         self._send_data_req(request)
 
-        return request_id
+        return used_request_id
 
     cpdef UUID4 request_quote_ticks(
         self,
@@ -3172,6 +3196,7 @@ cdef class Actor(Component):
         bint update_catalog = False,
         dict[str, object] params = None,
         bint join_request = False,
+        UUID4 request_id = None,
     ):
         """
         Request historical `QuoteTick` data.
@@ -3208,6 +3233,8 @@ cdef class Actor(Component):
             Additional parameters potentially used by a specific client.
         join_request: bool, optional, default to False
             If a request should be joined and sorted with another one by using request_join.
+        request_id : UUID4, optional
+            The UUID to use for the request ID. If `None`, a new UUID will be generated.
 
         Returns
         -------
@@ -3238,7 +3265,7 @@ cdef class Actor(Component):
         params["update_catalog"] = update_catalog
         params["join_request"] = join_request
 
-        cdef UUID4 request_id = UUID4()
+        cdef UUID4 used_request_id = request_id if request_id else UUID4()
         cdef RequestQuoteTicks request = RequestQuoteTicks(
             instrument_id=instrument_id,
             start=start,
@@ -3247,12 +3274,12 @@ cdef class Actor(Component):
             client_id=client_id,
             venue=instrument_id.venue,
             callback=self._handle_quote_ticks_response,
-            request_id=request_id,
+            request_id=used_request_id,
             ts_init=self._clock.timestamp_ns(),
             params=params,
         )
-        self._requests[request_id] = request
-        self._pending_requests[request_id] = callback
+        self._requests[used_request_id] = request
+        self._pending_requests[used_request_id] = callback
 
         self._msgbus.subscribe(
             topic=self._topic_cache.get_quotes_topic(instrument_id, historical=True),
@@ -3261,7 +3288,7 @@ cdef class Actor(Component):
 
         self._send_data_req(request)
 
-        return request_id
+        return used_request_id
 
     cpdef UUID4 request_trade_ticks(
         self,
@@ -3274,6 +3301,7 @@ cdef class Actor(Component):
         bint update_catalog = False,
         dict[str, object] params = None,
         bint join_request = False,
+        UUID4 request_id = None,
     ):
         """
         Request historical `TradeTick` data.
@@ -3308,6 +3336,10 @@ cdef class Actor(Component):
             Whether to update a catalog with the received data.
         params : dict[str, Any], optional
             Additional parameters potentially used by a specific client.
+        join_request: bool, optional, default to False
+            If a request should be joined and sorted with another one by using request_join.
+        request_id : UUID4, optional
+            The UUID to use for the request ID. If `None`, a new UUID will be generated.
 
         Returns
         -------
@@ -3338,7 +3370,7 @@ cdef class Actor(Component):
         params["update_catalog"] = update_catalog
         params["join_request"] = join_request
 
-        cdef UUID4 request_id = UUID4()
+        cdef UUID4 used_request_id = request_id if request_id else UUID4()
         cdef RequestTradeTicks request = RequestTradeTicks(
             instrument_id=instrument_id,
             start=start,
@@ -3347,12 +3379,12 @@ cdef class Actor(Component):
             client_id=client_id,
             venue=instrument_id.venue,
             callback=self._handle_trade_ticks_response,
-            request_id=request_id,
+            request_id=used_request_id,
             ts_init=self._clock.timestamp_ns(),
             params=params,
         )
-        self._requests[request_id] = request
-        self._pending_requests[request_id] = callback
+        self._requests[used_request_id] = request
+        self._pending_requests[used_request_id] = callback
 
         self._msgbus.subscribe(
             topic=self._topic_cache.get_trades_topic(instrument_id, historical=True),
@@ -3361,7 +3393,7 @@ cdef class Actor(Component):
 
         self._send_data_req(request)
 
-        return request_id
+        return used_request_id
 
     cpdef UUID4 request_bars(
         self,
@@ -3374,6 +3406,7 @@ cdef class Actor(Component):
         bint update_catalog = False,
         dict[str, object] params = None,
         bint join_request = False,
+        UUID4 request_id = None,
     ):
         """
         Request historical `Bar` data.
@@ -3410,6 +3443,8 @@ cdef class Actor(Component):
             Additional parameters potentially used by a specific client.
         join_request: bool, optional, default to False
             If a request should be joined and sorted with another one by using request_join.
+        request_id : UUID4, optional
+            The UUID to use for the request ID. If `None`, a new UUID will be generated.
 
         Returns
         -------
@@ -3441,7 +3476,7 @@ cdef class Actor(Component):
         params["update_catalog"] = update_catalog
         params["join_request"] = join_request
 
-        cdef UUID4 request_id = UUID4()
+        cdef UUID4 used_request_id = request_id if request_id else UUID4()
         cdef BarType standard_bar_type = bar_type.standard()
         cdef RequestBars request = RequestBars(
             bar_type=bar_type,
@@ -3451,12 +3486,12 @@ cdef class Actor(Component):
             client_id=client_id,
             venue=bar_type.instrument_id.venue,
             callback=self._handle_bars_response,
-            request_id=request_id,
+            request_id=used_request_id,
             ts_init=self._clock.timestamp_ns(),
             params=params,
         )
-        self._requests[request_id] = request
-        self._pending_requests[request_id] = callback
+        self._requests[used_request_id] = request
+        self._pending_requests[used_request_id] = callback
 
         self._msgbus.subscribe(
             topic=self._topic_cache.get_bars_topic(standard_bar_type, historical=True),
@@ -3465,7 +3500,7 @@ cdef class Actor(Component):
 
         self._send_data_req(request)
 
-        return request_id
+        return used_request_id
 
     cpdef UUID4 request_aggregated_bars(
         self,
@@ -3479,6 +3514,7 @@ cdef class Actor(Component):
         bint update_subscriptions = False,
         bint update_catalog = False,
         dict[str, object] params = None,
+        UUID4 request_id = None,
     ):
         """
         Request historical aggregated `Bar` data for multiple bar types.
@@ -3524,6 +3560,8 @@ cdef class Actor(Component):
             Whether to update a catalog with the received data.
         params : dict[str, Any], optional
             Additional parameters potentially used by a specific client.
+        request_id : UUID4, optional
+            The UUID to use for the request ID. If `None`, a new UUID will be generated.
 
         Returns
         -------
@@ -3567,7 +3605,7 @@ cdef class Actor(Component):
                 self._log.error(f"request_aggregated_bars: {bar_type} must be internally aggregated")
                 return
 
-        cdef UUID4 request_id = UUID4()
+        cdef UUID4 used_request_id = request_id if request_id else UUID4()
         cdef BarType first_bar_type = bar_types[0]
 
         params = params or {}
@@ -3592,7 +3630,7 @@ cdef class Actor(Component):
                 client_id=client_id,
                 venue=first_bar_type.instrument_id.venue,
                 callback=self._handle_aggregated_bars_response,
-                request_id=request_id,
+                request_id=used_request_id,
                 ts_init=self._clock.timestamp_ns(),
                 params=params,
             )
@@ -3611,7 +3649,7 @@ cdef class Actor(Component):
                 client_id=client_id,
                 venue=first_bar_type.instrument_id.venue,
                 callback=self._handle_aggregated_bars_response,
-                request_id=request_id,
+                request_id=used_request_id,
                 ts_init=self._clock.timestamp_ns(),
                 params=params,
             )
@@ -3630,7 +3668,7 @@ cdef class Actor(Component):
                 client_id=client_id,
                 venue=first_bar_type.instrument_id.venue,
                 callback=self._handle_aggregated_bars_response,
-                request_id=request_id,
+                request_id=used_request_id,
                 ts_init=self._clock.timestamp_ns(),
                 params=params,
             )
@@ -3641,10 +3679,10 @@ cdef class Actor(Component):
                     handler=self.handle_historical_quote_tick,
                 )
 
-        self._pending_requests[request_id] = callback
+        self._pending_requests[used_request_id] = callback
         self._send_data_req(request)
 
-        return request_id
+        return used_request_id
 
     cpdef UUID4 request_join(
         self,
@@ -3655,6 +3693,7 @@ cdef class Actor(Component):
         Venue venue = None,
         callback: Callable[[UUID4], None] | None = None,
         dict[str, object] params = None,
+        UUID4 request_id = None,
     ):
         """
         Request a join of multiple data requests.
@@ -3680,7 +3719,8 @@ cdef class Actor(Component):
             completed processing.
         params : dict[str, Any], optional
             Additional parameters for the request.
-
+        request_id : UUID4, optional
+            The UUID to use for the request ID. If `None`, a new UUID will be generated.
 
         Returns
         -------
@@ -3703,20 +3743,20 @@ cdef class Actor(Component):
 
         params = params or {}
 
-        cdef UUID4 request_id = UUID4()
+        cdef UUID4 used_request_id = request_id if request_id else UUID4()
         cdef RequestJoin request = RequestJoin(
             request_ids=request_ids,
             start=start,
             end=end,
             callback=self._handle_join_response,
-            request_id=request_id,
+            request_id=used_request_id,
             ts_init=self._clock.timestamp_ns(),
             params=params,
         )
-        self._pending_requests[request_id] = callback
+        self._pending_requests[used_request_id] = callback
         self._send_data_req(request)
 
-        return request_id
+        return used_request_id
 
     cpdef bint is_pending_request(self, UUID4 request_id):
         """
@@ -4318,6 +4358,24 @@ cdef class Actor(Component):
             self._log.info(f"Received <OrderBookDepth10[{length}]> data for {instrument_id}")
         else:
             self._log.warning(f"Received <OrderBookDepth10[]> data with no ticks for {instrument_id}")
+
+        self._finish_response(response.correlation_id)
+
+    cpdef void _handle_order_book_snapshot_response(self, DataResponse response):
+        cdef RequestOrderBookSnapshot request = self._requests.pop(response.correlation_id, None)
+        if request is not None:
+            self._msgbus.unsubscribe(
+                topic=self._topic_cache.get_deltas_topic(request.instrument_id, historical=True),
+                handler=self.handle_historical_data,
+            )
+
+        cdef int length = response.params.get("data_count", 0)
+        cdef InstrumentId instrument_id = request.instrument_id
+
+        if length > 0:
+            self._log.info(f"Received <OrderBookDeltas[{length}]> data for {instrument_id}")
+        else:
+            self._log.warning(f"Received <OrderBookDeltas[]> data with no deltas for {instrument_id}")
 
         self._finish_response(response.correlation_id)
 

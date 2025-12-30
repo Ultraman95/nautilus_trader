@@ -4570,23 +4570,25 @@ class WebSocketConfig:
     def __init__(
         self,
         url: str,
-        handler: Callable[..., Any],
         headers: list[tuple[str, str]],
         heartbeat: int | None = None,
         heartbeat_msg: str | None = None,
-        ping_handler: Callable[..., Any] | None = None,
         reconnect_timeout_ms: int | None = 10_000,
         reconnect_delay_initial_ms: int | None = 2_000,
         reconnect_delay_max_ms: int | None = 30_000,
         reconnect_backoff_factor: float | None = 1.5,
         reconnect_jitter_ms: int | None = 100,
+        reconnect_max_attempts: int | None = None,
     ) -> None: ...
 
 class WebSocketClient:
     @classmethod
     def connect(
         cls,
+        loop_: Any,
         config: WebSocketConfig,
+        handler: Callable[..., Any],
+        ping_handler: Callable[..., Any] | None = None,
         post_reconnection: Callable[..., None] | None = None,
         keyed_quotas: list[tuple[str, Quota]] = [],
         default_quota: Quota | None = None,
@@ -6322,6 +6324,7 @@ class BybitWebSocketClient:
     def is_closed(self) -> bool: ...
     def set_account_id(self, account_id: AccountId) -> None: ...
     def set_mm_level(self, mm_level: int) -> None: ...
+    def set_bars_timestamp_on_close(self, value: bool) -> None: ...
     def cache_instrument(self, instrument: Instrument) -> None: ...
     async def connect(self, callback: Any) -> None: ...
     async def close(self) -> None: ...
@@ -6570,6 +6573,14 @@ class DatabentoStatistics:
     def ts_recv(self) -> int: ...
     @property
     def ts_init(self) -> int: ...
+
+class DatabentoSubscriptionAck:
+    @property
+    def schema(self) -> str: ...
+    @property
+    def message(self) -> str: ...
+    @property
+    def ts_received(self) -> int: ...
 
 class DatabentoDataLoader:
     def __init__(
@@ -6832,6 +6843,162 @@ class DatabentoLiveClient:
         callback_pyo3: Callable,
     ) -> Awaitable[None]: ...
     def close(self) -> None: ...
+
+# Deribit
+
+class DeribitHttpClient:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        base_url: str | None = None,
+        is_testnet: bool = False,
+        timeout_secs: int | None = None,
+        max_retries: int | None = None,
+        retry_delay_ms: int | None = None,
+        retry_delay_max_ms: int | None = None,
+        proxy_url: str | None = None,
+    ) -> None: ...
+    @property
+    def is_testnet(self) -> bool: ...
+    def is_initialized(self) -> bool: ...
+    def cache_instruments(self, instruments: list[Instrument]) -> None: ...
+    def cache_instrument(self, instrument: Instrument) -> None: ...
+    async def request_instruments(
+        self,
+        currency: DeribitCurrency,
+        kind: DeribitInstrumentKind | None = None,
+    ) -> list[Instrument]: ...
+    async def request_instrument(self, instrument_id: InstrumentId) -> Instrument: ...
+    async def request_trades(
+        self,
+        instrument_id: InstrumentId,
+        start: dt.datetime | None = None,
+        end: dt.datetime | None = None,
+        limit: int | None = None,
+    ) -> list[TradeTick]: ...
+    async def request_bars(
+        self,
+        bar_type: BarType,
+        start: dt.datetime | None = None,
+        end: dt.datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Bar]: ...
+    async def request_book_snapshot(
+        self,
+        instrument_id: InstrumentId,
+        depth: int | None = None,
+    ) -> OrderBook: ...
+    async def request_account_state(self, account_id: AccountId) -> AccountState: ...
+
+class DeribitWebSocketClient:
+    def __init__(
+        self,
+        url: str | None = None,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        heartbeat_interval: int | None = None,
+        is_testnet: bool = False,
+    ) -> None: ...
+    @staticmethod
+    def new_public(is_testnet: bool) -> DeribitWebSocketClient: ...
+    @staticmethod
+    def with_credentials(is_testnet: bool) -> DeribitWebSocketClient: ...
+    @property
+    def url(self) -> str: ...
+    @property
+    def is_testnet(self) -> bool: ...
+    def is_active(self) -> bool: ...
+    def is_closed(self) -> bool: ...
+    def has_credentials(self) -> bool: ...
+    def is_authenticated(self) -> bool: ...
+    def cancel_all_requests(self) -> None: ...
+    def cache_instruments(self, instruments: list[Instrument]) -> None: ...
+    def cache_instrument(self, instrument: Instrument) -> None: ...
+    async def connect(
+        self,
+        instruments: list[Instrument],
+        callback: Callable,
+    ) -> None: ...
+    async def wait_until_active(self, timeout_secs: float) -> None: ...
+    async def close(self) -> None: ...
+    async def authenticate(self, session_name: str | None = None) -> None: ...
+    async def authenticate_session(self) -> None: ...
+    async def subscribe_trades(
+        self,
+        instrument_id: InstrumentId,
+        interval: DeribitUpdateInterval | None = None,
+    ) -> None: ...
+    async def subscribe_trades_raw(self, instrument_id: InstrumentId) -> None: ...
+    async def unsubscribe_trades(
+        self,
+        instrument_id: InstrumentId,
+        interval: DeribitUpdateInterval | None = None,
+    ) -> None: ...
+    async def subscribe_book(
+        self,
+        instrument_id: InstrumentId,
+        interval: DeribitUpdateInterval | None = None,
+    ) -> None: ...
+    async def subscribe_book_raw(self, instrument_id: InstrumentId) -> None: ...
+    async def unsubscribe_book(
+        self,
+        instrument_id: InstrumentId,
+        interval: DeribitUpdateInterval | None = None,
+    ) -> None: ...
+    async def subscribe_ticker(
+        self,
+        instrument_id: InstrumentId,
+        interval: DeribitUpdateInterval | None = None,
+    ) -> None: ...
+    async def subscribe_ticker_raw(self, instrument_id: InstrumentId) -> None: ...
+    async def unsubscribe_ticker(
+        self,
+        instrument_id: InstrumentId,
+        interval: DeribitUpdateInterval | None = None,
+    ) -> None: ...
+    async def subscribe_quotes(self, instrument_id: InstrumentId) -> None: ...
+    async def unsubscribe_quotes(self, instrument_id: InstrumentId) -> None: ...
+    async def subscribe(self, channels: list[str]) -> None: ...
+    async def unsubscribe(self, channels: list[str]) -> None: ...
+
+def get_deribit_http_base_url(is_testnet: bool) -> str: ...
+def get_deribit_ws_url(is_testnet: bool) -> str: ...
+
+class DeribitCurrency(Enum):
+    BTC = "BTC"
+    ETH = "ETH"
+    USDC = "USDC"
+    USDT = "USDT"
+    EURR = "EURR"
+    ANY = "ANY"
+
+class DeribitInstrumentKind(Enum):
+    FUTURE = "FUTURE"
+    OPTION = "OPTION"
+    SPOT = "SPOT"
+    FUTURE_COMBO = "FUTURE_COMBO"
+    OPTION_COMBO = "OPTION_COMBO"
+
+class DeribitOptionType(Enum):
+    CALL = "CALL"
+    PUT = "PUT"
+
+class DeribitUpdateInterval(Enum):
+    RAW = "RAW"
+    MS100 = "MS100"
+    AGG2 = "AGG2"
+
+class DeribitWsChannel(Enum):
+    TRADES = "TRADES"
+    BOOK = "BOOK"
+    TICKER = "TICKER"
+    QUOTE = "QUOTE"
+    PRICE_INDEX = "PRICE_INDEX"
+    PRICE_RANKING = "PRICE_RANKING"
+    VOLATILITY_INDEX = "VOLATILITY_INDEX"
+    ESTIMATED_EXPIRATION_PRICE = "ESTIMATED_EXPIRATION_PRICE"
+    PERPETUAL = "PERPETUAL"
 
 # Tardis
 

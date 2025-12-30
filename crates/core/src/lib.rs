@@ -37,7 +37,7 @@
 //! NautilusTrader's design, architecture, and implementation philosophy prioritizes software correctness and safety at the
 //! highest level, with the aim of supporting mission-critical, trading system backtesting and live deployment workloads.
 //!
-//! # Feature flags
+//! # Feature Flags
 //!
 //! This crate provides feature flags to control source code inclusion during compilation,
 //! depending on the intended use case, i.e. whether to provide Python bindings
@@ -62,9 +62,11 @@ pub mod correctness;
 pub mod datetime;
 pub mod drop;
 pub mod env;
+pub mod formatting;
 pub mod math;
 pub mod message;
 pub mod nanos;
+pub mod stack_str;
 
 pub mod parsing;
 pub mod paths;
@@ -88,6 +90,7 @@ pub use crate::{
     drop::CleanDrop,
     nanos::UnixNanos,
     shared::{SharedCell, WeakCell},
+    stack_str::{STACKSTR_CAPACITY, StackStr},
     time::AtomicTime,
     uuid::UUID4,
 };

@@ -40,7 +40,7 @@
 
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU32, AtomicU64},
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 use anyhow::Context;
@@ -72,6 +72,7 @@ use nautilus_model::{
     reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
     types::{AccountBalance, MarginBalance},
 };
+use nautilus_network::retry::RetryConfig;
 use rust_decimal::Decimal;
 use tokio::task::JoinHandle;
 
@@ -127,8 +128,8 @@ pub struct DydxExecutionClient {
     instruments: DashMap<InstrumentId, InstrumentAny>,
     market_to_instrument: DashMap<String, InstrumentId>,
     clob_pair_id_to_instrument: DashMap<u32, InstrumentId>,
-    block_height: AtomicU64,
-    oracle_prices: DashMap<InstrumentId, Decimal>,
+    block_height: Arc<AtomicU64>,
+    oracle_prices: Arc<DashMap<InstrumentId, Decimal>>,
     client_id_to_int: DashMap<String, u32>,
     int_to_client_id: DashMap<u32, String>,
     next_client_id: AtomicU32,
@@ -153,7 +154,20 @@ impl DydxExecutionClient {
         wallet_address: String,
         subaccount_number: u32,
     ) -> anyhow::Result<Self> {
-        let http_client = DydxHttpClient::default();
+        // Build HTTP client from config (respects testnet URLs, timeouts, retries)
+        let retry_config = RetryConfig {
+            max_retries: config.max_retries,
+            initial_delay_ms: config.retry_delay_initial_ms,
+            max_delay_ms: config.retry_delay_max_ms,
+            ..Default::default()
+        };
+        let http_client = DydxHttpClient::new(
+            Some(config.base_url.clone()),
+            Some(config.timeout_secs),
+            None, // proxy_url - not in DydxAdapterConfig currently
+            config.is_testnet,
+            Some(retry_config),
+        )?;
 
         // Use private WebSocket client for authenticated subaccount subscriptions
         let ws_client = if let Some(ref mnemonic) = config.mnemonic {
@@ -189,8 +203,8 @@ impl DydxExecutionClient {
             instruments: DashMap::new(),
             market_to_instrument: DashMap::new(),
             clob_pair_id_to_instrument: DashMap::new(),
-            block_height: AtomicU64::new(0),
-            oracle_prices: DashMap::new(),
+            block_height: Arc::new(AtomicU64::new(0)),
+            oracle_prices: Arc::new(DashMap::new()),
             client_id_to_int: DashMap::new(),
             int_to_client_id: DashMap::new(),
             next_client_id: AtomicU32::new(1),
@@ -374,7 +388,7 @@ impl DydxExecutionClient {
     where
         F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
     {
-        let handle = tokio::spawn(async move {
+        let handle = get_runtime().spawn(async move {
             if let Err(e) = fut.await {
                 tracing::error!("{label}: {e:?}");
             }
@@ -404,7 +418,7 @@ impl DydxExecutionClient {
         let account_id = self.core.account_id;
         let sender = get_exec_event_sender();
 
-        let handle = tokio::spawn(async move {
+        let handle = get_runtime().spawn(async move {
             if let Err(e) = fut.await {
                 let error_msg = format!("{label} failed: {e:?}");
                 tracing::error!("{}", error_msg);
@@ -532,6 +546,26 @@ impl ExecutionClient for DydxExecutionClient {
             let reason = "Cannot submit order: execution client not connected";
             tracing::error!("{}", reason);
             anyhow::bail!(reason);
+        }
+
+        // Check block height is available for short-term orders
+        let current_block = self.block_height.load(Ordering::Relaxed);
+        if current_block == 0 {
+            let reason = "Block height not initialized";
+            tracing::warn!(
+                "Cannot submit order {}: {}",
+                order.client_order_id(),
+                reason
+            );
+            self.core.generate_order_rejected(
+                order.strategy_id(),
+                order.instrument_id(),
+                order.client_order_id(),
+                reason,
+                cmd.ts_init,
+                false,
+            );
+            return Ok(());
         }
 
         // Check if order is already closed
@@ -1207,8 +1241,9 @@ impl ExecutionClient for DydxExecutionClient {
                 let instruments = self.instruments.clone();
                 let oracle_prices = self.oracle_prices.clone();
                 let clob_pair_id_to_instrument = self.clob_pair_id_to_instrument.clone();
+                let block_height = self.block_height.clone();
 
-                let handle = tokio::spawn(async move {
+                let handle = get_runtime().spawn(async move {
                     while let Some(msg) = rx.recv().await {
                         match msg {
                             NautilusWsMessage::Order(report) => {
@@ -1448,6 +1483,10 @@ impl ExecutionClient for DydxExecutionClient {
                                         }
                                     }
                                 }
+                            }
+                            NautilusWsMessage::BlockHeight(height) => {
+                                tracing::debug!("Block height update: {}", height);
+                                block_height.store(height, std::sync::atomic::Ordering::Relaxed);
                             }
                             NautilusWsMessage::Error(err) => {
                                 tracing::error!("WebSocket error: {:?}", err);

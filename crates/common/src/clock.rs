@@ -28,8 +28,8 @@ use chrono::{DateTime, Utc};
 use nautilus_core::{
     AtomicTime, UnixNanos,
     correctness::{check_positive_u64, check_predicate_true, check_valid_string_utf8},
+    formatting::Separable,
 };
-use thousands::Separable;
 use ustr::Ustr;
 
 use crate::timer::{
@@ -458,10 +458,9 @@ impl TestClock {
 
         let from_time_ns = self.time.get_time_ns();
 
-        // Time should be non-decreasing
         assert!(
             to_time_ns >= from_time_ns,
-            "`to_time_ns` {to_time_ns} was < `from_time_ns` {from_time_ns}"
+            "Invariant violated: time must be non-decreasing, `to_time_ns` {to_time_ns} < `from_time_ns` {from_time_ns}"
         );
 
         if set_time {
@@ -510,10 +509,9 @@ impl TestClock {
 
         let from_time_ns = self.time.get_time_ns();
 
-        // Time should be non-decreasing
         assert!(
             to_time_ns >= from_time_ns,
-            "`to_time_ns` {to_time_ns} was < `from_time_ns` {from_time_ns}"
+            "Invariant violated: time must be non-decreasing, `to_time_ns` {to_time_ns} < `from_time_ns` {from_time_ns}"
         );
 
         self.time.set_time(to_time_ns);

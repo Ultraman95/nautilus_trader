@@ -92,3 +92,100 @@ impl GetAccountSummariesParams {
         }
     }
 }
+
+/// Query parameters for `/public/get_last_trades_by_instrument_and_time` endpoint.
+#[derive(Clone, Debug, Deserialize, Serialize, Builder)]
+#[builder(setter(into, strip_option))]
+pub struct GetLastTradesByInstrumentAndTimeParams {
+    /// Instrument name (e.g., "BTC-PERPETUAL")
+    pub instrument_name: String,
+    /// The earliest timestamp to return result from (milliseconds since the UNIX epoch)
+    pub start_timestamp: i64,
+    /// The most recent timestamp to return result from (milliseconds since the UNIX epoch)
+    pub end_timestamp: i64,
+    /// Number of requested items, default - 10, maximum - 1000
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub count: Option<u32>,
+    /// Direction of results sorting: "asc", "desc", or "default"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub sorting: Option<String>,
+}
+
+impl GetLastTradesByInstrumentAndTimeParams {
+    /// Creates a new instance with the required parameters.
+    #[must_use]
+    pub fn new(
+        instrument_name: impl Into<String>,
+        start_timestamp: i64,
+        end_timestamp: i64,
+        count: Option<u32>,
+        sorting: Option<String>,
+    ) -> Self {
+        Self {
+            instrument_name: instrument_name.into(),
+            start_timestamp,
+            end_timestamp,
+            count,
+            sorting,
+        }
+    }
+}
+
+/// Query parameters for `/public/get_tradingview_chart_data` endpoint.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GetTradingViewChartDataParams {
+    /// Instrument name (e.g., "BTC-PERPETUAL")
+    pub instrument_name: String,
+    /// The earliest timestamp to return result from (milliseconds since UNIX epoch)
+    pub start_timestamp: i64,
+    /// The most recent timestamp to return result from (milliseconds since UNIX epoch)
+    pub end_timestamp: i64,
+    /// Chart bars resolution given in full minutes or keyword "1D"
+    /// Supported resolutions: 1, 3, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1D
+    pub resolution: String,
+}
+
+impl GetTradingViewChartDataParams {
+    /// Creates new parameters for chart data request.
+    #[must_use]
+    pub fn new(
+        instrument_name: String,
+        start_timestamp: i64,
+        end_timestamp: i64,
+        resolution: String,
+    ) -> Self {
+        Self {
+            instrument_name,
+            start_timestamp,
+            end_timestamp,
+            resolution,
+        }
+    }
+}
+
+/// Query parameters for `/public/get_order_book` endpoint.
+#[derive(Clone, Debug, Deserialize, Serialize, Builder)]
+#[builder(setter(into, strip_option))]
+pub struct GetOrderBookParams {
+    /// Instrument name (e.g., "BTC-PERPETUAL")
+    pub instrument_name: String,
+    /// The number of entries to return for bids and asks.
+    /// Valid values: 1, 5, 10, 20, 50, 100, 1000, 10000
+    /// Maximum: 10000
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub depth: Option<u32>,
+}
+
+impl GetOrderBookParams {
+    /// Creates parameters with required fields.
+    #[must_use]
+    pub fn new(instrument_name: String, depth: Option<u32>) -> Self {
+        Self {
+            instrument_name,
+            depth,
+        }
+    }
+}

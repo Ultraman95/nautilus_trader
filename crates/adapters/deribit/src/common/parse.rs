@@ -18,14 +18,22 @@
 use std::str::FromStr;
 
 use anyhow::Context;
-use nautilus_core::{datetime::NANOSECONDS_IN_MICROSECOND, nanos::UnixNanos, uuid::UUID4};
+use nautilus_core::{
+    datetime::{NANOSECONDS_IN_MICROSECOND, NANOSECONDS_IN_MILLISECOND},
+    nanos::UnixNanos,
+    uuid::UUID4,
+};
 use nautilus_model::{
-    enums::{AccountType, AssetClass, CurrencyType, OptionKind},
+    data::{Bar, BarType, BookOrder, TradeTick},
+    enums::{
+        AccountType, AggressorSide, AssetClass, BookType, CurrencyType, OptionKind, OrderSide,
+    },
     events::AccountState,
-    identifiers::{AccountId, InstrumentId, Symbol, Venue},
+    identifiers::{AccountId, InstrumentId, Symbol, TradeId, Venue},
     instruments::{
         CryptoFuture, CryptoPerpetual, CurrencyPair, OptionContract, any::InstrumentAny,
     },
+    orderbook::OrderBook,
     types::{AccountBalance, Currency, MarginBalance, Money, Price, Quantity},
 };
 use rust_decimal::Decimal;
@@ -34,6 +42,7 @@ use crate::{
     common::consts::DERIBIT_VENUE,
     http::models::{
         DeribitAccountSummary, DeribitInstrument, DeribitInstrumentKind, DeribitOptionType,
+        DeribitOrderBook, DeribitPublicTrade, DeribitTradingViewChartData,
     },
 };
 
@@ -110,6 +119,7 @@ fn parse_spot_instrument(
 
     let price_increment = Price::from(instrument.tick_size.to_string().as_str());
     let size_increment = Quantity::from(instrument.min_trade_amount.to_string().as_str());
+    let min_quantity = Quantity::from(instrument.min_trade_amount.to_string().as_str());
 
     let maker_fee = Decimal::from_str(&instrument.maker_commission.to_string())
         .context("Failed to parse maker_commission")?;
@@ -128,7 +138,7 @@ fn parse_spot_instrument(
         None, // multiplier
         None, // lot_size
         None, // max_quantity
-        None, // min_quantity
+        Some(min_quantity),
         None, // max_notional
         None, // min_notional
         None, // max_price
@@ -177,6 +187,7 @@ fn parse_perpetual_instrument(
 
     let price_increment = Price::from(instrument.tick_size.to_string().as_str());
     let size_increment = Quantity::from(instrument.min_trade_amount.to_string().as_str());
+    let min_quantity = Quantity::from(instrument.min_trade_amount.to_string().as_str());
 
     // Contract size represents the multiplier (e.g., 10 USD per contract for BTC-PERPETUAL)
     let multiplier = Some(Quantity::from(
@@ -203,7 +214,7 @@ fn parse_perpetual_instrument(
         multiplier,
         lot_size,
         None, // max_quantity - Deribit doesn't specify a hard max
-        None, // min_quantity
+        Some(min_quantity),
         None, // max_notional
         None, // min_notional
         None, // max_price
@@ -259,6 +270,7 @@ fn parse_future_instrument(
 
     let price_increment = Price::from(instrument.tick_size.to_string().as_str());
     let size_increment = Quantity::from(instrument.min_trade_amount.to_string().as_str());
+    let min_quantity = Quantity::from(instrument.min_trade_amount.to_string().as_str());
 
     // Contract size represents the multiplier
     let multiplier = Some(Quantity::from(
@@ -287,7 +299,7 @@ fn parse_future_instrument(
         multiplier,
         lot_size,
         None, // max_quantity - Deribit doesn't specify a hard max
-        None, // min_quantity
+        Some(min_quantity),
         None, // max_notional
         None, // min_notional
         None, // max_price
@@ -343,6 +355,7 @@ fn parse_option_instrument(
     // Contract size is the multiplier (e.g., 1.0 for BTC options)
     let multiplier = Quantity::from(instrument.contract_size.to_string().as_str());
     let lot_size = Quantity::from(instrument.min_trade_amount.to_string().as_str());
+    let min_quantity = Quantity::from(instrument.min_trade_amount.to_string().as_str());
 
     let maker_fee = Decimal::from_str(&instrument.maker_commission.to_string())
         .context("Failed to parse maker_commission")?;
@@ -365,7 +378,7 @@ fn parse_option_instrument(
         multiplier,
         lot_size,
         None, // max_quantity
-        None, // min_quantity
+        Some(min_quantity),
         None, // max_price
         None, // min_price
         None, // margin_init
@@ -472,6 +485,153 @@ pub fn parse_account_state(
     ))
 }
 
+// Parses a Deribit public trade into a Nautilus [`TradeTick`].
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The direction is not "buy" or "sell"
+/// - Decimal conversion fails for price or size
+pub fn parse_trade_tick(
+    trade: &DeribitPublicTrade,
+    instrument_id: InstrumentId,
+    price_precision: u8,
+    size_precision: u8,
+    ts_init: UnixNanos,
+) -> anyhow::Result<TradeTick> {
+    // Parse aggressor side from direction
+    let aggressor_side = match trade.direction.as_str() {
+        "buy" => AggressorSide::Buyer,
+        "sell" => AggressorSide::Seller,
+        other => anyhow::bail!("Invalid trade direction: {other}"),
+    };
+    let price = Price::new(trade.price, price_precision);
+    let size = Quantity::new(trade.amount, size_precision);
+    let ts_event = UnixNanos::from((trade.timestamp as u64) * NANOSECONDS_IN_MILLISECOND);
+    let trade_id = TradeId::new(&trade.trade_id);
+
+    Ok(TradeTick::new(
+        instrument_id,
+        price,
+        size,
+        aggressor_side,
+        trade_id,
+        ts_event,
+        ts_init,
+    ))
+}
+
+/// Parses Deribit TradingView chart data into Nautilus [`Bar`]s.
+///
+/// Converts OHLCV arrays from the `public/get_tradingview_chart_data` endpoint
+/// into a vector of [`Bar`] objects.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The status is not "ok"
+/// - Array lengths are inconsistent
+/// - No data points are present
+pub fn parse_bars(
+    chart_data: &DeribitTradingViewChartData,
+    bar_type: BarType,
+    price_precision: u8,
+    size_precision: u8,
+    ts_init: UnixNanos,
+) -> anyhow::Result<Vec<Bar>> {
+    // Check status
+    if chart_data.status != "ok" {
+        anyhow::bail!(
+            "Chart data status is '{}', expected 'ok'",
+            chart_data.status
+        );
+    }
+
+    let num_bars = chart_data.ticks.len();
+
+    // Verify array lengths match
+    anyhow::ensure!(
+        chart_data.open.len() == num_bars
+            && chart_data.high.len() == num_bars
+            && chart_data.low.len() == num_bars
+            && chart_data.close.len() == num_bars
+            && chart_data.volume.len() == num_bars,
+        "Inconsistent array lengths in chart data"
+    );
+
+    if num_bars == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut bars = Vec::with_capacity(num_bars);
+
+    for i in 0..num_bars {
+        let open = Price::new_checked(chart_data.open[i], price_precision)
+            .with_context(|| format!("Invalid open price at index {i}"))?;
+        let high = Price::new_checked(chart_data.high[i], price_precision)
+            .with_context(|| format!("Invalid high price at index {i}"))?;
+        let low = Price::new_checked(chart_data.low[i], price_precision)
+            .with_context(|| format!("Invalid low price at index {i}"))?;
+        let close = Price::new_checked(chart_data.close[i], price_precision)
+            .with_context(|| format!("Invalid close price at index {i}"))?;
+        let volume = Quantity::new_checked(chart_data.volume[i], size_precision)
+            .with_context(|| format!("Invalid volume at index {i}"))?;
+
+        // Convert timestamp from milliseconds to nanoseconds
+        let ts_event = UnixNanos::from((chart_data.ticks[i] as u64) * NANOSECONDS_IN_MILLISECOND);
+
+        let bar = Bar::new_checked(bar_type, open, high, low, close, volume, ts_event, ts_init)
+            .with_context(|| format!("Invalid OHLC bar at index {i}"))?;
+        bars.push(bar);
+    }
+
+    Ok(bars)
+}
+
+/// Parses Deribit order book data into a Nautilus [`OrderBook`].
+///
+/// Converts bids and asks from the `public/get_order_book` endpoint
+/// into an L2_MBP order book.
+///
+/// # Errors
+///
+/// Returns an error if order book creation fails.
+pub fn parse_order_book(
+    order_book_data: &DeribitOrderBook,
+    instrument_id: InstrumentId,
+    price_precision: u8,
+    size_precision: u8,
+    ts_init: UnixNanos,
+) -> anyhow::Result<OrderBook> {
+    let ts_event = UnixNanos::from((order_book_data.timestamp as u64) * NANOSECONDS_IN_MILLISECOND);
+    let mut book = OrderBook::new(instrument_id, BookType::L2_MBP);
+
+    for (idx, [price, amount]) in order_book_data.bids.iter().enumerate() {
+        let order = BookOrder::new(
+            OrderSide::Buy,
+            Price::new(*price, price_precision),
+            Quantity::new(*amount, size_precision),
+            idx as u64,
+        );
+        book.add(order, 0, idx as u64, ts_event);
+    }
+
+    let bids_len = order_book_data.bids.len();
+    for (idx, [price, amount]) in order_book_data.asks.iter().enumerate() {
+        let order = BookOrder::new(
+            OrderSide::Sell,
+            Price::new(*price, price_precision),
+            Quantity::new(*amount, size_precision),
+            (bids_len + idx) as u64,
+        );
+        book.add(order, 0, (bids_len + idx) as u64, ts_event);
+    }
+
+    book.ts_last = ts_init;
+
+    Ok(book)
+}
+
 #[cfg(test)]
 mod tests {
     use nautilus_model::instruments::Instrument;
@@ -481,7 +641,9 @@ mod tests {
     use super::*;
     use crate::{
         common::testing::load_test_json,
-        http::models::{DeribitAccountSummariesResponse, DeribitJsonRpcResponse},
+        http::models::{
+            DeribitAccountSummariesResponse, DeribitJsonRpcResponse, DeribitTradesResponse,
+        },
     };
 
     #[rstest]
@@ -514,7 +676,7 @@ mod tests {
         assert_eq!(perpetual.maker_fee(), dec!(0));
         assert_eq!(perpetual.taker_fee(), dec!(0.0005));
         assert_eq!(perpetual.max_quantity(), None);
-        assert_eq!(perpetual.min_quantity(), None);
+        assert_eq!(perpetual.min_quantity(), Some(Quantity::from("10")));
     }
 
     #[rstest]
@@ -685,6 +847,214 @@ mod tests {
         assert_eq!(
             account_state.ts_event, expected_ts_event,
             "ts_event should match server timestamp from response"
+        );
+    }
+
+    #[rstest]
+    fn test_parse_trade_tick_sell() {
+        let json_data = load_test_json("http_get_last_trades.json");
+        let response: DeribitJsonRpcResponse<DeribitTradesResponse> =
+            serde_json::from_str(&json_data).unwrap();
+        let result = response.result.expect("Test data must have result");
+
+        assert!(result.has_more, "has_more should be true");
+        assert_eq!(result.trades.len(), 10, "Should have 10 trades");
+
+        let raw_trade = &result.trades[0];
+        let instrument_id = InstrumentId::from("ETH-PERPETUAL.DERIBIT");
+        let ts_init = UnixNanos::from(1766335632425576_u64 * 1000); // from usOut
+
+        let trade = parse_trade_tick(raw_trade, instrument_id, 1, 0, ts_init)
+            .expect("Should parse trade tick");
+
+        assert_eq!(trade.instrument_id, instrument_id);
+        assert_eq!(trade.price, Price::from("2968.3"));
+        assert_eq!(trade.size, Quantity::from("1"));
+        assert_eq!(trade.aggressor_side, AggressorSide::Seller);
+        assert_eq!(trade.trade_id, TradeId::new("ETH-284830839"));
+        // timestamp 1766332040636 ms -> ns
+        assert_eq!(
+            trade.ts_event,
+            UnixNanos::from(1766332040636_u64 * 1_000_000)
+        );
+        assert_eq!(trade.ts_init, ts_init);
+    }
+
+    #[rstest]
+    fn test_parse_trade_tick_buy() {
+        let json_data = load_test_json("http_get_last_trades.json");
+        let response: DeribitJsonRpcResponse<DeribitTradesResponse> =
+            serde_json::from_str(&json_data).unwrap();
+        let result = response.result.expect("Test data must have result");
+
+        // Last trade is a buy with amount 106
+        let raw_trade = &result.trades[9];
+        let instrument_id = InstrumentId::from("ETH-PERPETUAL.DERIBIT");
+        let ts_init = UnixNanos::default();
+
+        let trade = parse_trade_tick(raw_trade, instrument_id, 1, 0, ts_init)
+            .expect("Should parse trade tick");
+
+        assert_eq!(trade.instrument_id, instrument_id);
+        assert_eq!(trade.price, Price::from("2968.3"));
+        assert_eq!(trade.size, Quantity::from("106"));
+        assert_eq!(trade.aggressor_side, AggressorSide::Buyer);
+        assert_eq!(trade.trade_id, TradeId::new("ETH-284830854"));
+    }
+
+    #[rstest]
+    fn test_parse_bars() {
+        let json_data = load_test_json("http_get_tradingview_chart_data.json");
+        let response: DeribitJsonRpcResponse<DeribitTradingViewChartData> =
+            serde_json::from_str(&json_data).unwrap();
+        let chart_data = response.result.expect("Test data must have result");
+
+        let bar_type = BarType::from("BTC-PERPETUAL.DERIBIT-1-MINUTE-LAST-EXTERNAL");
+        let ts_init = UnixNanos::from(1766487086146245_u64 * NANOSECONDS_IN_MICROSECOND);
+
+        let bars = parse_bars(&chart_data, bar_type, 1, 8, ts_init).expect("Should parse bars");
+
+        assert_eq!(bars.len(), 5, "Should parse 5 bars");
+
+        // Verify first bar
+        let first_bar = &bars[0];
+        assert_eq!(first_bar.bar_type, bar_type);
+        assert_eq!(first_bar.open, Price::from("87451.0"));
+        assert_eq!(first_bar.high, Price::from("87456.5"));
+        assert_eq!(first_bar.low, Price::from("87451.0"));
+        assert_eq!(first_bar.close, Price::from("87456.5"));
+        assert_eq!(first_bar.volume, Quantity::from("2.94375216"));
+        assert_eq!(
+            first_bar.ts_event,
+            UnixNanos::from(1766483460000_u64 * NANOSECONDS_IN_MILLISECOND)
+        );
+        assert_eq!(first_bar.ts_init, ts_init);
+
+        // Verify last bar
+        let last_bar = &bars[4];
+        assert_eq!(last_bar.open, Price::from("87456.0"));
+        assert_eq!(last_bar.high, Price::from("87456.5"));
+        assert_eq!(last_bar.low, Price::from("87456.0"));
+        assert_eq!(last_bar.close, Price::from("87456.0"));
+        assert_eq!(last_bar.volume, Quantity::from("0.1018798"));
+        assert_eq!(
+            last_bar.ts_event,
+            UnixNanos::from(1766483700000_u64 * NANOSECONDS_IN_MILLISECOND)
+        );
+    }
+
+    #[rstest]
+    fn test_parse_order_book() {
+        let json_data = load_test_json("http_get_order_book.json");
+        let response: DeribitJsonRpcResponse<DeribitOrderBook> =
+            serde_json::from_str(&json_data).unwrap();
+        let order_book_data = response.result.expect("Test data must have result");
+
+        let instrument_id = InstrumentId::from("BTC-PERPETUAL.DERIBIT");
+        let ts_init = UnixNanos::from(1766554855146274_u64 * NANOSECONDS_IN_MICROSECOND);
+
+        let book = parse_order_book(&order_book_data, instrument_id, 1, 0, ts_init)
+            .expect("Should parse order book");
+
+        // Verify book metadata
+        assert_eq!(book.instrument_id, instrument_id);
+        assert_eq!(book.book_type, BookType::L2_MBP);
+        assert_eq!(book.ts_last, ts_init);
+
+        // Verify book has both sides
+        assert!(book.has_bid(), "Book should have bids");
+        assert!(book.has_ask(), "Book should have asks");
+
+        // Verify best bid using OrderBook methods
+        assert_eq!(
+            book.best_bid_price(),
+            Some(Price::from("87002.5")),
+            "Best bid price should match"
+        );
+        assert_eq!(
+            book.best_bid_size(),
+            Some(Quantity::from("199190")),
+            "Best bid size should match"
+        );
+
+        // Verify best ask using OrderBook methods
+        assert_eq!(
+            book.best_ask_price(),
+            Some(Price::from("87003.0")),
+            "Best ask price should match"
+        );
+        assert_eq!(
+            book.best_ask_size(),
+            Some(Quantity::from("125090")),
+            "Best ask size should match"
+        );
+
+        // Verify spread (best_ask - best_bid = 87003.0 - 87002.5 = 0.5)
+        let spread = book.spread().expect("Spread should exist");
+        assert!(
+            (spread - 0.5).abs() < 0.0001,
+            "Spread should be 0.5, got {spread}"
+        );
+
+        // Verify midpoint ((87003.0 + 87002.5) / 2 = 87002.75)
+        let midpoint = book.midpoint().expect("Midpoint should exist");
+        assert!(
+            (midpoint - 87002.75).abs() < 0.0001,
+            "Midpoint should be 87002.75, got {midpoint}"
+        );
+
+        // Verify level counts match input data
+        let bid_count = book.bids(None).count();
+        let ask_count = book.asks(None).count();
+        assert_eq!(
+            bid_count,
+            order_book_data.bids.len(),
+            "Bid levels count should match input data"
+        );
+        assert_eq!(
+            ask_count,
+            order_book_data.asks.len(),
+            "Ask levels count should match input data"
+        );
+        assert_eq!(bid_count, 20, "Should have 20 bid levels");
+        assert_eq!(ask_count, 20, "Should have 20 ask levels");
+
+        // Verify depth limiting works (get top 5 levels)
+        assert_eq!(
+            book.bids(Some(5)).count(),
+            5,
+            "Should limit to 5 bid levels"
+        );
+        assert_eq!(
+            book.asks(Some(5)).count(),
+            5,
+            "Should limit to 5 ask levels"
+        );
+
+        // Verify bids_as_map and asks_as_map
+        let bids_map = book.bids_as_map(None);
+        let asks_map = book.asks_as_map(None);
+        assert_eq!(bids_map.len(), 20, "Bids map should have 20 entries");
+        assert_eq!(asks_map.len(), 20, "Asks map should have 20 entries");
+
+        // Verify specific prices exist in maps
+        assert!(
+            bids_map.contains_key(&dec!(87002.5)),
+            "Bids map should contain best bid price"
+        );
+        assert!(
+            asks_map.contains_key(&dec!(87003.0)),
+            "Asks map should contain best ask price"
+        );
+
+        // Verify worst levels exist
+        assert!(
+            bids_map.contains_key(&dec!(86980.0)),
+            "Bids map should contain worst bid price"
+        );
+        assert!(
+            asks_map.contains_key(&dec!(87031.5)),
+            "Asks map should contain worst ask price"
         );
     }
 }

@@ -20,12 +20,16 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use nautilus_core::{nanos::UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_model::{
+    data::{Bar, BarType, TradeTick},
+    enums::{AggregationSource, BarAggregation},
     events::AccountState,
     identifiers::{AccountId, InstrumentId},
     instruments::{Instrument, InstrumentAny},
+    orderbook::OrderBook,
 };
 use nautilus_network::{
     http::{HttpClient, Method},
@@ -43,11 +47,23 @@ use super::{
     },
     query::{GetAccountSummariesParams, GetInstrumentParams, GetInstrumentsParams},
 };
-use crate::common::{
-    consts::{DERIBIT_API_PATH, JSONRPC_VERSION, should_retry_error_code},
-    credential::Credential,
-    parse::{extract_server_timestamp, parse_account_state, parse_deribit_instrument_any},
-    urls::get_http_base_url,
+use crate::{
+    common::{
+        consts::{DERIBIT_API_PATH, JSONRPC_VERSION, should_retry_error_code},
+        credential::Credential,
+        parse::{
+            extract_server_timestamp, parse_account_state, parse_bars,
+            parse_deribit_instrument_any, parse_order_book, parse_trade_tick,
+        },
+        urls::get_http_base_url,
+    },
+    http::{
+        models::{DeribitOrderBook, DeribitTradesResponse, DeribitTradingViewChartData},
+        query::{
+            GetLastTradesByInstrumentAndTimeParams, GetOrderBookParams,
+            GetTradingViewChartDataParams,
+        },
+    },
 };
 
 #[allow(dead_code)]
@@ -119,6 +135,12 @@ impl DeribitRawHttpClient {
     /// Get the cancellation token for this client.
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation_token
+    }
+
+    /// Returns whether this client is connected to testnet.
+    #[must_use]
+    pub fn is_testnet(&self) -> bool {
+        self.base_url.contains("test")
     }
 
     /// Creates a new [`DeribitRawHttpClient`] with explicit credentials.
@@ -431,6 +453,36 @@ impl DeribitRawHttpClient {
             .await
     }
 
+    /// Gets recent trades for an instrument within a time range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
+    pub async fn get_last_trades_by_instrument_and_time(
+        &self,
+        params: GetLastTradesByInstrumentAndTimeParams,
+    ) -> Result<DeribitJsonRpcResponse<DeribitTradesResponse>, DeribitHttpError> {
+        self.send_request(
+            "public/get_last_trades_by_instrument_and_time",
+            params,
+            false,
+        )
+        .await
+    }
+
+    /// Gets TradingView chart data (OHLCV) for an instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
+    pub async fn get_tradingview_chart_data(
+        &self,
+        params: GetTradingViewChartDataParams,
+    ) -> Result<DeribitJsonRpcResponse<DeribitTradingViewChartData>, DeribitHttpError> {
+        self.send_request("public/get_tradingview_chart_data", params, false)
+            .await
+    }
+
     /// Gets account summaries for all currencies.
     ///
     /// # Errors
@@ -446,6 +498,19 @@ impl DeribitRawHttpClient {
         self.send_request("private/get_account_summaries", params, true)
             .await
     }
+
+    /// Gets order book for an instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request fails or the response cannot be parsed.
+    pub async fn get_order_book(
+        &self,
+        params: GetOrderBookParams,
+    ) -> Result<DeribitJsonRpcResponse<DeribitOrderBook>, DeribitHttpError> {
+        self.send_request("public/get_order_book", params, false)
+            .await
+    }
 }
 
 /// High-level Deribit HTTP client with domain-level abstractions.
@@ -453,10 +518,31 @@ impl DeribitRawHttpClient {
 /// This client wraps the raw HTTP client and provides methods that use Nautilus
 /// domain types. It maintains an instrument cache for efficient lookups.
 #[derive(Debug)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.deribit")
+)]
 pub struct DeribitHttpClient {
     pub(crate) inner: Arc<DeribitRawHttpClient>,
     pub(crate) instruments_cache: Arc<DashMap<Ustr, InstrumentAny>>,
     cache_initialized: AtomicBool,
+}
+
+impl Clone for DeribitHttpClient {
+    fn clone(&self) -> Self {
+        let cache_initialized = AtomicBool::new(false);
+
+        let is_initialized = self.cache_initialized.load(Ordering::Acquire);
+        if is_initialized {
+            cache_initialized.store(true, Ordering::Release);
+        }
+
+        Self {
+            inner: self.inner.clone(),
+            instruments_cache: self.instruments_cache.clone(),
+            cache_initialized,
+        }
+    }
 }
 
 impl DeribitHttpClient {
@@ -637,6 +723,262 @@ impl DeribitHttpClient {
         }
     }
 
+    /// Requests historical trades for an instrument within a time range.
+    ///
+    /// Fetches trade ticks from Deribit and converts them to Nautilus [`TradeTick`] objects.
+    ///
+    /// # Arguments
+    ///
+    /// * `instrument_id` - The instrument to fetch trades for
+    /// * `start` - Optional start time filter
+    /// * `end` - Optional end time filter
+    /// * `limit` - Optional limit on number of trades (max 1000)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The request fails
+    /// - Trade parsing fails
+    pub async fn request_trades(
+        &self,
+        instrument_id: InstrumentId,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Vec<TradeTick>> {
+        // Get instrument from cache to determine precisions
+        let (price_precision, size_precision) =
+            if let Some(instrument) = self.get_instrument(&instrument_id.symbol.inner()) {
+                (instrument.price_precision(), instrument.size_precision())
+            } else {
+                tracing::warn!(
+                    "Instrument {} not in cache, skipping trades request",
+                    instrument_id
+                );
+                anyhow::bail!("Instrument {instrument_id} not in cache");
+            };
+
+        // Convert timestamps to milliseconds
+        let start_timestamp = start.map_or_else(
+            || Utc::now().timestamp_millis() - 3_600_000, // Default: 1 hour ago
+            |dt| dt.timestamp_millis(),
+        );
+
+        let end_timestamp = end.map_or_else(
+            || Utc::now().timestamp_millis(), // Default: now
+            |dt| dt.timestamp_millis(),
+        );
+
+        let params = GetLastTradesByInstrumentAndTimeParams::new(
+            instrument_id.symbol.to_string(),
+            start_timestamp,
+            end_timestamp,
+            limit,
+            Some("asc".to_string()), // Sort ascending for historical data
+        );
+
+        let full_response = self
+            .inner
+            .get_last_trades_by_instrument_and_time(params)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let response_data = full_response
+            .result
+            .ok_or_else(|| anyhow::anyhow!("No result in response"))?;
+
+        let ts_init = self.generate_ts_init();
+        let mut trades = Vec::with_capacity(response_data.trades.len());
+
+        for raw_trade in &response_data.trades {
+            match parse_trade_tick(
+                raw_trade,
+                instrument_id,
+                price_precision,
+                size_precision,
+                ts_init,
+            ) {
+                Ok(trade) => trades.push(trade),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to parse trade {} for {}: {}",
+                        raw_trade.trade_id,
+                        instrument_id,
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(trades)
+    }
+
+    /// Requests historical bars (OHLCV) for an instrument.
+    ///
+    /// Uses the `public/get_tradingview_chart_data` endpoint to fetch candlestick data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Aggregation source is not EXTERNAL
+    /// - Bar aggregation type is not supported by Deribit
+    /// - The request fails or response cannot be parsed
+    ///
+    /// # Supported Resolutions
+    ///
+    /// Deribit supports: 1, 3, 5, 10, 15, 30, 60, 120, 180, 360, 720 minutes, and 1D (daily)
+    pub async fn request_bars(
+        &self,
+        bar_type: BarType,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        _limit: Option<u32>,
+    ) -> anyhow::Result<Vec<Bar>> {
+        anyhow::ensure!(
+            bar_type.aggregation_source() == AggregationSource::External,
+            "Only EXTERNAL aggregation is supported"
+        );
+
+        let now = Utc::now();
+
+        // Default to last hour if no start/end provided
+        let end_dt = end.unwrap_or(now);
+        let start_dt = start.unwrap_or(end_dt - chrono::Duration::hours(1));
+
+        if let (Some(s), Some(e)) = (start, end) {
+            anyhow::ensure!(s < e, "Invalid time range: start={s:?} end={e:?}");
+        }
+
+        // Convert BarType to Deribit resolution
+        let spec = bar_type.spec();
+        let step = spec.step.get();
+        let resolution = match spec.aggregation {
+            BarAggregation::Minute => format!("{step}"),
+            BarAggregation::Hour => format!("{}", step * 60),
+            BarAggregation::Day => "1D".to_string(),
+            a => anyhow::bail!("Deribit does not support {a:?} aggregation"),
+        };
+
+        // Validate resolution is supported by Deribit
+        let supported_resolutions = [
+            "1", "3", "5", "10", "15", "30", "60", "120", "180", "360", "720", "1D",
+        ];
+        if !supported_resolutions.contains(&resolution.as_str()) {
+            anyhow::bail!(
+                "Deribit does not support resolution '{resolution}'. Supported: {supported_resolutions:?}"
+            );
+        }
+
+        let instrument_name = bar_type.instrument_id().symbol.to_string();
+        let start_timestamp = start_dt.timestamp_millis();
+        let end_timestamp = end_dt.timestamp_millis();
+
+        let params = GetTradingViewChartDataParams::new(
+            instrument_name,
+            start_timestamp,
+            end_timestamp,
+            resolution,
+        );
+
+        let full_response = self.inner.get_tradingview_chart_data(params).await?;
+        let chart_data = full_response
+            .result
+            .ok_or_else(|| anyhow::anyhow!("No result in response"))?;
+
+        if chart_data.status == "no_data" {
+            tracing::debug!("No bar data returned for {}", bar_type);
+            return Ok(Vec::new());
+        }
+
+        // Get instrument from cache to determine precisions
+        let instrument_id = bar_type.instrument_id();
+        let (price_precision, size_precision) =
+            if let Some(instrument) = self.get_instrument(&instrument_id.symbol.inner()) {
+                (instrument.price_precision(), instrument.size_precision())
+            } else {
+                tracing::warn!(
+                    "Instrument {} not in cache, skipping bars request",
+                    instrument_id
+                );
+                anyhow::bail!("Instrument {instrument_id} not in cache");
+            };
+
+        let ts_init = self.generate_ts_init();
+        let bars = parse_bars(
+            &chart_data,
+            bar_type,
+            price_precision,
+            size_precision,
+            ts_init,
+        )?;
+
+        tracing::info!("Parsed {} bars for {}", bars.len(), bar_type);
+
+        Ok(bars)
+    }
+
+    /// Requests a snapshot of the order book for an instrument.
+    ///
+    /// Fetches the order book from Deribit and converts it to a Nautilus [`OrderBook`].
+    ///
+    /// # Arguments
+    ///
+    /// * `instrument_id` - The instrument to fetch the order book for
+    /// * `depth` - Optional depth limit (valid values: 1, 5, 10, 20, 50, 100, 1000, 10000)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The request fails
+    /// - Order book parsing fails
+    pub async fn request_book_snapshot(
+        &self,
+        instrument_id: InstrumentId,
+        depth: Option<u32>,
+    ) -> anyhow::Result<OrderBook> {
+        // Get instrument from cache to determine precisions
+        let (price_precision, size_precision) =
+            if let Some(instrument) = self.get_instrument(&instrument_id.symbol.inner()) {
+                (instrument.price_precision(), instrument.size_precision())
+            } else {
+                // Default precisions if instrument not cached
+                tracing::warn!(
+                    "Instrument {} not in cache, using default precisions",
+                    instrument_id
+                );
+                (8u8, 8u8)
+            };
+
+        let params = GetOrderBookParams::new(instrument_id.symbol.to_string(), depth);
+        let full_response = self
+            .inner
+            .get_order_book(params)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let order_book_data = full_response
+            .result
+            .ok_or_else(|| anyhow::anyhow!("No result in response"))?;
+
+        let ts_init = self.generate_ts_init();
+        let book = parse_order_book(
+            &order_book_data,
+            instrument_id,
+            price_precision,
+            size_precision,
+            ts_init,
+        )?;
+
+        tracing::info!(
+            "Fetched order book for {} with {} bids and {} asks",
+            instrument_id,
+            order_book_data.bids.len(),
+            order_book_data.asks.len()
+        );
+
+        Ok(book)
+    }
+
     /// Requests account state for all currencies.
     ///
     /// Fetches account balance and margin information for all currencies from Deribit
@@ -692,5 +1034,11 @@ impl DeribitHttpClient {
     #[must_use]
     pub fn is_cache_initialized(&self) -> bool {
         self.cache_initialized.load(Ordering::Acquire)
+    }
+
+    /// Returns whether this client is connected to testnet.
+    #[must_use]
+    pub fn is_testnet(&self) -> bool {
+        self.inner.is_testnet()
     }
 }

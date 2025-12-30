@@ -343,8 +343,10 @@ pub trait Order: 'static + Send {
     fn events(&self) -> Vec<&OrderEventAny>;
 
     fn last_event(&self) -> &OrderEventAny {
-        // SAFETY: Unwrap safe as `Order` specification guarantees at least one event (`OrderInitialized`)
-        self.events().last().unwrap()
+        // SAFETY: Order specification guarantees at least one event (OrderInitialized)
+        self.events()
+            .last()
+            .expect("Order invariant violated: no events")
     }
 
     fn event_count(&self) -> usize {
@@ -405,7 +407,7 @@ pub trait Order: 'static + Send {
                 .is_some_and(|spawn_id| self.client_order_id() == spawn_id)
     }
 
-    fn is_secondary(&self) -> bool {
+    fn is_spawned(&self) -> bool {
         self.exec_algorithm_id().is_some()
             && self
                 .exec_spawn_id()
@@ -478,11 +480,6 @@ pub trait Order: 'static + Send {
 
     fn is_pending_cancel(&self) -> bool {
         self.status() == OrderStatus::PendingCancel
-    }
-
-    fn is_spawned(&self) -> bool {
-        self.exec_spawn_id()
-            .is_some_and(|exec_spawn_id| exec_spawn_id != self.client_order_id())
     }
 
     fn to_own_book_order(&self) -> OwnBookOrder {
@@ -711,8 +708,8 @@ impl OrderCore {
             OrderEventAny::Accepted(event) => self.accepted(event),
             OrderEventAny::PendingUpdate(event) => self.pending_update(event),
             OrderEventAny::PendingCancel(event) => self.pending_cancel(event),
-            OrderEventAny::ModifyRejected(event) => self.modify_rejected(event),
-            OrderEventAny::CancelRejected(event) => self.cancel_rejected(event),
+            OrderEventAny::ModifyRejected(event) => self.modify_rejected(event)?,
+            OrderEventAny::CancelRejected(event) => self.cancel_rejected(event)?,
             OrderEventAny::Updated(event) => self.updated(event),
             OrderEventAny::Triggered(event) => self.triggered(event),
             OrderEventAny::Canceled(event) => self.canceled(event),
@@ -761,16 +758,14 @@ impl OrderCore {
         // Do nothing else
     }
 
-    fn modify_rejected(&mut self, _event: &OrderModifyRejected) {
-        self.status = self
-            .previous_status
-            .unwrap_or_else(|| panic!("{}", OrderError::NoPreviousState));
+    fn modify_rejected(&mut self, _event: &OrderModifyRejected) -> Result<(), OrderError> {
+        self.status = self.previous_status.ok_or(OrderError::NoPreviousState)?;
+        Ok(())
     }
 
-    fn cancel_rejected(&mut self, _event: &OrderCancelRejected) {
-        self.status = self
-            .previous_status
-            .unwrap_or_else(|| panic!("{}", OrderError::NoPreviousState));
+    fn cancel_rejected(&mut self, _event: &OrderCancelRejected) -> Result<(), OrderError> {
+        self.status = self.previous_status.ok_or(OrderError::NoPreviousState)?;
+        Ok(())
     }
 
     fn triggered(&mut self, _event: &OrderTriggered) {}
@@ -1124,11 +1119,11 @@ mod tests {
             .into();
 
         assert!(order.is_primary());
-        assert!(!order.is_secondary());
+        assert!(!order.is_spawned());
     }
 
     #[rstest]
-    fn test_order_is_secondary() {
+    fn test_order_is_spawned() {
         let order: MarketOrder = OrderInitializedBuilder::default()
             .exec_algorithm_id(Some(ExecAlgorithmId::from("ALGO-001")))
             .exec_spawn_id(Some(ClientOrderId::from("O-002")))
@@ -1138,7 +1133,7 @@ mod tests {
             .into();
 
         assert!(!order.is_primary());
-        assert!(order.is_secondary());
+        assert!(order.is_spawned());
     }
 
     #[rstest]

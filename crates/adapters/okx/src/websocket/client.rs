@@ -36,7 +36,7 @@ use ahash::AHashSet;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use futures_util::Stream;
-use nautilus_common::live::runtime::get_runtime;
+use nautilus_common::live::get_runtime;
 use nautilus_core::{
     consts::NAUTILUS_USER_AGENT,
     env::{get_env_var, get_or_env_var},
@@ -134,7 +134,7 @@ pub const OKX_RATE_LIMIT_KEY_AMEND: &str = "amend";
 #[derive(Clone)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.adapters")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.okx")
 )]
 pub struct OKXWebSocketClient {
     url: String,
@@ -406,8 +406,6 @@ impl OKXWebSocketClient {
             headers: vec![(USER_AGENT.to_string(), NAUTILUS_USER_AGENT.to_string())],
             heartbeat: self.heartbeat,
             heartbeat_msg: Some(TEXT_PING.to_string()),
-            message_handler: Some(message_handler),
-            ping_handler: Some(ping_handler),
             reconnect_timeout_ms: Some(5_000),
             reconnect_delay_initial_ms: None, // Use default
             reconnect_delay_max_ms: None,     // Use default
@@ -429,6 +427,8 @@ impl OKXWebSocketClient {
 
         let client = WebSocketClient::connect(
             config,
+            Some(message_handler),
+            Some(ping_handler),
             None, // post_reconnection
             keyed_quotas,
             Some(*OKX_WS_CONNECTION_QUOTA), // Default quota for connection operations
@@ -2757,18 +2757,18 @@ mod tests {
             cancel_source: None,
             cancel_source_reason: None,
             category: OKXOrderCategory::Normal,
-            ccy: ustr::Ustr::from("USDT"),
+            ccy: Ustr::from("USDT"),
             cl_ord_id: "order-1".to_string(),
             algo_cl_ord_id: None,
             fee: None,
-            fee_ccy: ustr::Ustr::from("USDT"),
+            fee_ccy: Ustr::from("USDT"),
             fill_px: "0".to_string(),
             fill_sz: "0".to_string(),
             fill_time: 0,
-            inst_id: ustr::Ustr::from("ETH-USDT-SWAP"),
+            inst_id: Ustr::from("ETH-USDT-SWAP"),
             inst_type: OKXInstrumentType::Swap,
             lever: "1".to_string(),
-            ord_id: ustr::Ustr::from("123456"),
+            ord_id: Ustr::from("123456"),
             ord_type: OKXOrderType::Limit,
             pnl: "0".to_string(),
             pos_side: OKXPositionSide::Net,

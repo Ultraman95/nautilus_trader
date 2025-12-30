@@ -15,12 +15,23 @@
 
 //! Python bindings for the Binance adapter.
 
+pub mod enums;
+pub mod websocket;
+
 use pyo3::prelude::*;
 
 /// Binance adapter Python module.
+///
+/// Loaded as `nautilus_pyo3.binance`.
 #[pymodule]
-pub fn binance(_py: Python<'_>, _m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // TODO: Register Python-exposed types here
-    // m.add_class::<crate::common::enums::BinanceProductType>()?;
+pub fn binance(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Enums
+    m.add_class::<crate::common::enums::BinanceProductType>()?;
+    m.add_class::<crate::common::enums::BinanceEnvironment>()?;
+
+    // WebSocket clients
+    m.add_class::<crate::spot::websocket::client::BinanceSpotWebSocketClient>()?;
+    m.add_class::<crate::futures::websocket::client::BinanceFuturesWebSocketClient>()?;
+
     Ok(())
 }
