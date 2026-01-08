@@ -580,7 +580,7 @@ modified (it remains immutable); only the matching core's internal price referen
 When a trade tick triggers order matching, the engine determines fills as follows:
 
 1. **Book reflects trade price**: If the order book has liquidity at the trade price, fills use book depth (standard behavior).
-2. **Book doesn't reflect trade price**: If the book's liquidity is at a different price, the engine uses a "trade-driven fill" at the trade price, capped to `min(order.leaves_qty, trade.size)`.
+2. **Book doesn't reflect trade price**: If the book's liquidity is at a different price, the engine uses a "trade-driven fill" at the order's limit price, capped to `min(order.leaves_qty, trade.size)`.
 
 This ensures that when a trade prints through the spread but the book hasn't updated, fills are bounded by what the trade tick actually evidences. When `liquidity_consumption=False` (default), the same trade size can fill multiple orders within an iteration. When `liquidity_consumption=True`, consumption tracking applies to trade-driven fills as well—repeated fills at the same trade price will be bounded by consumed liquidity until fresh data arrives.
 
@@ -597,8 +597,10 @@ the trade price. This means repeated trades at or beyond the spread can progress
 
 **Fill price:**
 
-- **SELLER trade at P**: The engine sets the core's Best Ask to P (if P < current ask). Resting BUY LIMIT orders at P or higher will fill at the trade price P (if book doesn't have that level) or at book prices (if book does).
-- **BUYER trade at P**: The engine sets the core's Best Bid to P (if P > current bid). Resting SELL LIMIT orders at P or lower will fill at the trade price P (if book doesn't have that level) or at book prices (if book does).
+- **SELLER trade at P**: The engine sets the core's Best Ask to P (if P < current ask). Resting BUY LIMIT orders at P or higher will fill at their limit price (if book doesn't have that level) or at book prices (if book does).
+- **BUYER trade at P**: The engine sets the core's Best Bid to P (if P > current bid). Resting SELL LIMIT orders at P or lower will fill at their limit price (if book doesn't have that level) or at book prices (if book does).
+
+This conservative approach ensures fills occur at the order's limit price rather than potentially better trade prices. For example, a BUY LIMIT at 100.05 triggered by a SELLER trade at 100.00 will fill at 100.05, not 100.00.
 
 **Example:**
 
@@ -778,6 +780,34 @@ engine.add_venue(
     bar_adaptive_high_low_ordering=True,  # Enable adaptive ordering of High/Low bar prices
 )
 ```
+
+### Internal bar aggregation timing
+
+When aggregating time bars internally from tick data, the data engine uses timers to close bars at
+interval boundaries. A timing edge case occurs when data arrives at the exact bar close timestamp—the
+timer may fire before processing boundary data.
+
+Configure `time_bars_build_delay` in `DataEngineConfig` to delay bar close timers:
+
+```python
+from nautilus_trader.config import BacktestEngineConfig
+from nautilus_trader.data.config import DataEngineConfig
+
+config = BacktestEngineConfig(
+    data_engine=DataEngineConfig(
+        time_bars_build_delay=1,  # Microseconds
+    ),
+)
+```
+
+:::tip
+A small delay (1 microsecond) ensures boundary data is processed before the bar closes.
+Useful when tick data clusters at round interval timestamps.
+:::
+
+:::note
+Only affects internally aggregated bars (`AggregationSource.INTERNAL`).
+:::
 
 ### Fill models
 

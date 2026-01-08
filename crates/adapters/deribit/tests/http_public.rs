@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -83,10 +83,6 @@ async fn wait_for_server(addr: SocketAddr) {
     )
     .await;
 }
-
-// ============================================================================
-// JSON-RPC Handlers
-// ============================================================================
 
 async fn handle_jsonrpc_request(
     State(state): State<TestServerState>,
@@ -394,10 +390,6 @@ async fn handle_method_not_found(id: u64) -> axum::response::Response {
     }))
     .into_response()
 }
-
-// ============================================================================
-// Router
-// ============================================================================
 
 fn create_router(state: TestServerState) -> Router {
     Router::new()

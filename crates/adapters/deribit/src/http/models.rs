@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -14,6 +14,8 @@
 // -------------------------------------------------------------------------------------------------
 
 //! Deribit HTTP API models and types.
+
+use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
@@ -215,7 +217,7 @@ impl DeribitCurrency {
     }
 }
 
-impl std::fmt::Display for DeribitCurrency {
+impl Display for DeribitCurrency {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
     }

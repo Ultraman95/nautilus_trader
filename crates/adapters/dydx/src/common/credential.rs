@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -20,7 +20,7 @@
 
 #![allow(unused_assignments)] // Fields are accessed externally, false positive from nightly
 
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 
 use anyhow::Context;
 use cosmrs::{AccountId, crypto::secp256k1::SigningKey, tx::SignDoc};
@@ -45,7 +45,7 @@ pub struct DydxCredential {
 }
 
 impl Debug for DydxCredential {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(stringify!(DydxCredential))
             .field("address", &self.address)
             .field("authenticator_ids", &self.authenticator_ids)

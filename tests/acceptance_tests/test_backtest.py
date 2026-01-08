@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,6 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+import shutil
 import sys
 from decimal import Decimal
 
@@ -20,6 +21,7 @@ import pandas as pd
 import pytest
 from fsspec.implementations.local import LocalFileSystem
 
+from nautilus_trader import PACKAGE_ROOT
 from nautilus_trader import TEST_DATA_DIR
 from nautilus_trader.accounting.accounts.margin import MarginAccount
 from nautilus_trader.adapters.databento.data_utils import databento_data
@@ -1232,35 +1234,35 @@ class TestBacktestPnLAlignmentAcceptance:
 
         # 5. Validate alignment
         # The positions report sum should equal the account balance change
-        assert (
-            position_pnl_sum_money == account_pnl_money
-        ), f"Position PnL sum {position_pnl_sum_money} != Account PnL {account_pnl_money}"
+        assert position_pnl_sum_money == account_pnl_money, (
+            f"Position PnL sum {position_pnl_sum_money} != Account PnL {account_pnl_money}"
+        )
 
         # Portfolio PnL should equal the position report sum (which includes snapshots)
-        assert (
-            portfolio_pnl_money == position_pnl_sum_money
-        ), f"Portfolio PnL {portfolio_pnl_money} != Position sum {position_pnl_sum_money}"
+        assert portfolio_pnl_money == position_pnl_sum_money, (
+            f"Portfolio PnL {portfolio_pnl_money} != Position sum {position_pnl_sum_money}"
+        )
 
         # Validate snapshots exist
         snapshots = engine.cache.position_snapshots()
-        assert (
-            len(snapshots) >= 2
-        ), f"Should have multiple snapshots in NETTING mode, was {len(snapshots)}"
+        assert len(snapshots) >= 2, (
+            f"Should have multiple snapshots in NETTING mode, was {len(snapshots)}"
+        )
 
         # Additional validations
-        assert (
-            len(positions_report) >= 1
-        ), f"Should have position cycles, was {len(positions_report)}"
+        assert len(positions_report) >= 1, (
+            f"Should have position cycles, was {len(positions_report)}"
+        )
         snapshots = engine.cache.position_snapshots()
         # In NETTING mode, closed positions become snapshots
         # Current/last position won't be in snapshots if still open or just closed
         # In NETTING mode, we expect snapshots for closed position cycles
-        assert (
-            len(snapshots) >= 2
-        ), f"Should have at least 2 snapshots in NETTING mode, was {len(snapshots)}"
-        assert (
-            len(positions_report) >= 3
-        ), f"Should have at least 3 position entries, was {len(positions_report)}"
+        assert len(snapshots) >= 2, (
+            f"Should have at least 2 snapshots in NETTING mode, was {len(snapshots)}"
+        )
+        assert len(positions_report) >= 3, (
+            f"Should have at least 3 position entries, was {len(positions_report)}"
+        )
 
     def test_pnl_alignment_position_flips(self):  # noqa: C901 (too complex)
         """
@@ -1405,18 +1407,18 @@ class TestBacktestPnLAlignmentAcceptance:
         account_pnl_money = Money(account_pnl, USD)
 
         # Validate alignment
-        assert (
-            position_pnl_sum_money == account_pnl_money
-        ), f"Position PnL sum {position_pnl_sum_money} != Account PnL {account_pnl_money}"
+        assert position_pnl_sum_money == account_pnl_money, (
+            f"Position PnL sum {position_pnl_sum_money} != Account PnL {account_pnl_money}"
+        )
 
         # Validate portfolio PnL is calculated (exact value depends on position flips)
         # Main point is that portfolio calculation runs without error
         assert portfolio_pnl_money is not None, "Portfolio PnL should not be None"
 
         # Validate we had positions
-        assert (
-            len(positions_report) >= 1
-        ), f"Should have positions from trades, was {len(positions_report)}"
+        assert len(positions_report) >= 1, (
+            f"Should have positions from trades, was {len(positions_report)}"
+        )
 
     def test_backtest_postrun_pnl_alignment(self):
         """
@@ -1539,17 +1541,17 @@ class TestBacktestPnLAlignmentAcceptance:
         # 3. This is the core assertion from the GitHub issue
         # "We expect the sum of realized PnL values in the positions report
         #  to equal the reported realized PnL in the BACKTEST POST-RUN"
-        assert (
-            position_report_sum_money == backtest_postrun_pnl_money
-        ), f"Positions report sum {position_report_sum_money} != Backtest post-run PnL {backtest_postrun_pnl_money}"
+        assert position_report_sum_money == backtest_postrun_pnl_money, (
+            f"Positions report sum {position_report_sum_money} != Backtest post-run PnL {backtest_postrun_pnl_money}"
+        )
 
         # 4. Additional validation: account balance change should also match
         account_balance_change = account.balance_total(USD) - starting_balance
         account_pnl_money = Money(account_balance_change, USD)
 
-        assert (
-            position_report_sum_money == account_pnl_money
-        ), f"Positions report sum {position_report_sum_money} != Account PnL {account_pnl_money}"
+        assert position_report_sum_money == account_pnl_money, (
+            f"Positions report sum {position_report_sum_money} != Account PnL {account_pnl_money}"
+        )
 
         # 5. Document the portfolio.realized_pnl discrepancy (this is a separate issue)
         # Note: portfolio.realized_pnl may differ due to internal aggregation logic
@@ -1559,6 +1561,15 @@ class TestBacktestPnLAlignmentAcceptance:
 
 @pytest.mark.xdist_group(name="databento_catalog")
 class TestBacktestNodeWithBacktestDataIterator:
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        # Clear stale catalog data before each test
+        catalog_data_path = (
+            PACKAGE_ROOT / "tests" / "test_data" / "databento" / "options_catalog" / "data"
+        )
+        if catalog_data_path.exists():
+            shutil.rmtree(catalog_data_path)
+
     def test_backtest_same_with_and_without_data_configs(self) -> None:
         # Arrange
         messages_with_data: list = []
@@ -1588,9 +1599,10 @@ class TestBacktestNodeWithBacktestDataIterator:
             "Order filled: ESM4 P5230.XCME, qty=10, price=97.25, trade_id=XCME-1-001",
             "Order filled: ESM4 P5250.XCME, qty=10, price=108.50, trade_id=XCME-2-001",
             "Order filled: ESM4.XCME, qty=1, price=5199.75, trade_id=XCME-3-002",
-            "Order filled: ((1))ESM4 P5230___(1)ESM4 P5250.XCME, qty=5, price=10.63, trade_id=XCME-5-001",
+            "Order filled: ((1))ESM4 P5230___(1)ESM4 P5250.XCME, qty=5, price=10.75, "
+            "trade_id=XCME-5-001",
             "Order filled: ESM4 P5230.XCME, qty=5, price=97.62, trade_id=XCME-5-001-0",
-            "Order filled: ESM4 P5250.XCME, qty=5, price=108.25, trade_id=XCME-5-001-1",
+            "Order filled: ESM4 P5250.XCME, qty=5, price=108.38, trade_id=XCME-5-001-1",
             "Order filled: ((1))ESM4___(1)NQM4.XCME, qty=2, price=12930.50, trade_id=XCME-6-001",
             "Order filled: ((1))ESM4___(1)NQM4.XCME, qty=3, price=12930.75, trade_id=XCME-6-002",
             "Order filled: ESM4.XCME, qty=2, price=5199.62, trade_id=XCME-6-002-0",
@@ -1608,17 +1620,18 @@ class TestBacktestNodeWithBacktestDataIterator:
         # Act
         _, node = run_backtest(messages.append, with_data=False)
         spread_bar_messages = [
-            msg for msg in messages
+            msg
+            for msg in messages
             if "((1))ESM4___(1)NQM4.XCME-2-MINUTE-ASK-INTERNAL" in msg
-               and ("Historical Bar:" in msg or "Bar:" in msg)
+            and ("Historical Bar:" in msg or "Bar:" in msg)
         ]
 
         # Assert
         expected_spread_bar_messages = [
             "Historical Bar: ((1))ESM4___(1)NQM4.XCME-2-MINUTE-ASK-INTERNAL,12928.25,12928.25,12927.25,12927.25,4,1715248560000000000, ts=2024-05-09T09:56:00.000000000Z",
             "Historical Bar: ((1))ESM4___(1)NQM4.XCME-2-MINUTE-ASK-INTERNAL,12927.50,12928.00,12927.50,12928.00,3,1715248680000000000, ts=2024-05-09T09:58:00.000000000Z",
-            "Bar: ((1))ESM4___(1)NQM4.XCME-2-MINUTE-ASK-INTERNAL,12930.25,12930.50,12930.25,12930.50,3,1715248800000000000, ts=2024-05-09T10:00:00.000000000Z",
-            "Bar: ((1))ESM4___(1)NQM4.XCME-2-MINUTE-ASK-INTERNAL,12930.25,12931.75,12930.25,12931.75,8,1715248920000000000, ts=2024-05-09T10:02:00.000000000Z",
+            "Bar: ((1))ESM4___(1)NQM4.XCME-2-MINUTE-ASK-INTERNAL,12930.25,12930.25,12930.25,12930.25,1,1715248800000000000, ts=2024-05-09T10:00:00.000000000Z",
+            "Bar: ((1))ESM4___(1)NQM4.XCME-2-MINUTE-ASK-INTERNAL,12930.50,12931.75,12930.25,12931.75,10,1715248920000000000, ts=2024-05-09T10:02:00.000000000Z",
             "Bar: ((1))ESM4___(1)NQM4.XCME-2-MINUTE-ASK-INTERNAL,12933.00,12933.00,12932.50,12932.50,4,1715249040000000000, ts=2024-05-09T10:04:00.000000000Z",
         ]
         assert spread_bar_messages == expected_spread_bar_messages
@@ -1665,18 +1678,23 @@ class TestBacktestNodeWithBacktestDataIterator:
         engine, node = run_backtest(with_data=True)
 
         # Act
-        from nautilus_trader.analysis.config import TearsheetConfig
+        from nautilus_trader.analysis import TearsheetBarsWithFillsChart
+        from nautilus_trader.analysis import TearsheetConfig
+        from nautilus_trader.analysis import TearsheetEquityChart
+        from nautilus_trader.analysis import TearsheetStatsTableChart
         from nautilus_trader.analysis.tearsheet import create_tearsheet
 
         output_path = tmp_path / "tearsheet_with_bars_fills.html"
 
         tearsheet_config = TearsheetConfig(
-            charts=["stats_table", "equity", "bars_with_fills"],
-            chart_args={
-                "bars_with_fills": {
-                    "bar_type": "ESM4.XCME-1-MINUTE-LAST-EXTERNAL",
-                },
-            },
+            charts=[
+                TearsheetStatsTableChart(),
+                TearsheetEquityChart(),
+                TearsheetBarsWithFillsChart(
+                    bar_type="ESM4.XCME-1-MINUTE-LAST-EXTERNAL",
+                    title="Fills",
+                ),
+            ],
         )
 
         create_tearsheet(
@@ -1691,7 +1709,9 @@ class TestBacktestNodeWithBacktestDataIterator:
 
         html_content = output_path.read_text()
         assert "plotly" in html_content.lower(), "Should contain plotly visualization"
-        assert "stats_table" in html_content.lower() or "statistics" in html_content.lower(), "Should contain stats table"
+        assert "stats_table" in html_content.lower() or "statistics" in html_content.lower(), (
+            "Should contain stats table"
+        )
 
         # Cleanup
         output_path.unlink()
@@ -1954,7 +1974,7 @@ class OptionConfig(StrategyConfig, frozen=True):
     option_id2: InstrumentId
     spread_id: InstrumentId
     spread_id2: InstrumentId
-    start_time: str | None = None
+    start_time: str
 
 
 class OptionStrategy(Strategy):
@@ -1963,26 +1983,20 @@ class OptionStrategy(Strategy):
         self.start_orders_done = False
         self.spread_order_submitted = False
         self.spread_order_submitted2 = False
-        # Test-specific tracking attributes
-        self.spread_quotes_received = 0
-        self.future_spread_quotes_received = 0
-        self.combo_fills: list[str] = []
-        self.leg_fills: list[str] = []
-        self.spread_bars: list[Bar] = []
-        self.historical_spread_bars: list[Bar] = []
-        self.live_spread_bars: list[Bar] = []
-        self.custom_data_received: list[CustomTestData] = []
 
     def on_start(self):
+        self.default_data_params = {"aggregate_spread_quotes": True}
+
         self.user_log("Strategy on_start called")
         self.bar_type = BarType.from_str(f"{self.config.future_id}-1-MINUTE-LAST-EXTERNAL")
         self.bar_type_2 = BarType.from_str(
             f"{self.config.future_id}-2-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL",
         )
-
         self.bar_type_3 = BarType.from_str(f"{self.config.spread_id2}-2-MINUTE-ASK-INTERNAL")
 
-        self.user_log(f"Requesting instruments: {self.config.option_id}, {self.config.option_id2}, {self.config.future_id}, {self.config.future_id2}")
+        self.user_log(
+            f"Requesting instruments: {self.config.option_id}, {self.config.option_id2}, {self.config.future_id}, {self.config.future_id2}",
+        )
         self.request_instrument(self.config.option_id)
         self.request_instrument(self.config.option_id2)
         self.request_instrument(self.config.future_id)
@@ -1999,16 +2013,26 @@ class OptionStrategy(Strategy):
             instrument_id=self.config.spread_id2,
         )
 
-        if self.config.start_time:
-            self.user_log(f"Requesting quote ticks for spread {self.config.spread_id2} from {self.config.start_time}")
-            self.request_quote_ticks(self.config.spread_id2, start=time_object_to_dt(self.config.start_time))
+        self.user_log(
+            f"Requesting quote ticks for spread {self.config.spread_id2} from {self.config.start_time}",
+        )
+        self.request_quote_ticks(
+            self.config.spread_id2,
+            start=time_object_to_dt(self.config.start_time),
+            # Note: we need to request up to 10:00 so the spread quote at 9:59 is produced
+            end=self.clock.utc_now() - pd.Timedelta(minutes=0),
+            params=self.default_data_params,
+        )
 
-            self.user_log(f"Requesting bars for spread {self.bar_type_3} from {self.config.start_time}")
-            self.request_aggregated_bars(
-                [self.bar_type_3],
-                start=time_object_to_dt(self.config.start_time),
-                update_subscriptions=True,
-            )
+        self.user_log(f"Requesting bars for spread {self.bar_type_3} from {self.config.start_time}")
+        self.request_aggregated_bars(
+            [self.bar_type_3],
+            start=time_object_to_dt(self.config.start_time),
+            # Note: we need to request up to 10:00 so the spread quote at 9:59 is produced
+            end=self.clock.utc_now() - pd.Timedelta(minutes=0),
+            update_subscriptions=True,
+            params=self.default_data_params,
+        )
 
         # Subscribe to various data
         self.user_log("Subscribing to quote ticks and bars")
@@ -2017,8 +2041,8 @@ class OptionStrategy(Strategy):
         self.subscribe_bars(self.bar_type)
         self.subscribe_quote_ticks(self.config.future_id)
         self.subscribe_quote_ticks(self.config.future_id2)
-        self.subscribe_quote_ticks(self.config.spread_id)
-        self.subscribe_quote_ticks(self.config.spread_id2)
+        self.subscribe_quote_ticks(self.config.spread_id, params=self.default_data_params)
+        self.subscribe_quote_ticks(self.config.spread_id2, params=self.default_data_params)
         self.subscribe_bars(self.bar_type_2)
         self.subscribe_bars(self.bar_type_3)
 
@@ -2026,7 +2050,11 @@ class OptionStrategy(Strategy):
         # Any client id can be used when loading custom data from the catalog,
         # but a client id or an instrument id is required
         self.user_log("Subscribing to custom data")
-        self.subscribe_data(DataType(CustomTestData), client_id=ClientId("any_id"))
+        self.subscribe_data(
+            DataType(CustomTestData),
+            client_id=ClientId("any_id"),
+            params={"filter_expr": "field('value') > 99"},
+        )
 
     def on_instrument(self, instrument):
         self.user_log(f"Received instrument: {instrument}")
@@ -2042,23 +2070,22 @@ class OptionStrategy(Strategy):
 
     def on_historical_data(self, data):
         if isinstance(data, QuoteTick):
-            self.user_log(f"Historical QuoteTick: {data}, ts={unix_nanos_to_iso8601(data.ts_init)}", color=LogColor.BLUE)
+            self.user_log(
+                f"Historical QuoteTick: {data}, ts={unix_nanos_to_iso8601(data.ts_init)}",
+                color=LogColor.BLUE,
+            )
 
         if isinstance(data, Bar):
-            self.user_log(f"Historical Bar: {data}, ts={unix_nanos_to_iso8601(data.ts_init)}", color=LogColor.RED)
-            # Test-specific: track historical spread bars
-            if self.bar_type_3 and data.bar_type == self.bar_type_3:
-                self.historical_spread_bars.append(data)
-                self.spread_bars.append(data)
+            self.user_log(
+                f"Historical Bar: {data}, ts={unix_nanos_to_iso8601(data.ts_init)}",
+                color=LogColor.RED,
+            )
 
     def on_quote_tick(self, tick):
-        self.user_log(f"QuoteTick: {tick}, ts={unix_nanos_to_iso8601(tick.ts_init)}", color=LogColor.BLUE)
-
-        # Test-specific: track quotes
-        if tick.instrument_id == self.config.spread_id:
-            self.spread_quotes_received += 1
-        elif tick.instrument_id == self.config.spread_id2:
-            self.future_spread_quotes_received += 1
+        self.user_log(
+            f"QuoteTick: {tick}, ts={unix_nanos_to_iso8601(tick.ts_init)}",
+            color=LogColor.BLUE,
+        )
 
         # Submit spread order when we have spread quotes available
         if tick.instrument_id == self.config.spread_id and not self.spread_order_submitted:
@@ -2071,37 +2098,28 @@ class OptionStrategy(Strategy):
             self.spread_order_submitted2 = True
 
     def on_order_filled(self, event):
-        self.user_log(f"Order filled: {event.instrument_id}, qty={event.last_qty}, price={event.last_px}, trade_id={event.trade_id}")
-        # Test-specific: track fills
-        if event.instrument_id == self.config.spread_id:
-            self.combo_fills.append(event)
-        elif (
-                event.instrument_id == self.config.option_id
-                or event.instrument_id == self.config.option_id2
-        ):
-            self.leg_fills.append(event)
+        self.user_log(
+            f"Order filled: {event.instrument_id}, qty={event.last_qty}, price={event.last_px}, trade_id={event.trade_id}",
+        )
 
     def on_position_opened(self, event):
-        self.user_log(f"Position opened: {event.instrument_id}, qty={event.quantity}, entry={event.entry}")
+        self.user_log(
+            f"Position opened: {event.instrument_id}, qty={event.quantity}, entry={event.entry}",
+        )
 
     def on_position_changed(self, event):
-        self.user_log(f"Position changed: {event.instrument_id}, qty={event.quantity}, pnl={event.unrealized_pnl}")
+        self.user_log(
+            f"Position changed: {event.instrument_id}, qty={event.quantity}, pnl={event.unrealized_pnl}",
+        )
 
     def on_data(self, data: Data):
         if isinstance(data, CustomTestData):
-            self.user_log(f"Received custom data: {data.label}={data.value}, ts={unix_nanos_to_iso8601(data.ts_init)}")
-            self.custom_data_received.append(data)
+            self.user_log(
+                f"CustomTestData: {data}, ts={unix_nanos_to_iso8601(data.ts_init)}",
+            )
 
     def on_bar(self, bar):
-        if bar.bar_type == self.bar_type_3:
-            self.user_log(f"Bar: {bar}, ts={unix_nanos_to_iso8601(bar.ts_init)}", color=LogColor.RED)
-            # Test-specific: track live spread bars
-            self.live_spread_bars.append(bar)
-            self.spread_bars.append(bar)
-        else:
-            self.user_log(
-                f"bar ts_init = {unix_nanos_to_iso8601(bar.ts_init)}, bar close = {bar}",
-            )
+        self.user_log(f"Bar: {bar}, ts={unix_nanos_to_iso8601(bar.ts_init)}")
 
         if not self.start_orders_done:
             self.user_log("Initializing the portfolio with some trades")
@@ -2141,14 +2159,19 @@ class OptionStrategy(Strategy):
         self.submit_order(order)
         self.user_log(f"Order submitted: {order}")
 
-    def on_stop(self):
-        self.unsubscribe_bars(self.bar_type)
-        self.unsubscribe_quote_ticks(self.config.option_id)
-        self.unsubscribe_quote_ticks(self.config.option_id2)
-        self.unsubscribe_quote_ticks(self.config.spread_id)
-        self.unsubscribe_data(DataType(CustomTestData), client_id=ClientId("any_id"))
-
     def user_log(self, msg, color=LogColor.GREEN):
         self.log.warning(f"{msg}", color=color)
+
         # Test-specific: publish to message bus for test collection
         self.msgbus.publish(topic="test", msg=str(msg))
+
+    def on_stop(self):
+        self.unsubscribe_bars(self.bar_type)
+        self.unsubscribe_bars(self.bar_type_2)
+        self.unsubscribe_bars(self.bar_type_3)
+        self.unsubscribe_quote_ticks(self.config.option_id)
+        self.unsubscribe_quote_ticks(self.config.option_id2)
+        self.unsubscribe_data(DataType(GreeksData), instrument_id=self.config.option_id)
+        self.unsubscribe_data(DataType(GreeksData), instrument_id=self.config.option_id2)
+        self.unsubscribe_quote_ticks(self.config.spread_id, params=self.default_data_params)
+        self.unsubscribe_quote_ticks(self.config.spread_id2, params=self.default_data_params)

@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -16,8 +16,8 @@
 //! Order types for the trading domain model.
 
 pub mod any;
+#[cfg(any(test, feature = "stubs"))]
 pub mod builder;
-pub mod default;
 pub mod limit;
 pub mod limit_if_touched;
 pub mod list;
@@ -41,9 +41,10 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
+#[cfg(any(test, feature = "stubs"))]
+pub use crate::orders::builder::OrderTestBuilder;
 pub use crate::orders::{
     any::{LimitOrderAny, OrderAny, PassiveOrderAny, StopOrderAny},
-    builder::OrderTestBuilder,
     limit::LimitOrder,
     limit_if_touched::LimitIfTouchedOrder,
     list::OrderList,
@@ -207,12 +208,14 @@ impl OrderStatus {
             (Self::Initialized, OrderEventAny::Canceled(_)) => Self::Canceled,  // External orders
             (Self::Initialized, OrderEventAny::Expired(_)) => Self::Expired,  // External orders
             (Self::Initialized, OrderEventAny::Triggered(_)) => Self::Triggered, // External orders
+            (Self::Initialized, OrderEventAny::Updated(_)) => Self::Initialized, // In-place modification
             (Self::Emulated, OrderEventAny::Canceled(_)) => Self::Canceled,  // Emulated orders
             (Self::Emulated, OrderEventAny::Expired(_)) => Self::Expired,  // Emulated orders
             (Self::Emulated, OrderEventAny::Released(_)) => Self::Released,  // Emulated orders
             (Self::Released, OrderEventAny::Submitted(_)) => Self::Submitted,  // Emulated orders
             (Self::Released, OrderEventAny::Denied(_)) => Self::Denied,  // Emulated orders
             (Self::Released, OrderEventAny::Canceled(_)) => Self::Canceled,  // Execution algo
+            (Self::Released, OrderEventAny::Updated(_)) => Self::Released, // In-place modification
             (Self::Submitted, OrderEventAny::PendingUpdate(_)) => Self::PendingUpdate,
             (Self::Submitted, OrderEventAny::PendingCancel(_)) => Self::PendingCancel,
             (Self::Submitted, OrderEventAny::Rejected(_)) => Self::Rejected,

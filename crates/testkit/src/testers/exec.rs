@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -667,6 +667,10 @@ impl DataActor for ExecTester {
 impl Strategy for ExecTester {
     fn core_mut(&mut self) -> &mut StrategyCore {
         &mut self.core
+    }
+
+    fn external_order_claims(&self) -> Option<Vec<InstrumentId>> {
+        self.config.base.external_order_claims.clone()
     }
 }
 
@@ -1427,6 +1431,7 @@ mod tests {
         identifiers::{StrategyId, TradeId, TraderId},
         instruments::stubs::crypto_perpetual_ethusdt,
         orders::LimitOrder,
+        stubs::TestDefault,
     };
     use nautilus_portfolio::portfolio::Portfolio;
     use rstest::*;
@@ -1473,7 +1478,7 @@ mod tests {
     }
 
     fn create_initialized_limit_order() -> OrderAny {
-        OrderAny::Limit(LimitOrder::default())
+        OrderAny::Limit(LimitOrder::test_default())
     }
 
     #[rstest]

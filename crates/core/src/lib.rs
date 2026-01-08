@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -88,6 +88,7 @@ compile_error!("Unsupported platform: Nautilus supports only Linux, macOS, and W
 // Re-exports
 pub use crate::{
     drop::CleanDrop,
+    message::Params,
     nanos::UnixNanos,
     shared::{SharedCell, WeakCell},
     stack_str::{STACKSTR_CAPACITY, StackStr},

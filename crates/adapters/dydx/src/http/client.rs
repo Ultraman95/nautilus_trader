@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -52,7 +52,7 @@
 
 use std::{
     collections::HashMap,
-    fmt::{Debug, Formatter},
+    fmt::Debug,
     num::NonZeroU32,
     sync::{
         Arc, LazyLock,
@@ -133,7 +133,7 @@ impl Default for DydxRawHttpClient {
 }
 
 impl Debug for DydxRawHttpClient {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(stringify!(DydxRawHttpClient))
             .field("base_url", &self.base_url)
             .field("is_testnet", &self.is_testnet)
@@ -392,10 +392,6 @@ impl DydxRawHttpClient {
         })
     }
 
-    // ========================================================================
-    // Markets Endpoints
-    // ========================================================================
-
     /// Fetch all perpetual markets from dYdX.
     ///
     /// # Errors
@@ -433,7 +429,7 @@ impl DydxRawHttpClient {
 
         for (ticker, market) in markets_response.markets {
             if !super::parse::is_market_active(&market.status) {
-                tracing::debug!(
+                log::debug!(
                     "Skipping inactive market {ticker} (status: {:?})",
                     market.status
                 );
@@ -446,27 +442,23 @@ impl DydxRawHttpClient {
                     instruments.push(instrument);
                 }
                 Err(e) => {
-                    tracing::error!("Failed to parse instrument {ticker}: {e}");
+                    log::error!("Failed to parse instrument {ticker}: {e}");
                 }
             }
         }
 
         if skipped_inactive > 0 {
-            tracing::info!(
+            log::info!(
                 "Parsed {} instruments, skipped {} inactive",
                 instruments.len(),
                 skipped_inactive
             );
         } else {
-            tracing::info!("Parsed {} instruments", instruments.len());
+            log::info!("Parsed {} instruments", instruments.len());
         }
 
         Ok(instruments)
     }
-
-    // ========================================================================
-    // Account Endpoints
-    // ========================================================================
 
     /// Fetch orderbook for a specific market.
     ///
@@ -527,10 +519,6 @@ impl DydxRawHttpClient {
         self.send_request(Method::GET, &endpoint, Some(&query))
             .await
     }
-
-    // ========================================================================
-    // Account Endpoints
-    // ========================================================================
 
     /// Fetch subaccount information.
     ///
@@ -622,10 +610,6 @@ impl DydxRawHttpClient {
         let query = query_parts.join("&");
         self.send_request(Method::GET, endpoint, Some(&query)).await
     }
-
-    // ========================================================================
-    // Utility Endpoints
-    // ========================================================================
 
     /// Get current server time.
     ///
@@ -775,7 +759,7 @@ impl DydxHttpClient {
             }
 
             if !super::parse::is_market_active(&market.status) {
-                tracing::debug!(
+                log::debug!(
                     "Skipping inactive market {ticker} (status: {:?})",
                     market.status
                 );
@@ -788,19 +772,19 @@ impl DydxHttpClient {
                     instruments.push(instrument);
                 }
                 Err(e) => {
-                    tracing::error!("Failed to parse instrument {ticker}: {e}");
+                    log::error!("Failed to parse instrument {ticker}: {e}");
                 }
             }
         }
 
         if skipped_inactive > 0 {
-            tracing::info!(
+            log::info!(
                 "Parsed {} instruments, skipped {} inactive",
                 instruments.len(),
                 skipped_inactive
             );
         } else {
-            tracing::debug!("Parsed {} instruments", instruments.len());
+            log::debug!("Parsed {} instruments", instruments.len());
         }
 
         Ok(instruments)
@@ -830,7 +814,7 @@ impl DydxHttpClient {
 
         for (ticker, market) in markets_response.markets {
             if !super::parse::is_market_active(&market.status) {
-                tracing::debug!(
+                log::debug!(
                     "Skipping inactive market {ticker} (status: {:?})",
                     market.status
                 );
@@ -844,7 +828,7 @@ impl DydxHttpClient {
                     parsed_markets.push(market);
                 }
                 Err(e) => {
-                    tracing::error!("Failed to parse instrument {ticker}: {e}");
+                    log::error!("Failed to parse instrument {ticker}: {e}");
                 }
             }
         }
@@ -868,13 +852,13 @@ impl DydxHttpClient {
         }
 
         if skipped_inactive > 0 {
-            tracing::info!(
+            log::info!(
                 "Cached {} instruments, skipped {} inactive",
                 parsed_instruments.len(),
                 skipped_inactive
             );
         } else {
-            tracing::info!("Cached {} instruments", parsed_instruments.len());
+            log::info!("Cached {} instruments", parsed_instruments.len());
         }
 
         Ok(())
@@ -1258,7 +1242,7 @@ impl DydxHttpClient {
             let instrument = match self.get_instrument_by_clob_id(order.clob_pair_id) {
                 Some(inst) => inst,
                 None => {
-                    tracing::warn!(
+                    log::warn!(
                         "Skipping order {}: no cached instrument for clob_pair_id {}",
                         order.id,
                         order.clob_pair_id
@@ -1276,7 +1260,7 @@ impl DydxHttpClient {
             {
                 Ok(report) => reports.push(report),
                 Err(e) => {
-                    tracing::warn!("Failed to parse order {}: {e}", order.id);
+                    log::warn!("Failed to parse order {}: {e}", order.id);
                 }
             }
         }
@@ -1321,7 +1305,7 @@ impl DydxHttpClient {
             let instrument = match self.get_instrument(&symbol) {
                 Some(inst) => inst,
                 None => {
-                    tracing::warn!(
+                    log::warn!(
                         "Skipping fill {}: no cached instrument for market {}",
                         fill.id,
                         fill.market
@@ -1338,7 +1322,7 @@ impl DydxHttpClient {
             match super::parse::parse_fill_report(&fill, &instrument, account_id, ts_init) {
                 Ok(report) => reports.push(report),
                 Err(e) => {
-                    tracing::warn!("Failed to parse fill {}: {e}", fill.id);
+                    log::warn!("Failed to parse fill {}: {e}", fill.id);
                 }
             }
         }
@@ -1376,10 +1360,7 @@ impl DydxHttpClient {
             let instrument = match self.get_instrument(&symbol) {
                 Some(inst) => inst,
                 None => {
-                    tracing::warn!(
-                        "Skipping position: no cached instrument for market {}",
-                        market
-                    );
+                    log::warn!("Skipping position: no cached instrument for market {market}");
                     continue;
                 }
             };
@@ -1397,7 +1378,7 @@ impl DydxHttpClient {
             ) {
                 Ok(report) => reports.push(report),
                 Err(e) => {
-                    tracing::warn!("Failed to parse position for {}: {e}", market);
+                    log::warn!("Failed to parse position for {market}: {e}");
                 }
             }
         }

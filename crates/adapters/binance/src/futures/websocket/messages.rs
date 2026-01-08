@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -25,12 +25,9 @@ use nautilus_network::websocket::WebSocketClient;
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
-use crate::{
-    common::enums::{
-        BinanceFuturesOrderType, BinanceOrderStatus, BinanceSide, BinanceTimeInForce,
-        BinanceWsMethod,
-    },
-    http::query::BinanceKlineInterval,
+use crate::common::enums::{
+    BinanceFuturesOrderType, BinanceKlineInterval, BinanceOrderStatus, BinanceSide,
+    BinanceTimeInForce, BinanceWsMethod,
 };
 
 /// Output message from the Futures WebSocket handler.

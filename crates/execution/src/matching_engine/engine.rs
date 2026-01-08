@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -1081,7 +1081,7 @@ impl OrderMatchingEngine {
                 command.instrument_id,
                 command.client_order_id,
                 Ustr::from(format!("Order {} not found", command.client_order_id).as_str()),
-                Some(command.venue_order_id),
+                command.venue_order_id,
                 Some(account_id),
             );
         }
@@ -3003,7 +3003,7 @@ impl OrderMatchingEngine {
         account_id: AccountId,
         instrument_id: InstrumentId,
         client_order_id: ClientOrderId,
-        venue_order_id: VenueOrderId,
+        venue_order_id: Option<VenueOrderId>,
         reason: Ustr,
     ) {
         let ts_now = self.clock.borrow().timestamp_ns();
@@ -3017,7 +3017,7 @@ impl OrderMatchingEngine {
             ts_now,
             ts_now,
             false,
-            Some(venue_order_id),
+            venue_order_id,
             Some(account_id),
         ));
         msgbus::send_any("ExecEngine.process".into(), &event as &dyn Any);

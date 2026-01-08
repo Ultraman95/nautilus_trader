@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -203,7 +203,7 @@ impl DatabentoHistoricalClient {
 
             match decode_instrument_def_msg(msg, instrument_id, None) {
                 Ok(instrument) => instruments.push(instrument),
-                Err(e) => tracing::error!("Failed to decode instrument: {e:?}"),
+                Err(e) => log::error!("Failed to decode instrument: {e:?}"),
             }
         }
 

@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -99,9 +99,7 @@ class DeribitExecutionClient(LiveExecutionClient):
         # Configuration
         self._config = config
         instrument_kinds = (
-            [i.name.upper() for i in config.instrument_kinds]
-            if config.instrument_kinds
-            else None
+            [i.name.upper() for i in config.instrument_kinds] if config.instrument_kinds else None
         )
         self._log.info(f"config.instrument_kinds={instrument_kinds}", LogColor.BLUE)
         self._log.info(f"{config.is_testnet=}", LogColor.BLUE)
@@ -139,7 +137,6 @@ class DeribitExecutionClient(LiveExecutionClient):
         self._log.info("Disconnecting...")
         self._log.info("Disconnected", LogColor.GREEN)
 
-
     def _handle_account_state(self, msg: nautilus_pyo3.AccountState) -> None:
         account_state = AccountState.from_dict(msg.to_dict())
         self.generate_account_state(
@@ -158,7 +155,6 @@ class DeribitExecutionClient(LiveExecutionClient):
             self._handle_account_state(account_state)
         except Exception as e:
             self._log.error(f"Failed to query account state: {e}")
-
 
     async def _submit_order(self, command: SubmitOrder) -> None:
         self._log.warning(

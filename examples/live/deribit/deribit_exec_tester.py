@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -62,9 +62,7 @@ from nautilus_trader.test_kit.strategies.tester_exec import ExecTesterConfig
 USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() != "false"
 
 # Optional: Filter by instrument kinds
-instrument_kinds: tuple[DeribitInstrumentKind, ...] | None = (
-    DeribitInstrumentKind.FUTURE,
-)
+instrument_kinds: tuple[DeribitInstrumentKind, ...] | None = (DeribitInstrumentKind.FUTURE,)
 
 # Define instrument to test with
 perpetual_id = InstrumentId.from_str(f"BTC-PERPETUAL.{DERIBIT}")

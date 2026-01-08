@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -32,7 +32,7 @@ use nautilus_model::{
     data::{Bar, BarType, BookOrder, TradeTick, stubs::OrderBookDeltaTestBuilder},
     enums::{
         AccountType, AggressorSide, BookAction, BookType, ContingencyType, LiquiditySide, OmsType,
-        OrderSide, OrderType, TimeInForce, TrailingOffsetType,
+        OrderSide, OrderType, TimeInForce, TrailingOffsetType, TriggerType,
     },
     events::{
         OrderEventAny, OrderEventType, OrderFilled, OrderRejected,
@@ -50,6 +50,7 @@ use nautilus_model::{
         Order, OrderAny, OrderTestBuilder,
         stubs::{TestOrderEventStubs, TestOrderStubs},
     },
+    stubs::TestDefault,
     types::{Price, Quantity},
 };
 use rstest::{fixture, rstest};
@@ -1381,17 +1382,16 @@ fn test_process_cancel_command_valid(
         .build();
     // Create cancel command for limit order above
     let cancel_command = CancelOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         UUID4::new(),
         UnixNanos::default(),
         None,
-    )
-    .unwrap();
+    );
 
     engine_l2
         .process_order_book_delta(&orderbook_delta_sell)
@@ -1433,17 +1433,16 @@ fn test_process_cancel_command_order_not_found(
     let client_order_id = ClientOrderId::from("O-19700101-000000-001-001-1");
     let account_id = AccountId::from("ACCOUNT-001");
     let cancel_command = CancelOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         UUID4::new(),
         UnixNanos::default(),
         None,
-    )
-    .unwrap();
+    );
 
     // Process cancel command for order which doesn't exists
     engine_l2.process_cancel(&cancel_command, account_id);
@@ -1550,16 +1549,15 @@ fn test_process_cancel_all_command(
 
     // Create cancel all order which related to only ETHUSDT-PERP.BINANCE instrument
     let cancel_all_command = CancelAllOrders::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         OrderSide::Buy,
         UUID4::new(),
         UnixNanos::default(),
         None,
-    )
-    .unwrap();
+    );
     engine_l2.process_cancel_all(&cancel_all_command, account_id);
 
     // Check we have received 3 OrderAccepted and 2 OrderCanceled events
@@ -1654,40 +1652,37 @@ fn test_process_batch_cancel_command(
     engine_l2.process_order(&mut limit_order_2, account_id);
 
     let cancel_1 = CancelOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id_1,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         UUID4::new(),
         UnixNanos::default(),
         None,
-    )
-    .unwrap();
+    );
     let cancel_2 = CancelOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id_2,
-        VenueOrderId::from("V2"),
+        Some(VenueOrderId::from("V2")),
         UUID4::new(),
         UnixNanos::default(),
         None,
-    )
-    .unwrap();
+    );
     let batch_cancel_command = BatchCancelOrders::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         vec![cancel_1, cancel_2],
         UUID4::new(),
         UnixNanos::default(),
         None,
-    )
-    .unwrap();
+    );
 
     engine_l2.process_batch_cancel(&batch_cancel_command, account_id);
 
@@ -1826,20 +1821,19 @@ fn test_process_modify_order_rejected_not_found(
     // Create modify order command with client order id that didn't pass through the engine
     let client_order_id = ClientOrderId::from("O-19700101-000000-001-001-1");
     let modify_order_command = ModifyOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         None,
         None,
         None,
         UUID4::new(),
         UnixNanos::default(),
         None,
-    )
-    .unwrap();
+    );
     engine_l2.process_modify(&modify_order_command, account_id);
 
     // Check if we have received OrderModifyRejected event
@@ -1896,20 +1890,19 @@ fn test_update_limit_order_post_only_matched(
 
     // Create ModifyOrder command to update price of the order to be matched
     let modify_order_command = ModifyOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         None,
         Some(Price::from("1500.00")), // Set price which will be matched
         None,
         UUID4::new(),
         UnixNanos::default(),
         None,
-    )
-    .unwrap();
+    );
     engine_l2.process_modify(&modify_order_command, account_id);
 
     // Check that we have received OrderAccepted and then OrderModifyRejected event because of post only
@@ -1978,20 +1971,19 @@ fn test_update_limit_order_valid(
     // Create ModifyOrder command to update price to 1500.00 where it will be matched immediately
     let new_limit_price = Price::from("1500.00");
     let modify_order_command = ModifyOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         None,
         Some(new_limit_price),
         None,
         UUID4::new(),
         UnixNanos::default(),
         None,
-    )
-    .unwrap();
+    );
     engine_l2.process_modify(&modify_order_command, account_id);
 
     // Check that we have received OrderAccepted and then OrderUpdated
@@ -2065,12 +2057,12 @@ fn test_update_stop_market_order_valid(
     //  as ask is at 1500.00 and order will be correctly updated
     let new_trigger_price = Price::from("1501.00");
     let modify_order_command = ModifyOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         None,
         None,
         Some(new_trigger_price),
@@ -2078,7 +2070,7 @@ fn test_update_stop_market_order_valid(
         UnixNanos::default(),
         None,
     );
-    engine_l2.process_modify(&modify_order_command.unwrap(), account_id);
+    engine_l2.process_modify(&modify_order_command, account_id);
 
     // Check that we have received OrderAccepted and then OrderUpdated
     let saved_messages = get_order_event_handler_messages(order_event_handler);
@@ -2129,12 +2121,12 @@ fn test_update_stop_limit_order_valid_update_not_triggered(
     // as ask is at 1500.00 and order will be correctly updated
     let new_trigger_price = Price::from("1501.00");
     let modify_order_command = ModifyOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         None,
         None,
         Some(new_trigger_price),
@@ -2142,7 +2134,7 @@ fn test_update_stop_limit_order_valid_update_not_triggered(
         UnixNanos::default(),
         None,
     );
-    engine_l2.process_modify(&modify_order_command.unwrap(), account_id);
+    engine_l2.process_modify(&modify_order_command, account_id);
 
     // Check that we have received OrderAccepted and then OrderUpdated
     let saved_messages = get_order_event_handler_messages(order_event_handler);
@@ -2245,12 +2237,12 @@ fn test_update_market_if_touched_order_valid(
     // as ask is at 1500.00 and order will be correctly updated
     let new_trigger_price = Price::from("1501.00");
     let modify_order_command = ModifyOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         None,
         None,
         Some(new_trigger_price),
@@ -2258,7 +2250,7 @@ fn test_update_market_if_touched_order_valid(
         UnixNanos::default(),
         None,
     );
-    engine_l2.process_modify(&modify_order_command.unwrap(), account_id);
+    engine_l2.process_modify(&modify_order_command, account_id);
 
     // Check that we have received OrderAccepted and then OrderUpdated
     let saved_messages = get_order_event_handler_messages(order_event_handler);
@@ -2392,12 +2384,12 @@ fn test_update_limit_if_touched_order_valid(
     // as ask is at 1500.00 and order will be correctly updated
     let new_trigger_price = Price::from("1499.00");
     let modify_order_command = ModifyOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         None,
         None,
         Some(new_trigger_price),
@@ -2405,7 +2397,7 @@ fn test_update_limit_if_touched_order_valid(
         UnixNanos::default(),
         None,
     );
-    engine_l2.process_modify(&modify_order_command.unwrap(), account_id);
+    engine_l2.process_modify(&modify_order_command, account_id);
 
     // Check that we have received OrderAccepted and then OrderUpdated
     let saved_messages = get_order_event_handler_messages(order_event_handler);
@@ -2618,6 +2610,10 @@ fn test_updating_of_trailing_stop_market_order_with_no_trigger_price_set(
         .quantity(Quantity::from("1.000"))
         .client_order_id(client_order_id)
         .trigger_price(Price::from("1505.00"))
+        // Explicitly use LAST_PRICE here because this test drives the trailing update via TradeTicks.
+        // TriggerType::Default is documented to behave like BID_ASK (quote-based) and will not update
+        // from last-trade-only data.
+        .trigger_type(TriggerType::LastPrice)
         .trailing_offset(dec!(1))
         .limit_offset(dec!(1))
         .trailing_offset_type(TrailingOffsetType::Price)
@@ -2735,12 +2731,12 @@ fn test_updating_of_contingent_orders(
     // Modify primary order quantity to 2.000 which will trigger the contingent order
     // update of the same quantity
     let modify_order_command = ModifyOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id_primary,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         Some(Quantity::from("2.000")),
         None,
         None,
@@ -2748,7 +2744,7 @@ fn test_updating_of_contingent_orders(
         UnixNanos::default(),
         None,
     );
-    engine_l2.process_modify(&modify_order_command.unwrap(), account_id);
+    engine_l2.process_modify(&modify_order_command, account_id);
 
     // Check that we have received following sequence of events
     // 1. OrderAccepted for primary limit order
@@ -3137,20 +3133,19 @@ fn test_modify_partially_filled_order_quantity_below_filled_rejected(
 
     // Attempt to modify quantity to 0.4, which is below filled_qty of 0.5
     let modify_order_command = ModifyOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         Some(Quantity::from("0.400")), // Below filled quantity
         None,
         None,
         UUID4::new(),
         UnixNanos::default(),
         None,
-    )
-    .unwrap();
+    );
     engine_l2.process_modify(&modify_order_command, account_id);
 
     // Should receive OrderModifyRejected
@@ -3267,20 +3262,19 @@ fn test_ouo_child_cancelled_when_parent_leaves_zero(
     // This makes leaves_qty = 0.6 - 0.6 = 0
     // Contingent should be cancelled because parent has no remaining quantity
     let modify_order_command = ModifyOrder::new(
-        TraderId::from("TRADER-001"),
-        ClientId::from("CLIENT-001"),
-        StrategyId::from("STRATEGY-001"),
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
         instrument_eth_usdt.id(),
         client_order_id_primary,
-        VenueOrderId::from("V1"),
+        Some(VenueOrderId::from("V1")),
         Some(Quantity::from("0.600")),
         None,
         None,
         UUID4::new(),
         UnixNanos::default(),
         None,
-    )
-    .unwrap();
+    );
     engine_l2.process_modify(&modify_order_command, account_id);
 
     // Expected events:

@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -114,6 +114,13 @@ fn _libnautilus(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cython-compat")]
     re_export_module_attributes(m, n)?;
 
+    let n = "execution";
+    let submodule = pyo3::wrap_pymodule!(nautilus_execution::python::execution);
+    m.add_wrapped(submodule)?;
+    sys_modules.set_item(format!("{module_name}.{n}"), m.getattr(n)?)?;
+    #[cfg(feature = "cython-compat")]
+    re_export_module_attributes(m, n)?;
+
     let n = "indicators";
     let submodule = pyo3::wrap_pymodule!(nautilus_indicators::python::indicators);
     m.add_wrapped(submodule)?;
@@ -180,6 +187,13 @@ fn _libnautilus(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     ////////////////////////////////////////////////////////////////////////////////
     // Adapters
     ////////////////////////////////////////////////////////////////////////////////
+
+    let n = "architect";
+    let submodule = pyo3::wrap_pymodule!(nautilus_architect_ax::python::architect);
+    m.add_wrapped(submodule)?;
+    sys_modules.set_item(format!("{module_name}.{n}"), m.getattr(n)?)?;
+    #[cfg(feature = "cython-compat")]
+    re_export_module_attributes(m, n)?;
 
     let n = "binance";
     let submodule = pyo3::wrap_pymodule!(nautilus_binance::python::binance);

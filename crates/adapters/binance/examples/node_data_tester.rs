@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -13,145 +13,65 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Example demonstrating live data testing with the Binance adapter.
+//! Example demonstrating live data testing with the Binance Spot SBE adapter.
 //!
-//! This example connects to Binance Futures WebSocket and subscribes to market data streams.
-//!
-//! Run with: `cargo run --example node-data-tester --package nautilus-binance`
-//!
-//! Environment variables (optional):
-//! - `BINANCE_API_KEY`: API key for authenticated endpoints
-//! - `BINANCE_API_SECRET`: API secret for request signing
+//! Run with: `cargo run --example binance-data-tester --package nautilus-binance`
 
-use futures_util::StreamExt;
+use std::num::NonZeroUsize;
+
 use nautilus_binance::{
     common::enums::{BinanceEnvironment, BinanceProductType},
-    futures::{
-        http::client::BinanceFuturesHttpClient,
-        websocket::{client::BinanceFuturesWebSocketClient, messages::NautilusFuturesWsMessage},
-    },
+    config::BinanceDataClientConfig,
+    factories::BinanceDataClientFactory,
 };
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use nautilus_common::enums::Environment;
+use nautilus_live::node::LiveNode;
+use nautilus_model::{
+    identifiers::{ClientId, InstrumentId, TraderId},
+    stubs::TestDefault,
+};
+use nautilus_testkit::testers::{DataTester, DataTesterConfig};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::registry()
-        .with(fmt::layer())
-        .with(EnvFilter::from_default_env().add_directive("info".parse()?))
-        .init();
-
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    let api_key = std::env::var("BINANCE_API_KEY").ok();
-    let api_secret = std::env::var("BINANCE_API_SECRET").ok();
-
-    tracing::info!("Fetching instruments from Binance Futures API...");
-    let http_client = BinanceFuturesHttpClient::new(
-        BinanceProductType::UsdM,
-        BinanceEnvironment::Mainnet,
-        api_key.clone(),
-        api_secret.clone(),
-        None, // base_url_override
-        None, // recv_window
-        None, // timeout_secs
-        None, // proxy_url
-    )?;
-
-    let instruments = http_client.instruments().await?;
-    tracing::info!(count = instruments.len(), "Fetched instruments");
-
-    tracing::info!("Creating Binance Futures WebSocket client...");
-    let mut ws_client = BinanceFuturesWebSocketClient::new(
-        BinanceProductType::UsdM,
-        BinanceEnvironment::Mainnet,
-        api_key,
-        api_secret,
-        None, // url_override
-        None, // heartbeat
-    )?;
-
-    ws_client.cache_instruments(instruments);
-
-    tracing::info!("Connecting to Binance Futures WebSocket...");
-    ws_client.connect().await?;
-
-    tracing::info!("Subscribing to market data streams...");
-    let streams = vec![
-        "btcusdt@aggTrade".to_string(),
-        "ethusdt@aggTrade".to_string(),
-        "btcusdt@bookTicker".to_string(),
-        "ethusdt@bookTicker".to_string(),
+    let environment = Environment::Live;
+    let trader_id = TraderId::test_default();
+    let node_name = "BINANCE-TESTER-001".to_string();
+    let instrument_ids = vec![
+        InstrumentId::from("BTCUSDT.BINANCE"),
+        // InstrumentId::from("ETHUSDT.BINANCE"),
     ];
-    ws_client.subscribe(streams).await?;
 
-    tracing::info!("Listening for messages (Ctrl+C to stop)...");
+    // SBE streams require Ed25519 authentication (not HMAC)
+    // Generate Ed25519 keys in your Binance account API settings
+    let binance_config = BinanceDataClientConfig {
+        product_types: vec![BinanceProductType::Spot],
+        environment: BinanceEnvironment::Mainnet,
+        api_key: None,    // HMAC key for HTTP API (optional)
+        api_secret: None, // HMAC secret for HTTP API (optional)
+        ed25519_api_key: std::env::var("BINANCE_ED25519_API_KEY").ok(),
+        ed25519_api_secret: std::env::var("BINANCE_ED25519_API_SECRET").ok(),
+        ..Default::default()
+    };
 
-    let stream = ws_client.stream();
-    tokio::pin!(stream);
+    let client_factory = BinanceDataClientFactory::new();
+    let client_id = ClientId::new("BINANCE");
 
-    let mut message_count = 0u64;
-    let start_time = std::time::Instant::now();
+    let mut node = LiveNode::builder(trader_id, environment)?
+        .with_name(node_name)
+        .with_delay_post_stop_secs(2)
+        .add_data_client(None, Box::new(client_factory), Box::new(binance_config))?
+        .build()?;
 
-    loop {
-        tokio::select! {
-            Some(msg) = stream.next() => {
-                message_count += 1;
+    let tester_config = DataTesterConfig::new(client_id, instrument_ids)
+        .with_subscribe_book_at_interval(true)
+        .with_book_interval_ms(NonZeroUsize::new(10).unwrap());
+    let tester = DataTester::new(tester_config);
 
-                match msg {
-                    NautilusFuturesWsMessage::Data(data_vec) => {
-                        for data in data_vec {
-                            tracing::info!(message_count, "Data: {data:?}");
-                        }
-                    }
-                    NautilusFuturesWsMessage::Deltas(deltas) => {
-                        tracing::info!(
-                            message_count,
-                            instrument_id = %deltas.instrument_id,
-                            num_deltas = deltas.deltas.len(),
-                            "OrderBook deltas"
-                        );
-                    }
-                    NautilusFuturesWsMessage::Error(err) => {
-                        tracing::error!(code = err.code, msg = %err.msg, "WebSocket error");
-                    }
-                    NautilusFuturesWsMessage::Reconnected => {
-                        tracing::warn!("WebSocket reconnected");
-                    }
-                    NautilusFuturesWsMessage::Instrument(inst) => {
-                        tracing::info!("Instrument: {inst:?}");
-                    }
-                    NautilusFuturesWsMessage::RawJson(json) => {
-                        tracing::debug!("Raw JSON: {json}");
-                    }
-                }
-
-                if message_count.is_multiple_of(100) {
-                    let elapsed = start_time.elapsed().as_secs_f64();
-                    let rate = message_count as f64 / elapsed;
-                    tracing::info!(
-                        message_count,
-                        elapsed_secs = format!("{elapsed:.1}"),
-                        rate = format!("{rate:.1}/s"),
-                        "Statistics"
-                    );
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Received Ctrl+C, shutting down...");
-                break;
-            }
-        }
-    }
-
-    ws_client.close().await?;
-
-    let elapsed = start_time.elapsed().as_secs_f64();
-    tracing::info!(
-        total_messages = message_count,
-        elapsed_secs = format!("{elapsed:.1}"),
-        avg_rate = format!("{:.1}/s", message_count as f64 / elapsed),
-        "Final statistics"
-    );
+    node.add_actor(tester)?;
+    node.run().await?;
 
     Ok(())
 }

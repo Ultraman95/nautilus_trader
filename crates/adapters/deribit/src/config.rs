@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -242,13 +242,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.ws_url(), "wss://test.deribit.com/ws/api/v2");
-    }
-
-    #[rstest]
-    fn test_has_api_credentials_none() {
-        let config = DeribitDataClientConfig::default();
-        // Without env vars set, should return false
-        assert!(!config.has_api_credentials());
     }
 
     #[rstest]

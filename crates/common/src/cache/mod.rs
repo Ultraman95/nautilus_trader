@@ -1,5 +1,5 @@
 // -------------------------------------------------------------------------------------------------
-//  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+//  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 //  https://nautechsystems.io
 //
 //  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -870,7 +870,7 @@ impl Cache {
         // Check for any open orders
         for order in self.orders_open(None, None, None, None) {
             residuals = true;
-            log::warn!("Residual {order:?}");
+            log::warn!("Residual {order}");
         }
 
         // Check for any open positions

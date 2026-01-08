@@ -1,5 +1,5 @@
 # -------------------------------------------------------------------------------------------------
-#  Copyright (C) 2015-2025 Nautech Systems Pty Ltd. All rights reserved.
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
 #  https://nautechsystems.io
 #
 #  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
@@ -114,6 +114,7 @@ cdef class DataEngine(Component):
     cdef readonly dict[UUID4, UUID4] _parent_join_request_id
     cdef readonly dict[UUID4, UUID4] _parent_request_id
     cdef readonly bint _disable_historical_cache
+    cdef readonly dict[UUID4, dict[str, Any]] _bar_types_params
 
     cdef TopicCache _topic_cache
 
@@ -161,7 +162,7 @@ cdef class DataEngine(Component):
     cpdef list subscribed_custom_data(self)
     cpdef list subscribed_instruments(self)
     cpdef list subscribed_order_book_deltas(self)
-    cpdef list subscribed_order_book_snapshots(self)
+    cpdef list subscribed_order_book_depth(self)
     cpdef list subscribed_quote_ticks(self)
     cpdef list subscribed_trade_ticks(self)
     cpdef list subscribed_mark_prices(self)
