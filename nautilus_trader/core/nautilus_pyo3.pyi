@@ -6318,9 +6318,12 @@ class BybitHttpClient:
         order_side: OrderSide,
         order_type: OrderType,
         quantity: Quantity,
-        time_in_force: TimeInForce,
+        time_in_force: TimeInForce | None = None,
         price: Price | None = None,
+        trigger_price: Price | None = None,
+        post_only: bool | None = None,
         reduce_only: bool = False,
+        is_quote_quantity: bool = False,
         is_leverage: bool = False,
     ) -> OrderStatusReport: ...
     async def cancel_order(
@@ -6958,7 +6961,10 @@ class DeribitWebSocketClient:
     @staticmethod
     def new_public(is_testnet: bool) -> DeribitWebSocketClient: ...
     @staticmethod
-    def with_credentials(is_testnet: bool) -> DeribitWebSocketClient: ...
+    def with_credentials(
+        is_testnet: bool,
+        account_id: AccountId | None = None,
+    ) -> DeribitWebSocketClient: ...
     @property
     def url(self) -> str: ...
     @property
@@ -6978,7 +6984,7 @@ class DeribitWebSocketClient:
     async def wait_until_active(self, timeout_secs: float) -> None: ...
     async def close(self) -> None: ...
     async def authenticate(self, session_name: str | None = None) -> None: ...
-    async def authenticate_session(self) -> None: ...
+    async def authenticate_session(self, session_name: str) -> None: ...
     async def subscribe_trades(
         self,
         instrument_id: InstrumentId,
@@ -7051,6 +7057,67 @@ class DeribitWebSocketClient:
         self,
         instrument_id: InstrumentId,
         resolution: str,
+    ) -> None: ...
+    async def buy(
+        self,
+        quantity: Quantity,
+        order_type: OrderType,
+        client_order_id: ClientOrderId,
+        trader_id: TraderId,
+        strategy_id: StrategyId,
+        instrument_id: InstrumentId,
+        price: Price | None = None,
+        time_in_force: str | None = None,
+        post_only: bool = False,
+        reduce_only: bool = False,
+        trigger_price: Price | None = None,
+        trigger: str | None = None,
+    ) -> None: ...
+    async def sell(
+        self,
+        quantity: Quantity,
+        order_type: OrderType,
+        client_order_id: ClientOrderId,
+        trader_id: TraderId,
+        strategy_id: StrategyId,
+        instrument_id: InstrumentId,
+        price: Price | None = None,
+        time_in_force: str | None = None,
+        post_only: bool = False,
+        reduce_only: bool = False,
+        trigger_price: Price | None = None,
+        trigger: str | None = None,
+    ) -> None: ...
+    async def edit(
+        self,
+        order_id: str,
+        quantity: Quantity,
+        price: Price,
+        client_order_id: ClientOrderId,
+        trader_id: TraderId,
+        strategy_id: StrategyId,
+        instrument_id: InstrumentId,
+    ) -> None: ...
+    async def cancel(
+        self,
+        order_id: str,
+        client_order_id: ClientOrderId,
+        trader_id: TraderId,
+        strategy_id: StrategyId,
+        instrument_id: InstrumentId,
+    ) -> None: ...
+    async def cancel_all_by_instrument(
+        self,
+        instrument_id: InstrumentId,
+        order_type: str | None = None,
+    ) -> None: ...
+    async def get_order_state(
+        self,
+        order_id: str,
+        client_order_id: ClientOrderId,
+        trader_id: TraderId,
+        strategy_id: StrategyId,
+        instrument_id: InstrumentId,
     ) -> None: ...
 
 def get_deribit_http_base_url(is_testnet: bool) -> str: ...
@@ -8934,3 +9001,169 @@ class LongRatio:
     @property
     def name(self) -> str: ...
     def calculate_from_positions(self, positions: list[Position]) -> float | None: ...
+
+###################################################################################################
+# Binance
+###################################################################################################
+
+class BinanceProductType(Enum):
+    SPOT = "SPOT"
+    MARGIN = "MARGIN"
+    USD_M = "USD_M"
+    COIN_M = "COIN_M"
+    OPTIONS = "OPTIONS"
+
+class BinanceEnvironment(Enum):
+    MAINNET = "MAINNET"
+    TESTNET = "TESTNET"
+
+class BinanceSpotHttpClient:
+    def __init__(
+        self,
+        environment: BinanceEnvironment = ...,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        base_url: str | None = None,
+        recv_window: int | None = None,
+        timeout_secs: int | None = None,
+        proxy_url: str | None = None,
+    ) -> None: ...
+    @property
+    def schema_id(self) -> int: ...
+    @property
+    def schema_version(self) -> int: ...
+    async def ping(self) -> None: ...
+    async def server_time(self) -> int: ...
+    async def request_instruments(self) -> list[Instrument]: ...
+    async def request_trades(
+        self,
+        instrument_id: InstrumentId,
+        limit: int | None = None,
+    ) -> list[TradeTick]: ...
+    async def request_order_status(
+        self,
+        account_id: AccountId,
+        instrument_id: InstrumentId,
+        venue_order_id: VenueOrderId | None = None,
+        client_order_id: ClientOrderId | None = None,
+    ) -> OrderStatusReport: ...
+    async def request_order_status_reports(
+        self,
+        account_id: AccountId,
+        instrument_id: InstrumentId | None = None,
+        start: dt.datetime | None = None,
+        end: dt.datetime | None = None,
+        open_only: bool = False,
+        limit: int | None = None,
+    ) -> list[OrderStatusReport]: ...
+    async def request_fill_reports(
+        self,
+        account_id: AccountId,
+        instrument_id: InstrumentId,
+        venue_order_id: VenueOrderId | None = None,
+        start: dt.datetime | None = None,
+        end: dt.datetime | None = None,
+        limit: int | None = None,
+    ) -> list[FillReport]: ...
+    async def request_bars(
+        self,
+        bar_type: BarType,
+        start: dt.datetime | None = None,
+        end: dt.datetime | None = None,
+        limit: int | None = None,
+    ) -> list[Bar]: ...
+    async def submit_order(
+        self,
+        account_id: AccountId,
+        instrument_id: InstrumentId,
+        client_order_id: ClientOrderId,
+        order_side: OrderSide,
+        order_type: OrderType,
+        quantity: Quantity,
+        time_in_force: TimeInForce,
+        price: Price | None = None,
+        trigger_price: Price | None = None,
+        post_only: bool = False,
+    ) -> OrderStatusReport: ...
+    async def modify_order(
+        self,
+        account_id: AccountId,
+        instrument_id: InstrumentId,
+        venue_order_id: VenueOrderId,
+        client_order_id: ClientOrderId,
+        order_side: OrderSide,
+        order_type: OrderType,
+        quantity: Quantity,
+        time_in_force: TimeInForce,
+        price: Price | None = None,
+    ) -> OrderStatusReport: ...
+    async def cancel_order(
+        self,
+        instrument_id: InstrumentId,
+        venue_order_id: VenueOrderId | None = None,
+        client_order_id: ClientOrderId | None = None,
+    ) -> VenueOrderId: ...
+    async def cancel_all_orders(
+        self,
+        instrument_id: InstrumentId,
+    ) -> list[VenueOrderId]: ...
+
+class BinanceFuturesHttpClient:
+    def __init__(
+        self,
+        product_type: BinanceProductType,
+        environment: BinanceEnvironment = ...,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        base_url: str | None = None,
+        recv_window: int | None = None,
+        timeout_secs: int | None = None,
+        proxy_url: str | None = None,
+    ) -> None: ...
+    @property
+    def product_type(self) -> BinanceProductType: ...
+    async def server_time(self) -> int: ...
+    async def request_instruments(self) -> list[Instrument]: ...
+    async def create_listen_key(self) -> str: ...
+    async def keepalive_listen_key(self, listen_key: str) -> None: ...
+    async def close_listen_key(self, listen_key: str) -> None: ...
+    async def query_hedge_mode(self) -> bool: ...
+    async def query_account(self) -> dict[str, Any]: ...
+
+class BinanceSpotWebSocketClient:
+    def __init__(
+        self,
+        url: str | None = None,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        heartbeat: int | None = None,
+    ) -> None: ...
+    def is_active(self) -> bool: ...
+    def is_closed(self) -> bool: ...
+    def subscription_count(self) -> int: ...
+    def cache_instrument(self, instrument: Instrument) -> None: ...
+    async def connect(self, callback: Callable) -> None: ...
+    async def close(self) -> None: ...
+    async def subscribe(self, streams: list[str]) -> None: ...
+    async def unsubscribe(self, streams: list[str]) -> None: ...
+
+class BinanceFuturesWebSocketClient:
+    def __init__(
+        self,
+        product_type: BinanceProductType,
+        environment: BinanceEnvironment,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+        url_override: str | None = None,
+        heartbeat: int | None = None,
+    ) -> None: ...
+    @property
+    def product_type(self) -> BinanceProductType: ...
+    def is_active(self) -> bool: ...
+    def is_closed(self) -> bool: ...
+    def subscription_count(self) -> int: ...
+    def cache_instrument(self, instrument: Instrument) -> None: ...
+    async def connect(self, callback: Callable) -> None: ...
+    async def close(self) -> None: ...
+    async def subscribe(self, streams: list[str]) -> None: ...
+    async def unsubscribe(self, streams: list[str]) -> None: ...

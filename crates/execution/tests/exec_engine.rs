@@ -25,12 +25,15 @@ use nautilus_common::{
     messages::execution::{CancelOrder, ModifyOrder, SubmitOrder, SubmitOrderList, TradingCommand},
 };
 use nautilus_core::{UUID4, UnixNanos};
+use nautilus_execution::engine::{
+    ExecutionEngine, config::ExecutionEngineConfig, stubs::StubExecutionClient,
+};
 use nautilus_model::{
     accounts::CashAccount,
     data::{QuoteTick, TradeTick},
     enums::{
         AggressorSide, LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, PositionSide,
-        TimeInForce, TriggerType,
+        PositionSideSpecified, TimeInForce, TriggerType,
     },
     events::{OrderCanceled, OrderEventAny, OrderFilled, OrderPendingUpdate, OrderUpdated},
     identifiers::{
@@ -40,14 +43,13 @@ use nautilus_model::{
     instruments::{Instrument, InstrumentAny, stubs::audusd_sim},
     orders::{Order, OrderAny, OrderList, builder::OrderTestBuilder, stubs::TestOrderEventStubs},
     position::Position,
+    reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
     stubs::{TestDefault, stub_position_long},
-    types::{Money, Price, Quantity},
+    types::{Currency, Money, Price, Quantity},
 };
 use rstest::*;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-
-use crate::engine::{ExecutionEngine, config::ExecutionEngineConfig, stubs::StubExecutionClient};
 
 #[fixture]
 fn test_clock() -> Rc<RefCell<dyn clock::Clock>> {
@@ -246,13 +248,21 @@ fn test_check_integrity_returns_true(execution_engine: ExecutionEngine) {
 }
 
 #[rstest]
+fn test_execution_engine_with_config_initializes_correctly(
+    execution_engine_with_config: ExecutionEngine,
+) {
+    let integrity_check = execution_engine_with_config.check_integrity();
+    assert!(integrity_check);
+}
+
+#[rstest]
 fn test_set_position_id_counts_updates_correctly(mut execution_engine: ExecutionEngine) {
     let instrument = audusd_sim();
     let position = stub_position_long(instrument);
     let strategy_id = position.strategy_id;
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_position(position, OmsType::Netting)
         .unwrap();
@@ -264,14 +274,6 @@ fn test_set_position_id_counts_updates_correctly(mut execution_engine: Execution
         actual_count, 1,
         "Expected position ID count to be 1 for strategy_id {strategy_id:?}, but got {actual_count}"
     );
-}
-
-#[rstest]
-fn test_execution_engine_with_config_initializes_correctly(
-    execution_engine_with_config: ExecutionEngine,
-) {
-    let integrity_check = execution_engine_with_config.check_integrity();
-    assert!(integrity_check);
 }
 
 #[rstest]
@@ -300,7 +302,7 @@ fn test_submit_order_with_duplicate_client_order_id_handles_gracefully(
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -312,11 +314,18 @@ fn test_submit_order_with_duplicate_client_order_id_handles_gracefully(
         .quantity(Quantity::from(100_000))
         .build();
 
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
+        .unwrap();
+
     let submit_order = SubmitOrder {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -333,13 +342,13 @@ fn test_submit_order_with_duplicate_client_order_id_handles_gracefully(
 
     assert!(
         execution_engine
-            .cache
+            .cache()
             .borrow()
             .order_exists(&order.client_order_id()),
         "Order should exist in cache"
     );
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let cached_order = cache
         .order(&order.client_order_id())
         .expect("Order should be cached");
@@ -374,7 +383,7 @@ fn test_submit_order_for_random_venue_logs(mut execution_engine: ExecutionEngine
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -386,12 +395,25 @@ fn test_submit_order_for_random_venue_logs(mut execution_engine: ExecutionEngine
         .side(OrderSide::Buy)
         .quantity(Quantity::from(10))
         .build();
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(
+            order.clone(),
+            None,
+            Some(ClientId::from("RANDOM_VENUE")),
+            true,
+        )
+        .unwrap();
+
     // This will test the scenario where no specific routing exists
     let submit_order = SubmitOrder {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("RANDOM_VENUE")), // No client registered with this ID
@@ -401,7 +423,7 @@ fn test_submit_order_for_random_venue_logs(mut execution_engine: ExecutionEngine
     };
     // This should find the client by venue routing since instrument is AUD/USD.SIM
     execution_engine.execute(&TradingCommand::SubmitOrder(submit_order));
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     assert!(
         cache.order_exists(&order.client_order_id()),
         "Order should be added to cache when client routing is available"
@@ -433,14 +455,14 @@ fn test_order_filled_with_unrecognized_strategy_id(mut execution_engine: Executi
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
@@ -453,7 +475,7 @@ fn test_order_filled_with_unrecognized_strategy_id(mut execution_engine: Executi
         .quantity(Quantity::from(100_000))
         .build();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -485,7 +507,7 @@ fn test_order_filled_with_unrecognized_strategy_id(mut execution_engine: Executi
     );
     // This should now log an error instead of panicking
     execution_engine.process(&OrderEventAny::Filled(order_filled_event));
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let updated_order = cache.order(&order.client_order_id()).unwrap();
     assert_eq!(
         updated_order.status(),
@@ -514,7 +536,7 @@ fn test_submit_bracket_order_list_with_all_duplicate_client_order_id_logs_does_n
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -581,7 +603,7 @@ fn test_submit_bracket_order_list_with_all_duplicate_client_order_id_logs_does_n
     execution_engine.process(&take_profit_submitted);
 
     // Get updated orders from cache after submitted events
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let entry_updated = cache
         .order(&entry.client_order_id())
         .expect("Entry order should exist")
@@ -613,7 +635,7 @@ fn test_submit_bracket_order_list_with_all_duplicate_client_order_id_logs_does_n
         OrderStatus::Submitted,
         "Take profit order should remain SUBMITTED (not invalidated by duplicate)"
     );
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     assert!(
         cache.order_exists(&entry.client_order_id()),
         "Entry order should exist in cache"
@@ -651,7 +673,7 @@ fn test_submit_order_successfully_processes_and_caches_order(
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -662,12 +684,20 @@ fn test_submit_order_successfully_processes_and_caches_order(
         .instrument_id(instrument.id)
         .quantity(Quantity::from(100_000))
         .build();
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
+        .unwrap();
+
     let submit_order = SubmitOrder {
         trader_id,
         strategy_id,
         position_id: None,
         params: None,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         command_id: UUID4::new(),
         ts_init: UnixNanos::default(),
         client_id: Some(ClientId::from("STUB")),
@@ -675,7 +705,7 @@ fn test_submit_order_successfully_processes_and_caches_order(
         exec_algorithm_id: None,
     };
     execution_engine.execute(&TradingCommand::SubmitOrder(submit_order));
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     assert!(
         cache.order_exists(&order.client_order_id()),
         "Order should exist in cache after submission"
@@ -734,7 +764,7 @@ fn test_submit_order_with_cleared_cache_logs_error(mut execution_engine: Executi
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -746,12 +776,20 @@ fn test_submit_order_with_cleared_cache_logs_error(mut execution_engine: Executi
         .side(OrderSide::Buy)
         .quantity(Quantity::from(100_000))
         .build();
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
+        .unwrap();
+
     let submit_order = SubmitOrder {
         trader_id,
         client_id: Some(ClientId::from("STUB")),
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         exec_algorithm_id: None,
         position_id: None,
         params: None,
@@ -761,17 +799,17 @@ fn test_submit_order_with_cleared_cache_logs_error(mut execution_engine: Executi
     execution_engine.execute(&TradingCommand::SubmitOrder(submit_order));
     assert!(
         execution_engine
-            .cache
+            .cache()
             .borrow()
             .order_exists(&order.client_order_id()),
         "Order should be added to cache after submission"
     );
 
     // Clear the cache (equivalent to self.cache.reset() in Python)
-    execution_engine.cache.borrow_mut().reset();
+    execution_engine.cache().borrow_mut().reset();
     assert!(
         !execution_engine
-            .cache
+            .cache()
             .borrow()
             .order_exists(&order.client_order_id()),
         "Order should no longer exist in cache after clearing"
@@ -790,7 +828,7 @@ fn test_submit_order_with_cleared_cache_logs_error(mut execution_engine: Executi
     );
     assert!(
         !execution_engine
-            .cache
+            .cache()
             .borrow()
             .order_exists(&order.client_order_id()),
         "Order should remain absent from cache"
@@ -817,7 +855,7 @@ fn test_when_applying_event_to_order_with_invalid_state_trigger_logs(
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -829,12 +867,20 @@ fn test_when_applying_event_to_order_with_invalid_state_trigger_logs(
         .side(OrderSide::Buy)
         .quantity(Quantity::from(100_000))
         .build();
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
+        .unwrap();
+
     let submit_order = SubmitOrder {
         trader_id,
         client_id: Some(ClientId::from("STUB")),
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         exec_algorithm_id: None,
         position_id: None,
         params: None,
@@ -844,7 +890,7 @@ fn test_when_applying_event_to_order_with_invalid_state_trigger_logs(
     execution_engine.execute(&TradingCommand::SubmitOrder(submit_order));
     assert!(
         execution_engine
-            .cache
+            .cache()
             .borrow()
             .order_exists(&order.client_order_id()),
         "Order should be added to cache after submission"
@@ -882,7 +928,7 @@ fn test_order_filled_event_when_order_not_found_in_cache_logs(
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -897,7 +943,7 @@ fn test_order_filled_event_when_order_not_found_in_cache_logs(
         .build();
     assert!(
         !execution_engine
-            .cache
+            .cache()
             .borrow()
             .order_exists(&order.client_order_id()),
         "Order should not exist in cache"
@@ -923,7 +969,7 @@ fn test_order_filled_event_when_order_not_found_in_cache_logs(
     );
     assert!(
         !execution_engine
-            .cache
+            .cache()
             .borrow()
             .order_exists(&order.client_order_id()),
         "Order should still not exist in cache"
@@ -950,14 +996,14 @@ fn test_cancel_order_for_already_closed_order_logs_and_does_nothing(
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
@@ -969,12 +1015,20 @@ fn test_cancel_order_for_already_closed_order_logs_and_does_nothing(
         .side(OrderSide::Buy)
         .quantity(Quantity::from(100_000))
         .build();
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(order.clone(), None, Some(ClientId::from("STUB")), false)
+        .unwrap();
+
     let submit_order = SubmitOrder {
         trader_id,
         client_id: Some(ClientId::from("STUB")),
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         exec_algorithm_id: None,
         position_id: None,
         params: None,
@@ -1018,7 +1072,7 @@ fn test_cancel_order_for_already_closed_order_logs_and_does_nothing(
     ));
     execution_engine.process(&order_filled_event);
     let order_status = {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         let cached_order = cache
             .order(&order.client_order_id())
             .expect("Order should exist in cache");
@@ -1043,7 +1097,7 @@ fn test_cancel_order_for_already_closed_order_logs_and_does_nothing(
 
     execution_engine.execute(&TradingCommand::CancelOrder(cancel_order));
     let order_status_after_cancel = {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         let cached_order_after_cancel = cache
             .order(&order.client_order_id())
             .expect("Order should still exist in cache");
@@ -1076,7 +1130,7 @@ fn test_canceled_order_receiving_fill_event_reopens_and_completes_order(
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -1089,7 +1143,7 @@ fn test_canceled_order_receiving_fill_event_reopens_and_completes_order(
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -1104,7 +1158,7 @@ fn test_canceled_order_receiving_fill_event_reopens_and_completes_order(
         VenueOrderId::from("V-001"),
     );
     execution_engine.process(&order_accepted_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let accepted_order = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -1120,7 +1174,7 @@ fn test_canceled_order_receiving_fill_event_reopens_and_completes_order(
         Some(VenueOrderId::from("V-001")), // Must match the accepted event
     );
     execution_engine.process(&order_canceled_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let canceled_order = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -1161,7 +1215,7 @@ fn test_canceled_order_receiving_fill_event_reopens_and_completes_order(
     ));
 
     execution_engine.process(&order_filled_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let filled_order = cache
         .order(&order.client_order_id())
         .expect("Order should still exist in cache after fill");
@@ -1209,7 +1263,7 @@ fn test_canceled_order_receiving_partial_fill_event_reopens_and_becomes_partiall
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -1222,7 +1276,7 @@ fn test_canceled_order_receiving_partial_fill_event_reopens_and_becomes_partiall
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -1244,7 +1298,7 @@ fn test_canceled_order_receiving_partial_fill_event_reopens_and_becomes_partiall
         Some(VenueOrderId::from("V-001")), // Must match the accepted event
     );
     execution_engine.process(&order_canceled_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let canceled_order = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -1286,7 +1340,7 @@ fn test_canceled_order_receiving_partial_fill_event_reopens_and_becomes_partiall
     ));
 
     execution_engine.process(&order_partially_filled_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let partially_filled_order = cache
         .order(&order.client_order_id())
         .expect("Order should still exist in cache after partial fill");
@@ -1351,7 +1405,7 @@ fn test_process_event_with_no_venue_order_id_logs_and_does_nothing(
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -1366,7 +1420,7 @@ fn test_process_event_with_no_venue_order_id_logs_and_does_nothing(
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -1389,7 +1443,7 @@ fn test_process_event_with_no_venue_order_id_logs_and_does_nothing(
         None,  // account_id
     ));
     execution_engine.process(&order_canceled_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let order_after = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -1421,7 +1475,7 @@ fn test_modify_order_for_already_closed_order_logs_and_does_nothing(
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -1435,7 +1489,7 @@ fn test_modify_order_for_already_closed_order_logs_and_does_nothing(
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -1473,7 +1527,7 @@ fn test_modify_order_for_already_closed_order_logs_and_does_nothing(
         Some(Money::from("2 USD")),
     ));
     execution_engine.process(&order_filled_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let filled_order = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -1506,7 +1560,7 @@ fn test_modify_order_for_already_closed_order_logs_and_does_nothing(
         params: None,
     };
     execution_engine.execute(&TradingCommand::ModifyOrder(modify_order));
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let order_after = cache
         .order(&order.client_order_id())
         .expect("Order should still exist in cache");
@@ -1544,7 +1598,7 @@ fn test_handle_order_event_with_different_client_order_id_but_matching_venue_ord
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -1557,7 +1611,7 @@ fn test_handle_order_event_with_different_client_order_id_but_matching_venue_ord
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -1587,7 +1641,7 @@ fn test_handle_order_event_with_different_client_order_id_but_matching_venue_ord
         Some(AccountId::from("TEST-ACCOUNT")),
     ));
     execution_engine.process(&order_canceled_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let order_after = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -1619,7 +1673,7 @@ fn test_handle_order_event_with_random_client_order_id_and_order_id_not_cached(
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -1632,7 +1686,7 @@ fn test_handle_order_event_with_random_client_order_id_and_order_id_not_cached(
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -1663,7 +1717,7 @@ fn test_handle_order_event_with_random_client_order_id_and_order_id_not_cached(
         Some(AccountId::from("TEST-ACCOUNT")),
     ));
     execution_engine.process(&order_canceled_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let order_after = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -1695,7 +1749,7 @@ fn test_handle_duplicate_order_events_logs_error_and_does_not_apply(
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -1708,7 +1762,7 @@ fn test_handle_duplicate_order_events_logs_error_and_does_not_apply(
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -1740,7 +1794,7 @@ fn test_handle_duplicate_order_events_logs_error_and_does_not_apply(
 
     execution_engine.process(&order_canceled_event);
     execution_engine.process(&order_canceled_event); // Duplicate event
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let order_after = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -1786,20 +1840,20 @@ fn test_handle_order_fill_event_with_no_position_id_correctly_handles_fill(
 
     // Perform setup operations sequentially with explicit borrow management
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -1821,7 +1875,7 @@ fn test_handle_order_fill_event_with_no_position_id_correctly_handles_fill(
     );
 
     execution_engine.process(&order_filled_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let position_ids = cache.position_ids(None, None, None);
     assert_eq!(position_ids.len(), 1, "Should have exactly one position");
 
@@ -1888,7 +1942,7 @@ fn test_handle_order_fill_event(mut execution_engine: ExecutionEngine) {
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -1896,7 +1950,7 @@ fn test_handle_order_fill_event(mut execution_engine: ExecutionEngine) {
     {
         let account = CashAccount::default();
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_account(account.into())
             .unwrap();
@@ -1910,7 +1964,7 @@ fn test_handle_order_fill_event(mut execution_engine: ExecutionEngine) {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -1943,7 +1997,7 @@ fn test_handle_order_fill_event(mut execution_engine: ExecutionEngine) {
     );
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_position(position, OmsType::Netting)
         .unwrap();
@@ -1971,7 +2025,7 @@ fn test_handle_order_fill_event(mut execution_engine: ExecutionEngine) {
     ));
 
     execution_engine.process(&order_filled_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
 
     println!("Filtering parameters:");
     println!("  Venue: {:?}", Venue::from("STUB_VENUE"));
@@ -2092,14 +2146,14 @@ fn test_handle_multiple_partial_fill_events(mut execution_engine: ExecutionEngin
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
@@ -2112,7 +2166,7 @@ fn test_handle_multiple_partial_fill_events(mut execution_engine: ExecutionEngin
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -2155,7 +2209,7 @@ fn test_handle_multiple_partial_fill_events(mut execution_engine: ExecutionEngin
     );
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_position(position, OmsType::Netting)
         .unwrap();
@@ -2230,7 +2284,7 @@ fn test_handle_multiple_partial_fill_events(mut execution_engine: ExecutionEngin
         Some(Money::from("2 USD")),
     ));
     execution_engine.process(&fill_event_3);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
 
     assert!(
         cache.position_exists(&expected_position_id),
@@ -2336,14 +2390,14 @@ fn test_handle_position_opening_with_position_id_none(mut execution_engine: Exec
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
@@ -2356,7 +2410,7 @@ fn test_handle_position_opening_with_position_id_none(mut execution_engine: Exec
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -2385,7 +2439,7 @@ fn test_handle_position_opening_with_position_id_none(mut execution_engine: Exec
     );
 
     execution_engine.process(&order_filled_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let position_ids = cache.position_ids(None, None, None);
     assert_eq!(position_ids.len(), 1, "Should have exactly one position");
 
@@ -2486,14 +2540,14 @@ fn test_add_to_existing_position_on_order_fill(mut execution_engine: ExecutionEn
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
@@ -2506,7 +2560,7 @@ fn test_add_to_existing_position_on_order_fill(mut execution_engine: ExecutionEn
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order1.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -2537,7 +2591,7 @@ fn test_add_to_existing_position_on_order_fill(mut execution_engine: ExecutionEn
     execution_engine.process(&order1_filled_event);
 
     // Get the created position ID
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let position_ids = cache.position_ids(None, None, None);
 
     assert_eq!(
@@ -2557,7 +2611,7 @@ fn test_add_to_existing_position_on_order_fill(mut execution_engine: ExecutionEn
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order2.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -2585,7 +2639,7 @@ fn test_add_to_existing_position_on_order_fill(mut execution_engine: ExecutionEn
         Some(AccountId::test_default()), // account_id
     );
     execution_engine.process(&order2_filled_event);
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
 
     assert!(
         cache.position_exists(&expected_position_id),
@@ -2702,14 +2756,14 @@ fn test_close_position_on_order_fill(mut execution_engine: ExecutionEngine) {
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
@@ -2724,7 +2778,7 @@ fn test_close_position_on_order_fill(mut execution_engine: ExecutionEngine) {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order1.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -2757,7 +2811,7 @@ fn test_close_position_on_order_fill(mut execution_engine: ExecutionEngine) {
     execution_engine.process(&order1_filled_event);
 
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         assert!(
             cache.position_exists(&position_id),
             "Position should exist after first fill"
@@ -2782,7 +2836,7 @@ fn test_close_position_on_order_fill(mut execution_engine: ExecutionEngine) {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(
             order2.clone(),
@@ -2819,7 +2873,7 @@ fn test_close_position_on_order_fill(mut execution_engine: ExecutionEngine) {
     // Wait for any async operations to complete (if any)
     std::thread::sleep(std::time::Duration::from_millis(1));
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
 
         assert!(
             cache.position_exists(&position_id),
@@ -2905,14 +2959,14 @@ fn test_multiple_strategy_positions_opened(mut execution_engine: ExecutionEngine
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
@@ -2938,13 +2992,13 @@ fn test_multiple_strategy_positions_opened(mut execution_engine: ExecutionEngine
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order1.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order2.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -3000,7 +3054,7 @@ fn test_multiple_strategy_positions_opened(mut execution_engine: ExecutionEngine
     );
     execution_engine.process(&order2_filled_event);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
 
     assert!(
         cache.position_exists(&position1_id),
@@ -3172,14 +3226,14 @@ fn test_flip_position_on_opposite_filled_same_position_sell(mut execution_engine
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
@@ -3203,13 +3257,13 @@ fn test_flip_position_on_opposite_filled_same_position_sell(mut execution_engine
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order1.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order2.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -3241,7 +3295,7 @@ fn test_flip_position_on_opposite_filled_same_position_sell(mut execution_engine
     execution_engine.process(&order1_filled_event);
 
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         assert!(
             cache.position_exists(&position_id),
             "Initial position should exist"
@@ -3284,7 +3338,7 @@ fn test_flip_position_on_opposite_filled_same_position_sell(mut execution_engine
     );
     execution_engine.process(&order2_filled_event);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
 
     // In Rust Netting OMS, position flipping behavior is different from Python
     // Let's check what actually happened:
@@ -3400,14 +3454,14 @@ fn test_flip_position_on_opposite_filled_same_position_buy(mut execution_engine:
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
@@ -3431,13 +3485,13 @@ fn test_flip_position_on_opposite_filled_same_position_buy(mut execution_engine:
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order1.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order2.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -3469,7 +3523,7 @@ fn test_flip_position_on_opposite_filled_same_position_buy(mut execution_engine:
     execution_engine.process(&order1_filled_event);
 
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         assert!(
             cache.position_exists(&position_id),
             "Initial position should exist"
@@ -3516,7 +3570,7 @@ fn test_flip_position_on_opposite_filled_same_position_buy(mut execution_engine:
     );
     execution_engine.process(&order2_filled_event);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
 
     // Get all position IDs to see what was created
     let all_position_ids = cache.position_ids(None, None, None);
@@ -3633,14 +3687,14 @@ fn test_flip_position_on_flat_position_then_filled_reusing_position_id(
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
@@ -3673,19 +3727,19 @@ fn test_flip_position_on_flat_position_then_filled_reusing_position_id(
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order1.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order2.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order3.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -3717,7 +3771,7 @@ fn test_flip_position_on_flat_position_then_filled_reusing_position_id(
     execution_engine.process(&order1_filled_event);
 
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         assert!(
             cache.position_exists(&position_id),
             "Initial position should exist"
@@ -3765,7 +3819,7 @@ fn test_flip_position_on_flat_position_then_filled_reusing_position_id(
     execution_engine.process(&order2_filled_event);
 
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         let position = cache.position(&position_id).expect("Position should exist");
         assert!(position.is_closed(), "Position should be closed (flat)");
         assert_eq!(
@@ -3775,7 +3829,7 @@ fn test_flip_position_on_flat_position_then_filled_reusing_position_id(
     }
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(
             order3.clone(),
@@ -3787,7 +3841,7 @@ fn test_flip_position_on_flat_position_then_filled_reusing_position_id(
 
     // because it's trying to use a closed position ID
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         let cached_order3 = cache
             .order(&order3.client_order_id())
             .expect("Order 3 should be in cache");
@@ -3818,14 +3872,14 @@ fn test_flip_position_when_netting_oms(mut execution_engine: ExecutionEngine) {
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
@@ -3849,13 +3903,13 @@ fn test_flip_position_when_netting_oms(mut execution_engine: ExecutionEngine) {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order1.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order2.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -3887,7 +3941,7 @@ fn test_flip_position_when_netting_oms(mut execution_engine: ExecutionEngine) {
     execution_engine.process(&order1_filled_event);
 
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         assert!(
             cache.position_exists(&position_id),
             "Initial position should exist"
@@ -3934,7 +3988,7 @@ fn test_flip_position_when_netting_oms(mut execution_engine: ExecutionEngine) {
     );
     execution_engine.process(&order2_filled_event);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
 
     let position = cache
         .position(&position_id)
@@ -3974,7 +4028,7 @@ fn test_handle_updated_order_event(mut execution_engine: ExecutionEngine) {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -4002,7 +4056,7 @@ fn test_handle_updated_order_event(mut execution_engine: ExecutionEngine) {
 
     // Get order from cache and check venue_order_id
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         let cached_order = cache
             .order(&order.client_order_id())
             .expect("Order should exist in cache");
@@ -4033,7 +4087,7 @@ fn test_handle_updated_order_event(mut execution_engine: ExecutionEngine) {
     execution_engine.process(&order_updated_event);
 
     // Note: This test was updated as the venue order ID currently does not change once assigned
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let cached_order = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -4065,7 +4119,7 @@ fn test_submit_order_with_quote_quantity_and_no_prices_denies(
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -4080,11 +4134,19 @@ fn test_submit_order_with_quote_quantity_and_no_prices_denies(
     execution_engine
         .register_client(Box::new(stub_client))
         .unwrap();
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(order.clone(), None, Some(ClientId::from("STUB")), false)
+        .unwrap();
+
     let submit_order = SubmitOrder {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -4095,7 +4157,7 @@ fn test_submit_order_with_quote_quantity_and_no_prices_denies(
 
     execution_engine.execute(&TradingCommand::SubmitOrder(submit_order));
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let cached_order = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -4138,7 +4200,7 @@ fn test_submit_bracket_order_with_quote_quantity_and_no_prices_denies(
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -4213,7 +4275,7 @@ fn test_submit_bracket_order_with_quote_quantity_and_no_prices_denies(
 
     execution_engine.execute(&TradingCommand::SubmitOrderList(submit_order_list));
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
 
     let entry_cached = cache
         .order(&entry_order.client_order_id())
@@ -4328,7 +4390,7 @@ fn test_submit_order_with_quote_quantity_and_quote_tick_converts_to_base_quantit
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -4344,7 +4406,7 @@ fn test_submit_order_with_quote_quantity_and_quote_tick_converts_to_base_quantit
         UnixNanos::default(),
     );
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_quote(quote_tick)
         .unwrap();
@@ -4372,7 +4434,7 @@ fn test_submit_order_with_quote_quantity_and_quote_tick_converts_to_base_quantit
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -4380,7 +4442,8 @@ fn test_submit_order_with_quote_quantity_and_quote_tick_converts_to_base_quantit
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -4391,7 +4454,7 @@ fn test_submit_order_with_quote_quantity_and_quote_tick_converts_to_base_quantit
 
     execution_engine.execute(&TradingCommand::SubmitOrder(submit_order));
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let cached_order = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -4433,7 +4496,7 @@ fn test_submit_order_with_quote_quantity_and_quote_tick_converts_to_base_quantit
     );
     execution_engine.process(&order_filled_event);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let final_cached_order = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -4464,7 +4527,7 @@ fn test_submit_order_with_quote_quantity_and_trade_ticks_converts_to_base_quanti
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -4480,7 +4543,7 @@ fn test_submit_order_with_quote_quantity_and_trade_ticks_converts_to_base_quanti
         UnixNanos::default(),
     );
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_trade(trade_tick)
         .unwrap();
@@ -4508,7 +4571,7 @@ fn test_submit_order_with_quote_quantity_and_trade_ticks_converts_to_base_quanti
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -4516,7 +4579,8 @@ fn test_submit_order_with_quote_quantity_and_trade_ticks_converts_to_base_quanti
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -4527,7 +4591,7 @@ fn test_submit_order_with_quote_quantity_and_trade_ticks_converts_to_base_quanti
 
     execution_engine.execute(&TradingCommand::SubmitOrder(submit_order));
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let cached_order = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -4569,7 +4633,7 @@ fn test_submit_order_with_quote_quantity_and_trade_ticks_converts_to_base_quanti
     );
     execution_engine.process(&order_filled_event);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let final_cached_order = cache
         .order(&order.client_order_id())
         .expect("Order should exist in cache");
@@ -4600,7 +4664,7 @@ fn test_submit_bracket_order_with_quote_quantity_and_ticks_converts_expected(
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -4616,7 +4680,7 @@ fn test_submit_bracket_order_with_quote_quantity_and_ticks_converts_expected(
         UnixNanos::default(),
     );
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_trade(trade_tick)
         .unwrap();
@@ -4632,7 +4696,7 @@ fn test_submit_bracket_order_with_quote_quantity_and_ticks_converts_expected(
         UnixNanos::default(),
     );
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_quote(quote_tick)
         .unwrap();
@@ -4693,7 +4757,7 @@ fn test_submit_bracket_order_with_quote_quantity_and_ticks_converts_expected(
     );
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(
             entry_order.clone(),
@@ -4703,7 +4767,7 @@ fn test_submit_bracket_order_with_quote_quantity_and_ticks_converts_expected(
         )
         .unwrap();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(
             stop_loss_order.clone(),
@@ -4713,7 +4777,7 @@ fn test_submit_bracket_order_with_quote_quantity_and_ticks_converts_expected(
         )
         .unwrap();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(
             take_profit_order.clone(),
@@ -4738,7 +4802,7 @@ fn test_submit_bracket_order_with_quote_quantity_and_ticks_converts_expected(
 
     execution_engine.execute(&TradingCommand::SubmitOrderList(submit_order_list));
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
 
     let last_price = cache
         .trade(&instrument.id)
@@ -4799,7 +4863,7 @@ fn test_submit_bracket_order_with_quote_quantity_and_ticks_converts_expected(
         TestOrderEventStubs::accepted(&take_profit_order, account_id, VenueOrderId::from("V-003"));
     execution_engine.process(&take_profit_accepted_event);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let final_entry_order = cache
         .order(&entry_order.client_order_id())
         .expect("Entry order should exist in cache");
@@ -4839,7 +4903,7 @@ fn test_submit_market_should_not_add_to_own_book() {
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -4865,7 +4929,7 @@ fn test_submit_market_should_not_add_to_own_book() {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -4873,7 +4937,8 @@ fn test_submit_market_should_not_add_to_own_book() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -4884,7 +4949,7 @@ fn test_submit_market_should_not_add_to_own_book() {
 
     execution_engine.execute(&TradingCommand::SubmitOrder(submit_order));
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let own_order_book = cache.own_order_book(&order.instrument_id());
 
     assert!(
@@ -4915,7 +4980,7 @@ fn test_submit_ioc_fok_should_not_add_to_own_book(#[case] time_in_force: TimeInF
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -4943,7 +5008,7 @@ fn test_submit_ioc_fok_should_not_add_to_own_book(#[case] time_in_force: TimeInF
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -4951,7 +5016,8 @@ fn test_submit_ioc_fok_should_not_add_to_own_book(#[case] time_in_force: TimeInF
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -4962,7 +5028,7 @@ fn test_submit_ioc_fok_should_not_add_to_own_book(#[case] time_in_force: TimeInF
 
     execution_engine.execute(&TradingCommand::SubmitOrder(submit_order));
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let own_order_book = cache.own_order_book(&order.instrument_id());
 
     assert!(
@@ -4991,7 +5057,7 @@ fn test_submit_order_adds_to_own_book_bid() {
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -5018,7 +5084,7 @@ fn test_submit_order_adds_to_own_book_bid() {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -5026,7 +5092,8 @@ fn test_submit_order_adds_to_own_book_bid() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -5037,7 +5104,7 @@ fn test_submit_order_adds_to_own_book_bid() {
 
     execution_engine.execute(&TradingCommand::SubmitOrder(submit_order));
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let own_book = cache
         .own_order_book(&order.instrument_id())
         .expect("Own order book should exist");
@@ -5137,7 +5204,7 @@ fn test_submit_order_adds_to_own_book_ask() {
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -5164,7 +5231,7 @@ fn test_submit_order_adds_to_own_book_ask() {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -5172,7 +5239,8 @@ fn test_submit_order_adds_to_own_book_ask() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -5183,7 +5251,7 @@ fn test_submit_order_adds_to_own_book_ask() {
 
     execution_engine.execute(&TradingCommand::SubmitOrder(submit_order));
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let own_book = cache
         .own_order_book(&order.instrument_id())
         .expect("Own order book should exist");
@@ -5283,7 +5351,7 @@ fn test_cancel_order_removes_from_own_book() {
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -5320,13 +5388,13 @@ fn test_cancel_order_removes_from_own_book() {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order_bid.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order_ask.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -5334,7 +5402,8 @@ fn test_cancel_order_removes_from_own_book() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order_bid.clone(),
+        client_order_id: order_bid.client_order_id(),
+        order_init: order_bid.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -5347,7 +5416,8 @@ fn test_cancel_order_removes_from_own_book() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order_ask.clone(),
+        client_order_id: order_ask.client_order_id(),
+        order_init: order_ask.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -5405,7 +5475,7 @@ fn test_cancel_order_removes_from_own_book() {
     execution_engine.process(&order_canceled_bid);
     execution_engine.process(&order_canceled_ask);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let own_book = cache
         .own_order_book(&instrument.id)
         .expect("Own order book should exist");
@@ -5445,7 +5515,7 @@ fn test_own_book_status_filtering() {
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -5482,13 +5552,13 @@ fn test_own_book_status_filtering() {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order_bid.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order_ask.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -5496,7 +5566,8 @@ fn test_own_book_status_filtering() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order_bid.clone(),
+        client_order_id: order_bid.client_order_id(),
+        order_init: order_bid.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -5509,7 +5580,8 @@ fn test_own_book_status_filtering() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order_ask.clone(),
+        client_order_id: order_ask.client_order_id(),
+        order_init: order_ask.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -5567,7 +5639,7 @@ fn test_own_book_status_filtering() {
     execution_engine.process(&order_canceled_bid);
     execution_engine.process(&order_canceled_ask);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
 
     // First check that the orders in the cache have been updated to Canceled status
     let bid_order = cache
@@ -5645,7 +5717,7 @@ fn test_filled_order_removes_from_own_book() {
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -5682,13 +5754,13 @@ fn test_filled_order_removes_from_own_book() {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order_bid.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order_ask.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -5696,7 +5768,8 @@ fn test_filled_order_removes_from_own_book() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order_bid.clone(),
+        client_order_id: order_bid.client_order_id(),
+        order_init: order_bid.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -5709,7 +5782,8 @@ fn test_filled_order_removes_from_own_book() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order_ask.clone(),
+        client_order_id: order_ask.client_order_id(),
+        order_init: order_ask.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -5777,7 +5851,7 @@ fn test_filled_order_removes_from_own_book() {
     execution_engine.process(&order_filled_bid);
     execution_engine.process(&order_filled_ask);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
 
     let bid_order = cache
         .order(&order_bid.client_order_id())
@@ -5843,7 +5917,7 @@ fn test_order_updates_in_own_book() {
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -5880,13 +5954,13 @@ fn test_order_updates_in_own_book() {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order_bid.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order_ask.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -5894,7 +5968,8 @@ fn test_order_updates_in_own_book() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order_bid.clone(),
+        client_order_id: order_bid.client_order_id(),
+        order_init: order_bid.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -5907,7 +5982,8 @@ fn test_order_updates_in_own_book() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order_ask.clone(),
+        client_order_id: order_ask.client_order_id(),
+        order_init: order_ask.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -5971,7 +6047,7 @@ fn test_order_updates_in_own_book() {
     execution_engine.process(&order_updated_bid);
     execution_engine.process(&order_updated_ask);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let own_book = cache
         .own_order_book(&instrument.id)
         .expect("Own order book should exist");
@@ -6072,14 +6148,14 @@ fn test_position_flip_with_own_order_book() {
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
 
     let account = CashAccount::default();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_account(account.into())
         .unwrap();
@@ -6106,7 +6182,7 @@ fn test_position_flip_with_own_order_book() {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(buy_order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -6114,7 +6190,8 @@ fn test_position_flip_with_own_order_book() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: buy_order.clone(),
+        client_order_id: buy_order.client_order_id(),
+        order_init: buy_order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -6157,7 +6234,7 @@ fn test_position_flip_with_own_order_book() {
 
     // The position ID should be generated by the execution engine
     // Let's find the position that was created
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let positions = cache.positions(None, None, None, None);
     assert_eq!(
         positions.len(),
@@ -6196,7 +6273,7 @@ fn test_position_flip_with_own_order_book() {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(sell_order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -6204,7 +6281,8 @@ fn test_position_flip_with_own_order_book() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: sell_order.clone(),
+        client_order_id: sell_order.client_order_id(),
+        order_init: sell_order.init_event().clone(),
         position_id: Some(position_id),
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -6244,7 +6322,7 @@ fn test_position_flip_with_own_order_book() {
     ));
     execution_engine.process(&order_filled_sell);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
 
     let positions = cache.positions(None, None, None, None);
     assert_eq!(
@@ -6317,7 +6395,7 @@ fn test_own_book_with_crossed_orders() {
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -6354,13 +6432,13 @@ fn test_own_book_with_crossed_orders() {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(buy_order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(sell_order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -6368,7 +6446,8 @@ fn test_own_book_with_crossed_orders() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: buy_order.clone(),
+        client_order_id: buy_order.client_order_id(),
+        order_init: buy_order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -6381,7 +6460,8 @@ fn test_own_book_with_crossed_orders() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: sell_order.clone(),
+        client_order_id: sell_order.client_order_id(),
+        order_init: sell_order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -6405,7 +6485,7 @@ fn test_own_book_with_crossed_orders() {
     execution_engine.process(&order_accepted_buy);
     execution_engine.process(&order_accepted_sell);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let own_book = cache
         .own_order_book(&instrument.id)
         .expect("Own order book should exist");
@@ -6473,7 +6553,7 @@ fn test_own_book_with_contingent_orders() {
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -6522,7 +6602,8 @@ fn test_own_book_with_contingent_orders() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: entry_order.clone(),
+        client_order_id: entry_order.client_order_id(),
+        order_init: entry_order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -6535,7 +6616,8 @@ fn test_own_book_with_contingent_orders() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: tp_order.clone(),
+        client_order_id: tp_order.client_order_id(),
+        order_init: tp_order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -6548,7 +6630,8 @@ fn test_own_book_with_contingent_orders() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: sl_order.clone(),
+        client_order_id: sl_order.client_order_id(),
+        order_init: sl_order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -6558,7 +6641,7 @@ fn test_own_book_with_contingent_orders() {
     };
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(
             entry_order.clone(),
@@ -6568,12 +6651,12 @@ fn test_own_book_with_contingent_orders() {
         )
         .unwrap();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(tp_order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(sl_order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -6597,7 +6680,7 @@ fn test_own_book_with_contingent_orders() {
         TestOrderEventStubs::accepted(&tp_order, account_id, VenueOrderId::from("2"));
     execution_engine.process(&tp_accepted_event);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let own_book = cache
         .own_order_book(&instrument.id)
         .expect("Own order book should exist");
@@ -6632,7 +6715,7 @@ fn test_own_book_with_contingent_orders() {
 
     // Now fill the entry order - get the updated order from cache to ensure venue_order_id is set
     let cached_entry_order = {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         cache
             .order(&entry_order.client_order_id())
             .expect("Entry order should exist in cache")
@@ -6663,7 +6746,7 @@ fn test_own_book_with_contingent_orders() {
         TestOrderEventStubs::accepted(&sl_order, account_id, VenueOrderId::from("3"));
     execution_engine.process(&sl_accepted_event);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let own_book = cache
         .own_order_book(&instrument.id)
         .expect("Own order book should exist");
@@ -6740,7 +6823,7 @@ fn test_own_book_order_status_filtering_parameterized(
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -6767,7 +6850,7 @@ fn test_own_book_order_status_filtering_parameterized(
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
         .unwrap();
@@ -6777,7 +6860,8 @@ fn test_own_book_order_status_filtering_parameterized(
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: order.clone(),
+        client_order_id: order.client_order_id(),
+        order_init: order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -6801,7 +6885,7 @@ fn test_own_book_order_status_filtering_parameterized(
             OrderStatus::PartiallyFilled => {
                 // Get the updated order from cache to ensure venue_order_id is set
                 let cached_order = {
-                    let cache = execution_engine.cache.borrow();
+                    let cache = execution_engine.cache().borrow();
                     cache
                         .order(&order.client_order_id())
                         .expect("Order should exist in cache")
@@ -6825,7 +6909,7 @@ fn test_own_book_order_status_filtering_parameterized(
             OrderStatus::Filled => {
                 // Get the updated order from cache to ensure venue_order_id is set
                 let cached_order = {
-                    let cache = execution_engine.cache.borrow();
+                    let cache = execution_engine.cache().borrow();
                     cache
                         .order(&order.client_order_id())
                         .expect("Order should exist in cache")
@@ -6858,7 +6942,7 @@ fn test_own_book_order_status_filtering_parameterized(
         }
     }
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let own_book = cache
         .own_order_book(&instrument.id)
         .expect("Own order book should exist");
@@ -6915,7 +6999,7 @@ fn test_own_book_combined_status_filtering() {
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -6972,7 +7056,7 @@ fn test_own_book_combined_status_filtering() {
         .build();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(
             initialized_order.clone(),
@@ -6982,7 +7066,7 @@ fn test_own_book_combined_status_filtering() {
         )
         .unwrap();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(
             submitted_order.clone(),
@@ -6992,7 +7076,7 @@ fn test_own_book_combined_status_filtering() {
         )
         .unwrap();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(
             accepted_order.clone(),
@@ -7002,7 +7086,7 @@ fn test_own_book_combined_status_filtering() {
         )
         .unwrap();
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_order(
             partially_filled_order.clone(),
@@ -7017,7 +7101,8 @@ fn test_own_book_combined_status_filtering() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: initialized_order,
+        client_order_id: initialized_order.client_order_id(),
+        order_init: initialized_order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -7032,7 +7117,8 @@ fn test_own_book_combined_status_filtering() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: submitted_order.clone(),
+        client_order_id: submitted_order.client_order_id(),
+        order_init: submitted_order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -7049,7 +7135,8 @@ fn test_own_book_combined_status_filtering() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: accepted_order.clone(),
+        client_order_id: accepted_order.client_order_id(),
+        order_init: accepted_order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -7069,7 +7156,8 @@ fn test_own_book_combined_status_filtering() {
         trader_id,
         strategy_id,
         instrument_id: instrument.id,
-        order: partially_filled_order.clone(),
+        client_order_id: partially_filled_order.client_order_id(),
+        order_init: partially_filled_order.init_event().clone(),
         position_id: None,
         params: None,
         client_id: Some(ClientId::from("STUB")),
@@ -7090,7 +7178,7 @@ fn test_own_book_combined_status_filtering() {
 
     // Get updated order from cache for partial fill
     let cached_partial_order = {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         cache
             .order(&partially_filled_order.client_order_id())
             .expect("Order should exist in cache")
@@ -7111,7 +7199,7 @@ fn test_own_book_combined_status_filtering() {
     );
     execution_engine.process(&partial_filled_event);
 
-    let cache = execution_engine.cache.borrow();
+    let cache = execution_engine.cache().borrow();
     let own_book = cache
         .own_order_book(&instrument.id)
         .expect("Own order book should exist");
@@ -7201,7 +7289,7 @@ fn test_own_book_status_integrity_during_transitions() {
     let instrument = audusd_sim();
 
     execution_engine
-        .cache
+        .cache()
         .borrow_mut()
         .add_instrument(instrument.into())
         .unwrap();
@@ -7235,7 +7323,7 @@ fn test_own_book_status_integrity_during_transitions() {
             .build();
 
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
             .unwrap();
@@ -7245,7 +7333,8 @@ fn test_own_book_status_integrity_during_transitions() {
             trader_id,
             strategy_id,
             instrument_id: instrument.id,
-            order: order.clone(),
+            client_order_id: order.client_order_id(),
+            order_init: order.init_event().clone(),
             position_id: None,
             params: None,
             client_id: Some(ClientId::from("STUB")),
@@ -7269,7 +7358,7 @@ fn test_own_book_status_integrity_during_transitions() {
     }
 
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         let own_book = cache
             .own_order_book(&instrument.id)
             .expect("Own order book should exist");
@@ -7300,7 +7389,7 @@ fn test_own_book_status_integrity_during_transitions() {
     // Test case 1: Order transitions from ACCEPTED to PARTIALLY_FILLED
     // Partially fill order 1 (index 1, price 1.01)
     let cached_order_1 = {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         cache
             .order(&orders[1].client_order_id())
             .expect("Order should exist in cache")
@@ -7321,7 +7410,7 @@ fn test_own_book_status_integrity_during_transitions() {
     );
     execution_engine.process(&partial_fill_event);
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         let own_book = cache
             .own_order_book(&instrument.id)
             .expect("Own order book should exist");
@@ -7361,7 +7450,7 @@ fn test_own_book_status_integrity_during_transitions() {
         TestOrderEventStubs::canceled(&orders[2], account_id, Some(VenueOrderId::from("V-003")));
     execution_engine.process(&cancel_event);
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         let own_book = cache
             .own_order_book(&instrument.id)
             .expect("Own order book should exist");
@@ -7392,7 +7481,7 @@ fn test_own_book_status_integrity_during_transitions() {
     // Test case 3: Order transitions from ACCEPTED to PARTIALLY_FILLED to FILLED
     // First partial fill on order 0 (index 0, price 1.00)
     let cached_order_0 = {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         cache
             .order(&orders[0].client_order_id())
             .expect("Order should exist in cache")
@@ -7414,7 +7503,7 @@ fn test_own_book_status_integrity_during_transitions() {
     execution_engine.process(&first_partial_fill);
 
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         let own_book = cache
             .own_order_book(&instrument.id)
             .expect("Own order book should exist");
@@ -7438,7 +7527,7 @@ fn test_own_book_status_integrity_during_transitions() {
 
     // Complete fill (remaining quantity)
     let cached_order_0_updated = {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         cache
             .order(&orders[0].client_order_id())
             .expect("Order should exist in cache")
@@ -7461,7 +7550,7 @@ fn test_own_book_status_integrity_during_transitions() {
 
     // Final verification
     {
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         let own_book = cache
             .own_order_book(&instrument.id)
             .expect("Own order book should exist");
@@ -7692,24 +7781,24 @@ fn test_own_book_status_integrity_during_transitions() {
 
     #[rstest]
     fn test_set_manage_own_order_books(mut execution_engine: ExecutionEngine) {
-        assert!(!execution_engine.config.manage_own_order_books);
+        assert!(!execution_engine.config().manage_own_order_books);
 
         execution_engine.set_manage_own_order_books(true);
-        assert!(execution_engine.config.manage_own_order_books);
+        assert!(execution_engine.config().manage_own_order_books);
 
         execution_engine.set_manage_own_order_books(false);
-        assert!(!execution_engine.config.manage_own_order_books);
+        assert!(!execution_engine.config().manage_own_order_books);
     }
 
     #[rstest]
     fn test_set_convert_quote_qty_to_base(mut execution_engine: ExecutionEngine) {
-        assert!(execution_engine.config.convert_quote_qty_to_base);
+        assert!(execution_engine.config().convert_quote_qty_to_base);
 
         execution_engine.set_convert_quote_qty_to_base(false);
-        assert!(!execution_engine.config.convert_quote_qty_to_base);
+        assert!(!execution_engine.config().convert_quote_qty_to_base);
 
         execution_engine.set_convert_quote_qty_to_base(true);
-        assert!(execution_engine.config.convert_quote_qty_to_base);
+        assert!(execution_engine.config().convert_quote_qty_to_base);
     }
 
     #[rstest]
@@ -7730,14 +7819,14 @@ fn test_own_book_status_integrity_during_transitions() {
             .unwrap();
 
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_instrument(instrument.into())
             .unwrap();
 
         let account = CashAccount::default();
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_account(account.into())
             .unwrap();
@@ -7752,7 +7841,7 @@ fn test_own_book_status_integrity_during_transitions() {
             .build();
 
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_order(order1.clone(), None, Some(ClientId::from("STUB")), true)
             .unwrap();
@@ -7782,7 +7871,7 @@ fn test_own_book_status_integrity_during_transitions() {
         ));
 
         {
-            let cache = execution_engine.cache.borrow();
+            let cache = execution_engine.cache().borrow();
             assert!(
                 cache.position_snapshot_bytes(&position_id).is_none(),
                 "Should have no snapshots before flip"
@@ -7799,7 +7888,7 @@ fn test_own_book_status_integrity_during_transitions() {
             .build();
 
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_order(order2.clone(), None, Some(ClientId::from("STUB")), true)
             .unwrap();
@@ -7826,7 +7915,7 @@ fn test_own_book_status_integrity_during_transitions() {
             Some(AccountId::test_default()),
         ));
 
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         assert!(
             cache.position_snapshot_bytes(&position_id).is_some(),
             "Should have snapshot after NETTING flip"
@@ -7859,14 +7948,14 @@ fn test_own_book_status_integrity_during_transitions() {
             .unwrap();
 
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_instrument(instrument.into())
             .unwrap();
 
         let account = CashAccount::default();
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_account(account.into())
             .unwrap();
@@ -7881,7 +7970,7 @@ fn test_own_book_status_integrity_during_transitions() {
             .build();
 
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_order(order1.clone(), None, Some(ClientId::from("STUB")), true)
             .unwrap();
@@ -7920,7 +8009,7 @@ fn test_own_book_status_integrity_during_transitions() {
             .build();
 
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_order(order2.clone(), None, Some(ClientId::from("STUB")), true)
             .unwrap();
@@ -7947,7 +8036,7 @@ fn test_own_book_status_integrity_during_transitions() {
             Some(AccountId::test_default()),
         ));
 
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         assert!(
             cache.position_snapshot_bytes(&position_id1).is_none(),
             "HEDGING mode should not create snapshots (new position ID used)"
@@ -7986,14 +8075,14 @@ fn test_own_book_status_integrity_during_transitions() {
             .unwrap();
 
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_instrument(instrument.into())
             .unwrap();
 
         let account = CashAccount::default();
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_account(account.into())
             .unwrap();
@@ -8011,7 +8100,7 @@ fn test_own_book_status_integrity_during_transitions() {
             .build();
 
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_order(order1.clone(), None, Some(ClientId::from("STUB")), true)
             .unwrap();
@@ -8049,7 +8138,7 @@ fn test_own_book_status_integrity_during_transitions() {
             .build();
 
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_order(order2.clone(), None, Some(ClientId::from("STUB")), true)
             .unwrap();
@@ -8077,7 +8166,7 @@ fn test_own_book_status_integrity_during_transitions() {
         ));
 
         {
-            let cache = execution_engine.cache.borrow();
+            let cache = execution_engine.cache().borrow();
             let position = cache.position(&position_id).unwrap();
             assert!(position.is_closed());
             assert!(cache.is_position_closed(&position_id));
@@ -8093,7 +8182,7 @@ fn test_own_book_status_integrity_during_transitions() {
             .build();
 
         execution_engine
-            .cache
+            .cache()
             .borrow_mut()
             .add_order(order3.clone(), None, Some(ClientId::from("STUB")), true)
             .unwrap();
@@ -8120,7 +8209,7 @@ fn test_own_book_status_integrity_during_transitions() {
             Some(AccountId::test_default()),
         ));
 
-        let cache = execution_engine.cache.borrow();
+        let cache = execution_engine.cache().borrow();
         assert!(
             cache.position_snapshot_bytes(&position_id).is_some(),
             "Should have snapshot after NETTING reopen"
@@ -8134,4 +8223,442 @@ fn test_own_book_status_integrity_during_transitions() {
         assert!(cache.is_position_open(&position_id));
         assert!(!cache.is_position_closed(&position_id));
     }
+}
+
+fn create_order_status_report(
+    client_order_id: Option<ClientOrderId>,
+    venue_order_id: VenueOrderId,
+    instrument_id: InstrumentId,
+    status: OrderStatus,
+    quantity: Quantity,
+    filled_qty: Quantity,
+) -> OrderStatusReport {
+    OrderStatusReport::new(
+        AccountId::test_default(),
+        instrument_id,
+        client_order_id,
+        venue_order_id,
+        OrderSide::Buy,
+        OrderType::Limit,
+        TimeInForce::Gtc,
+        status,
+        quantity,
+        filled_qty,
+        UnixNanos::from(1_000_000),
+        UnixNanos::from(1_000_000),
+        UnixNanos::from(1_000_000),
+        None,
+    )
+    .with_price(Price::from("1.00000"))
+}
+
+#[rstest]
+fn test_reconcile_order_status_report_order_not_in_cache(mut execution_engine: ExecutionEngine) {
+    let report = create_order_status_report(
+        Some(ClientOrderId::from("O-MISSING")),
+        VenueOrderId::from("V-001"),
+        audusd_sim().id(),
+        OrderStatus::Accepted,
+        Quantity::from(100_000),
+        Quantity::from(0),
+    );
+
+    execution_engine.reconcile_order_status_report(&report);
+
+    let cache = execution_engine.cache().borrow();
+    assert!(cache.order(&ClientOrderId::from("O-MISSING")).is_none());
+}
+
+#[rstest]
+fn test_reconcile_order_status_report_generates_canceled_event(
+    mut execution_engine: ExecutionEngine,
+) {
+    let instrument = audusd_sim();
+    let order = OrderTestBuilder::new(OrderType::Limit)
+        .instrument_id(instrument.id())
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .price(Price::from("1.00000"))
+        .build();
+    let client_order_id = order.client_order_id();
+    let venue_order_id = VenueOrderId::from("V-001");
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(order.clone(), None, None, true)
+        .unwrap();
+    let submitted = TestOrderEventStubs::submitted(&order, AccountId::test_default());
+    execution_engine.process(&submitted);
+    let accepted = TestOrderEventStubs::accepted(&order, AccountId::test_default(), venue_order_id);
+    execution_engine.process(&accepted);
+
+    let report = create_order_status_report(
+        Some(client_order_id),
+        venue_order_id,
+        instrument.id(),
+        OrderStatus::Canceled,
+        Quantity::from(100_000),
+        Quantity::from(0),
+    );
+    execution_engine.reconcile_order_status_report(&report);
+
+    let cache = execution_engine.cache().borrow();
+    let order = cache.order(&client_order_id).unwrap();
+    assert_eq!(order.status(), OrderStatus::Canceled);
+}
+
+#[rstest]
+fn test_reconcile_order_status_report_no_event_when_in_sync(mut execution_engine: ExecutionEngine) {
+    let instrument = audusd_sim();
+    let order = OrderTestBuilder::new(OrderType::Limit)
+        .instrument_id(instrument.id())
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .price(Price::from("1.00000"))
+        .build();
+    let client_order_id = order.client_order_id();
+    let venue_order_id = VenueOrderId::from("V-001");
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(order.clone(), None, None, true)
+        .unwrap();
+    let submitted = TestOrderEventStubs::submitted(&order, AccountId::test_default());
+    execution_engine.process(&submitted);
+    let accepted = TestOrderEventStubs::accepted(&order, AccountId::test_default(), venue_order_id);
+    execution_engine.process(&accepted);
+
+    let report = create_order_status_report(
+        Some(client_order_id),
+        venue_order_id,
+        instrument.id(),
+        OrderStatus::Accepted,
+        Quantity::from(100_000),
+        Quantity::from(0),
+    );
+    execution_engine.reconcile_order_status_report(&report);
+
+    let cache = execution_engine.cache().borrow();
+    let order = cache.order(&client_order_id).unwrap();
+    assert_eq!(order.status(), OrderStatus::Accepted);
+}
+
+#[rstest]
+fn test_reconcile_order_status_report_finds_order_by_venue_order_id(
+    mut execution_engine: ExecutionEngine,
+) {
+    let instrument = audusd_sim();
+    let order = OrderTestBuilder::new(OrderType::Limit)
+        .instrument_id(instrument.id())
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .price(Price::from("1.00000"))
+        .build();
+    let client_order_id = order.client_order_id();
+    let venue_order_id = VenueOrderId::from("V-001");
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(order.clone(), None, None, true)
+        .unwrap();
+    let submitted = TestOrderEventStubs::submitted(&order, AccountId::test_default());
+    execution_engine.process(&submitted);
+    let accepted = TestOrderEventStubs::accepted(&order, AccountId::test_default(), venue_order_id);
+    execution_engine.process(&accepted);
+
+    let report = create_order_status_report(
+        None,
+        venue_order_id,
+        instrument.id(),
+        OrderStatus::Canceled,
+        Quantity::from(100_000),
+        Quantity::from(0),
+    );
+    execution_engine.reconcile_order_status_report(&report);
+
+    let cache = execution_engine.cache().borrow();
+    let order = cache.order(&client_order_id).unwrap();
+    assert_eq!(order.status(), OrderStatus::Canceled);
+}
+
+fn create_fill_report(
+    instrument_id: InstrumentId,
+    client_order_id: Option<ClientOrderId>,
+    venue_order_id: VenueOrderId,
+    trade_id: TradeId,
+    last_qty: Quantity,
+    last_px: Price,
+) -> FillReport {
+    FillReport::new(
+        AccountId::test_default(),
+        instrument_id,
+        venue_order_id,
+        trade_id,
+        OrderSide::Buy,
+        last_qty,
+        last_px,
+        Money::new(0.10, Currency::USD()),
+        LiquiditySide::Taker,
+        client_order_id,
+        None,
+        UnixNanos::from(1_000_000),
+        UnixNanos::from(1_000_000),
+        None,
+    )
+}
+
+#[rstest]
+fn test_reconcile_fill_report_order_not_found(mut execution_engine: ExecutionEngine) {
+    let instrument = audusd_sim();
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CurrencyPair(instrument))
+        .unwrap();
+
+    let report = create_fill_report(
+        instrument.id(),
+        Some(ClientOrderId::from("O-MISSING")),
+        VenueOrderId::from("V-001"),
+        TradeId::from("T-001"),
+        Quantity::from(50_000),
+        Price::from("1.00000"),
+    );
+
+    execution_engine.reconcile_fill_report(&report);
+
+    let cache = execution_engine.cache().borrow();
+    assert!(cache.order(&ClientOrderId::from("O-MISSING")).is_none());
+}
+
+#[rstest]
+fn test_reconcile_fill_report_applies_fill_event(mut execution_engine: ExecutionEngine) {
+    let instrument = audusd_sim();
+    let client_order_id = ClientOrderId::from("O-001");
+    let venue_order_id = VenueOrderId::from("V-001");
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CurrencyPair(instrument))
+        .unwrap();
+
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(instrument.id())
+        .client_order_id(client_order_id)
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .build();
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
+        .unwrap();
+
+    let submitted = TestOrderEventStubs::submitted(&order, AccountId::test_default());
+    execution_engine.process(&submitted);
+
+    let accepted = TestOrderEventStubs::accepted(&order, AccountId::test_default(), venue_order_id);
+    execution_engine.process(&accepted);
+
+    let report = create_fill_report(
+        instrument.id(),
+        Some(client_order_id),
+        venue_order_id,
+        TradeId::from("T-001"),
+        Quantity::from(50_000),
+        Price::from("1.00000"),
+    );
+
+    execution_engine.reconcile_fill_report(&report);
+
+    let cache = execution_engine.cache().borrow();
+    let order = cache.order(&client_order_id).unwrap();
+    assert_eq!(order.filled_qty(), Quantity::from(50_000));
+    assert_eq!(order.status(), OrderStatus::PartiallyFilled);
+}
+
+#[rstest]
+fn test_reconcile_fill_report_finds_order_by_venue_order_id(mut execution_engine: ExecutionEngine) {
+    let instrument = audusd_sim();
+    let client_order_id = ClientOrderId::from("O-001");
+    let venue_order_id = VenueOrderId::from("V-001");
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CurrencyPair(instrument))
+        .unwrap();
+
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(instrument.id())
+        .client_order_id(client_order_id)
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .build();
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
+        .unwrap();
+
+    let submitted = TestOrderEventStubs::submitted(&order, AccountId::test_default());
+    execution_engine.process(&submitted);
+
+    let accepted = TestOrderEventStubs::accepted(&order, AccountId::test_default(), venue_order_id);
+    execution_engine.process(&accepted);
+
+    // Report without client_order_id - should find by venue_order_id
+    let report = create_fill_report(
+        instrument.id(),
+        None,
+        venue_order_id,
+        TradeId::from("T-001"),
+        Quantity::from(100_000),
+        Price::from("1.00000"),
+    );
+
+    execution_engine.reconcile_fill_report(&report);
+
+    let cache = execution_engine.cache().borrow();
+    let order = cache.order(&client_order_id).unwrap();
+    assert_eq!(order.filled_qty(), Quantity::from(100_000));
+    assert_eq!(order.status(), OrderStatus::Filled);
+}
+
+fn create_position_report(
+    instrument_id: InstrumentId,
+    position_side: PositionSideSpecified,
+    quantity: Quantity,
+    venue_position_id: Option<PositionId>,
+) -> PositionStatusReport {
+    PositionStatusReport::new(
+        AccountId::test_default(),
+        instrument_id,
+        position_side,
+        quantity,
+        UnixNanos::from(1_000_000),
+        UnixNanos::from(1_000_000),
+        None, // report_id
+        venue_position_id,
+        None, // avg_px_open
+    )
+}
+
+#[rstest]
+fn test_reconcile_position_report_netting_mode(mut execution_engine: ExecutionEngine) {
+    let instrument = audusd_sim();
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CurrencyPair(instrument))
+        .unwrap();
+
+    // No venue_position_id = netting mode
+    let report = create_position_report(
+        instrument.id(),
+        PositionSideSpecified::Long,
+        Quantity::from(100_000),
+        None,
+    );
+
+    execution_engine.reconcile_position_report(&report);
+}
+
+#[rstest]
+fn test_reconcile_position_report_hedging_mode_position_not_found(
+    mut execution_engine: ExecutionEngine,
+) {
+    let instrument = audusd_sim();
+    let venue_position_id = PositionId::from("P-001");
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CurrencyPair(instrument))
+        .unwrap();
+
+    // With venue_position_id = hedging mode
+    let report = create_position_report(
+        instrument.id(),
+        PositionSideSpecified::Long,
+        Quantity::from(100_000),
+        Some(venue_position_id),
+    );
+
+    execution_engine.reconcile_position_report(&report);
+}
+
+#[rstest]
+fn test_reconcile_execution_mass_status_empty(mut execution_engine: ExecutionEngine) {
+    let mass_status = ExecutionMassStatus::new(
+        ClientId::from("SIM"),
+        AccountId::test_default(),
+        Venue::from("SIM"),
+        UnixNanos::from(1_000_000),
+        None,
+    );
+
+    execution_engine.reconcile_execution_mass_status(&mass_status);
+}
+
+#[rstest]
+fn test_reconcile_execution_mass_status_with_order_reports(mut execution_engine: ExecutionEngine) {
+    let instrument = audusd_sim();
+    let client_order_id = ClientOrderId::from("O-001");
+    let venue_order_id = VenueOrderId::from("V-001");
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CurrencyPair(instrument))
+        .unwrap();
+
+    let order = OrderTestBuilder::new(OrderType::Limit)
+        .instrument_id(instrument.id())
+        .client_order_id(client_order_id)
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .price(Price::from("1.00000"))
+        .build();
+
+    execution_engine
+        .cache()
+        .borrow_mut()
+        .add_order(order.clone(), None, Some(ClientId::from("STUB")), true)
+        .unwrap();
+
+    let submitted = TestOrderEventStubs::submitted(&order, AccountId::test_default());
+    execution_engine.process(&submitted);
+
+    let accepted = TestOrderEventStubs::accepted(&order, AccountId::test_default(), venue_order_id);
+    execution_engine.process(&accepted);
+
+    let order_report = create_order_status_report(
+        Some(client_order_id),
+        venue_order_id,
+        instrument.id(),
+        OrderStatus::Canceled,
+        Quantity::from(100_000),
+        Quantity::from(0),
+    );
+
+    let mut mass_status = ExecutionMassStatus::new(
+        ClientId::from("SIM"),
+        AccountId::test_default(),
+        Venue::from("SIM"),
+        UnixNanos::from(1_000_000),
+        None,
+    );
+    mass_status.add_order_reports(vec![order_report]);
+
+    execution_engine.reconcile_execution_mass_status(&mass_status);
+
+    let cache = execution_engine.cache().borrow();
+    let order = cache.order(&client_order_id).unwrap();
+    assert_eq!(order.status(), OrderStatus::Canceled);
 }

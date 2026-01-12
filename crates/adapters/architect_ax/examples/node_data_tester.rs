@@ -13,20 +13,20 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-//! Example demonstrating live data testing with the Binance Spot SBE adapter.
+//! Example demonstrating live data testing with the AX Exchange adapter.
 //!
-//! Run with: `cargo run --example binance-data-tester --package nautilus-binance`
+//! Run with: `cargo run --example ax-data-tester --package nautilus-architect-ax`
+//!
+//! Environment variables:
+//! - `AX_API_KEY`: Your API key
+//! - `AX_API_SECRET`: Your API secret
+//! - `AX_IS_SANDBOX`: Set to "true" for sandbox (default), "false" for production
 
-use std::num::NonZeroUsize;
-
-use nautilus_binance::{
-    common::enums::{BinanceEnvironment, BinanceProductType},
-    config::BinanceDataClientConfig,
-    factories::BinanceDataClientFactory,
-};
+use nautilus_architect_ax::{config::AxDataClientConfig, factories::AxDataClientFactory};
 use nautilus_common::enums::Environment;
 use nautilus_live::node::LiveNode;
 use nautilus_model::{
+    data::BarType,
     identifiers::{ClientId, InstrumentId, TraderId},
     stubs::TestDefault,
 };
@@ -38,36 +38,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let environment = Environment::Live;
     let trader_id = TraderId::test_default();
-    let node_name = "BINANCE-TESTER-001".to_string();
+    let node_name = "AX-TESTER-001".to_string();
+
+    let is_sandbox = std::env::var("AX_IS_SANDBOX")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(true);
+
     let instrument_ids = vec![
-        InstrumentId::from("BTCUSDT.BINANCE"),
-        // InstrumentId::from("ETHUSDT.BINANCE"),
+        InstrumentId::from("EURUSD-PERP.AX"),
+        // InstrumentId::from("BTCUSD-PERP.AX"),
     ];
 
-    // SBE streams require Ed25519 authentication (not HMAC)
-    // Generate Ed25519 keys in your Binance account API settings
-    let binance_config = BinanceDataClientConfig {
-        product_types: vec![BinanceProductType::Spot],
-        environment: BinanceEnvironment::Mainnet,
-        api_key: None,    // HMAC key for HTTP API (optional)
-        api_secret: None, // HMAC secret for HTTP API (optional)
-        ed25519_api_key: std::env::var("BINANCE_ED25519_API_KEY").ok(),
-        ed25519_api_secret: std::env::var("BINANCE_ED25519_API_SECRET").ok(),
+    let ax_config = AxDataClientConfig {
+        api_key: std::env::var("AX_API_KEY").ok(),
+        api_secret: std::env::var("AX_API_SECRET").ok(),
+        is_sandbox,
         ..Default::default()
     };
 
-    let client_factory = BinanceDataClientFactory::new();
-    let client_id = ClientId::new("BINANCE");
+    let client_factory = AxDataClientFactory::new();
+    let client_id = ClientId::new("AX");
 
     let mut node = LiveNode::builder(trader_id, environment)?
         .with_name(node_name)
         .with_delay_post_stop_secs(2)
-        .add_data_client(None, Box::new(client_factory), Box::new(binance_config))?
+        .add_data_client(None, Box::new(client_factory), Box::new(ax_config))?
         .build()?;
 
+    let bar_types = vec![BarType::from("EURUSD-PERP.AX-1-MINUTE-LAST-EXTERNAL")];
+
     let tester_config = DataTesterConfig::new(client_id, instrument_ids)
-        .with_subscribe_book_at_interval(true)
-        .with_book_interval_ms(NonZeroUsize::new(10).unwrap());
+        .with_subscribe_quotes(true)
+        .with_subscribe_trades(true)
+        .with_subscribe_book_deltas(true)
+        .with_subscribe_bars(true)
+        .with_bar_types(bar_types)
+        .with_request_instruments(true);
     let tester = DataTester::new(tester_config);
 
     node.add_actor(tester)?;

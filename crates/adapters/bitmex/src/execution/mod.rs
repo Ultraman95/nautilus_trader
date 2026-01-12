@@ -499,7 +499,7 @@ impl ExecutionClient for BitmexExecutionClient {
     }
 
     fn submit_order(&self, cmd: &SubmitOrder) -> anyhow::Result<()> {
-        let order = cmd.order.clone();
+        let order = self.core.get_order(&cmd.client_order_id)?;
 
         if order.is_closed() {
             log::warn!("Cannot submit closed order {}", order.client_order_id());
@@ -762,7 +762,7 @@ fn dispatch_account_state(state: AccountState) {
 
 fn dispatch_order_status_report(report: OrderStatusReport) {
     let sender = get_exec_event_sender();
-    let exec_report = ExecutionReport::OrderStatus(Box::new(report));
+    let exec_report = ExecutionReport::Order(Box::new(report));
     if let Err(e) = sender.send(ExecutionEvent::Report(exec_report)) {
         log::warn!("Failed to send order status report: {e}");
     }

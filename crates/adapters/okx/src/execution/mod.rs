@@ -201,7 +201,7 @@ impl OKXExecutionClient {
     }
 
     fn submit_regular_order(&self, cmd: &SubmitOrder) -> anyhow::Result<()> {
-        let order = cmd.order.clone();
+        let order = self.core.get_order(&cmd.client_order_id)?;
         let ws_private = self.ws_private.clone();
         let trade_mode = self.trade_mode;
 
@@ -279,7 +279,7 @@ impl OKXExecutionClient {
     }
 
     fn submit_conditional_order(&self, cmd: &SubmitOrder) -> anyhow::Result<()> {
-        let order = cmd.order.clone();
+        let order = self.core.get_order(&cmd.client_order_id)?;
         let trigger_price = order
             .trigger_price()
             .ok_or_else(|| anyhow::anyhow!("conditional order requires a trigger price"))?;
@@ -752,7 +752,7 @@ impl ExecutionClient for OKXExecutionClient {
     }
 
     fn submit_order(&self, cmd: &SubmitOrder) -> anyhow::Result<()> {
-        let order = &cmd.order;
+        let order = self.core.get_order(&cmd.client_order_id)?;
 
         if order.is_closed() {
             let client_order_id = order.client_order_id();
@@ -1256,7 +1256,7 @@ fn dispatch_execution_report(
 ) {
     match report {
         ExecutionReport::Order(order_report) => {
-            let exec_report = NautilusExecutionReport::OrderStatus(Box::new(order_report));
+            let exec_report = NautilusExecutionReport::Order(Box::new(order_report));
             if let Err(e) = sender.send(ExecutionEvent::Report(exec_report)) {
                 log::warn!("Failed to send order status report: {e}");
             }

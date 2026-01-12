@@ -47,16 +47,14 @@ use tokio_util::sync::CancellationToken;
 use ustr::Ustr;
 
 use super::{
+    error::{BinanceWsError, BinanceWsResult},
     handler::BinanceFuturesWsFeedHandler,
     messages::{BinanceFuturesHandlerCommand, NautilusFuturesWsMessage},
 };
-use crate::{
-    common::{
-        credential::Credential,
-        enums::{BinanceEnvironment, BinanceProductType},
-        urls::get_ws_base_url,
-    },
-    websocket::error::{BinanceWsError, BinanceWsResult},
+use crate::common::{
+    credential::Credential,
+    enums::{BinanceEnvironment, BinanceProductType},
+    urls::get_ws_base_url,
 };
 
 /// Maximum streams per WebSocket connection for Futures.
@@ -292,7 +290,7 @@ impl BinanceFuturesWebSocketClient {
         let task_handle = get_runtime().spawn(async move {
             loop {
                 tokio::select! {
-                    _ = cancellation_token.cancelled() => {
+                    () = cancellation_token.cancelled() => {
                         log::debug!("Handler task cancelled");
                         break;
                     }

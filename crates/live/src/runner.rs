@@ -13,7 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use std::{fmt::Debug, sync::Arc};
+use std::{any::Any, fmt::Debug, sync::Arc};
 
 use nautilus_common::{
     live::runner::{set_data_event_sender, set_exec_event_sender},
@@ -313,32 +313,8 @@ impl AsyncRunner {
 
     #[inline]
     pub fn handle_exec_report(report: ExecutionReport) {
-        match report {
-            ExecutionReport::OrderStatus(r) => {
-                msgbus::send_any(
-                    MessagingSwitchboard::exec_engine_reconcile_execution_report(),
-                    &*r,
-                );
-            }
-            ExecutionReport::Fill(r) => {
-                msgbus::send_any(
-                    MessagingSwitchboard::exec_engine_reconcile_execution_report(),
-                    &*r,
-                );
-            }
-            ExecutionReport::Position(r) => {
-                msgbus::send_any(
-                    MessagingSwitchboard::exec_engine_reconcile_execution_report(),
-                    &*r,
-                );
-            }
-            ExecutionReport::Mass(r) => {
-                msgbus::send_any(
-                    MessagingSwitchboard::exec_engine_reconcile_execution_mass_status(),
-                    &*r,
-                );
-            }
-        }
+        let endpoint = MessagingSwitchboard::exec_engine_reconcile_execution_report();
+        msgbus::send_any(endpoint, &report as &dyn Any);
     }
 }
 
@@ -549,11 +525,10 @@ mod tests {
             runner.run().await;
         });
 
-        // Drop data sender to close channel - this should cause runner to exit
         drop(data_tx);
 
-        // Send stop signal to ensure clean shutdown
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Yield to let runner enter event loop before stop signal
+        tokio::task::yield_now().await;
         signal_tx.send(()).ok();
 
         // Runner should stop when channels close or on signal
@@ -609,13 +584,11 @@ mod tests {
             handle.await.unwrap();
         }
 
-        // Give runner time to process
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Stop runner
+        // Yield to let runner enter event loop before stop signal
+        tokio::task::yield_now().await;
         signal_tx.send(()).unwrap();
 
-        let _ = tokio::time::timeout(Duration::from_secs(1), runner_handle).await;
+        let _ = tokio::time::timeout(Duration::from_millis(200), runner_handle).await;
     }
 
     #[rstest]
@@ -695,14 +668,14 @@ mod tests {
             None,
         );
 
-        tx.send(ExecutionEvent::Report(ExecutionReport::OrderStatus(
-            Box::new(report),
-        )))
+        tx.send(ExecutionEvent::Report(ExecutionReport::Order(Box::new(
+            report,
+        ))))
         .unwrap();
 
         let received = rx.recv().await.unwrap();
         match received {
-            ExecutionEvent::Report(ExecutionReport::OrderStatus(r)) => {
+            ExecutionEvent::Report(ExecutionReport::Order(r)) => {
                 assert_eq!(r.venue_order_id.as_str(), "V-001");
                 assert_eq!(r.order_status, OrderStatus::Accepted);
             }
@@ -918,9 +891,9 @@ mod tests {
             None,
         );
         exec_evt_tx
-            .send(ExecutionEvent::Report(ExecutionReport::OrderStatus(
-                Box::new(order_status),
-            )))
+            .send(ExecutionEvent::Report(ExecutionReport::Order(Box::new(
+                order_status,
+            ))))
             .unwrap();
 
         // Send execution report (Fill)
@@ -980,13 +953,11 @@ mod tests {
             .send(ExecutionEvent::Account(account_state))
             .unwrap();
 
-        // Give runner time to process all events
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Stop runner
+        // Yield to let runner enter event loop before stop signal
+        tokio::task::yield_now().await;
         signal_tx.send(()).unwrap();
 
-        let result = tokio::time::timeout(Duration::from_secs(1), runner_handle).await;
+        let result = tokio::time::timeout(Duration::from_millis(200), runner_handle).await;
         assert!(
             result.is_ok(),
             "Runner should process all event types and stop cleanly"
@@ -1071,10 +1042,8 @@ mod tests {
             runner.run().await;
         });
 
-        // Give runner time to process queued events
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Stop runner
+        // Yield to let runner enter event loop before stop signal
+        tokio::task::yield_now().await;
         handle.stop();
 
         let result = tokio::time::timeout(Duration::from_millis(200), runner_task).await;

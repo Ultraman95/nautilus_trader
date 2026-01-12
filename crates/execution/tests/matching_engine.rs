@@ -28,6 +28,10 @@ use nautilus_common::{
     },
 };
 use nautilus_core::{UUID4, UnixNanos};
+use nautilus_execution::{
+    matching_engine::{config::OrderMatchingEngineConfig, engine::OrderMatchingEngine},
+    models::{fee::FeeModelAny, fill::FillModel},
+};
 use nautilus_model::{
     data::{Bar, BarType, BookOrder, TradeTick, stubs::OrderBookDeltaTestBuilder},
     enums::{
@@ -56,11 +60,6 @@ use nautilus_model::{
 use rstest::{fixture, rstest};
 use rust_decimal_macros::dec;
 use ustr::Ustr;
-
-use crate::{
-    matching_engine::{config::OrderMatchingEngineConfig, engine::OrderMatchingEngine},
-    models::{fee::FeeModelAny, fill::FillModel},
-};
 
 #[fixture]
 pub fn test_clock() -> Rc<RefCell<TestClock>> {
@@ -160,6 +159,7 @@ fn engine_config() -> OrderMatchingEngineConfig {
         use_position_ids: false,
         use_random_ids: false,
         use_reduce_only: true,
+        use_market_order_acks: false,
         price_protection_points: None,
     }
 }
@@ -866,6 +866,127 @@ fn test_valid_market_buy(
     assert_eq!(fill1.last_qty, Quantity::from("1.000"));
     assert_eq!(fill2.last_px, Price::from("1510.00"));
     assert_eq!(fill2.last_qty, Quantity::from("1.000"));
+}
+
+#[rstest]
+fn test_market_order_with_acks_generates_accepted_then_filled(
+    instrument_eth_usdt: InstrumentAny,
+    order_event_handler: ShareableMessageHandler,
+    account_id: AccountId,
+) {
+    msgbus::register(
+        MessagingSwitchboard::exec_engine_process(),
+        order_event_handler.clone(),
+    );
+
+    let config = OrderMatchingEngineConfig {
+        use_market_order_acks: true,
+        ..Default::default()
+    };
+    let mut engine =
+        get_order_matching_engine_l2(instrument_eth_usdt.clone(), None, None, Some(config), None);
+
+    let orderbook_delta = OrderBookDeltaTestBuilder::new(instrument_eth_usdt.id())
+        .book_action(BookAction::Add)
+        .book_order(BookOrder::new(
+            OrderSide::Sell,
+            Price::from("1500.00"),
+            Quantity::from("1.000"),
+            1,
+        ))
+        .build();
+    engine.process_order_book_delta(&orderbook_delta).unwrap();
+
+    let mut market_order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(instrument_eth_usdt.id())
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from("1.000"))
+        .client_order_id(ClientOrderId::from("O-19700101-000000-001-001-1"))
+        .submit(true)
+        .build();
+    engine.process_order(&mut market_order, account_id);
+
+    // Verify OrderAccepted is generated before OrderFilled
+    let saved_messages = get_order_event_handler_messages(order_event_handler);
+    assert_eq!(saved_messages.len(), 2);
+
+    let accepted = match saved_messages.first().unwrap() {
+        OrderEventAny::Accepted(a) => a,
+        other => panic!("Expected OrderAccepted, got {other:?}"),
+    };
+    assert_eq!(accepted.client_order_id, market_order.client_order_id());
+
+    let filled = match saved_messages.get(1).unwrap() {
+        OrderEventAny::Filled(f) => f,
+        other => panic!("Expected OrderFilled, got {other:?}"),
+    };
+    assert_eq!(filled.client_order_id, market_order.client_order_id());
+    assert_eq!(filled.last_px, Price::from("1500.00"));
+    assert_eq!(filled.last_qty, Quantity::from("1.000"));
+}
+
+#[rstest]
+fn test_market_order_with_protection_and_acks_generates_accepted_then_filled(
+    instrument_eth_usdt: InstrumentAny,
+    order_event_handler: ShareableMessageHandler,
+    account_id: AccountId,
+) {
+    msgbus::register(
+        MessagingSwitchboard::exec_engine_process(),
+        order_event_handler.clone(),
+    );
+
+    let config = OrderMatchingEngineConfig {
+        use_market_order_acks: true,
+        ..Default::default()
+    }
+    .with_price_protection_points(Some(600));
+
+    let mut engine =
+        get_order_matching_engine_l2(instrument_eth_usdt.clone(), None, None, Some(config), None);
+
+    let orderbook_delta = OrderBookDeltaTestBuilder::new(instrument_eth_usdt.id())
+        .book_action(BookAction::Add)
+        .book_order(BookOrder::new(
+            OrderSide::Sell,
+            Price::from("1500.00"),
+            Quantity::from("1.000"),
+            1,
+        ))
+        .build();
+    engine.process_order_book_delta(&orderbook_delta).unwrap();
+
+    let mut market_order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(instrument_eth_usdt.id())
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from("1.000"))
+        .client_order_id(ClientOrderId::from("O-19700101-000000-001-001-1"))
+        .submit(true)
+        .build();
+    engine.process_order(&mut market_order, account_id);
+
+    // Verify OrderUpdated (protection price), OrderAccepted, then OrderFilled
+    let saved_messages = get_order_event_handler_messages(order_event_handler);
+    assert_eq!(saved_messages.len(), 3);
+
+    let updated = match saved_messages.first().unwrap() {
+        OrderEventAny::Updated(u) => u,
+        other => panic!("Expected OrderUpdated, got {other:?}"),
+    };
+    assert_eq!(updated.client_order_id, market_order.client_order_id());
+    assert!(updated.protection_price.is_some());
+
+    let accepted = match saved_messages.get(1).unwrap() {
+        OrderEventAny::Accepted(a) => a,
+        other => panic!("Expected OrderAccepted, got {other:?}"),
+    };
+    assert_eq!(accepted.client_order_id, market_order.client_order_id());
+
+    let filled = match saved_messages.get(2).unwrap() {
+        OrderEventAny::Filled(f) => f,
+        other => panic!("Expected OrderFilled, got {other:?}"),
+    };
+    assert_eq!(filled.client_order_id, market_order.client_order_id());
 }
 
 #[rstest]
@@ -2490,7 +2611,7 @@ fn test_process_market_to_limit_orders_not_fully_filled(
     let resting_orders = engine_l2.core.get_orders();
     assert_eq!(resting_orders.len(), 1);
     let first_order = resting_orders.first().unwrap();
-    assert_eq!(first_order.client_order_id(), client_order_id);
+    assert_eq!(first_order.client_order_id, client_order_id);
 }
 
 #[rstest]
@@ -2847,7 +2968,7 @@ fn test_process_market_orders_with_protection_rejeceted_and_valid(
     );
 
     let config = OrderMatchingEngineConfig::new(
-        false, false, false, false, false, false, false, false, false,
+        false, false, false, false, false, false, false, false, false, false,
     )
     .with_price_protection_points(Some(600));
 
@@ -2889,39 +3010,30 @@ fn test_process_market_orders_with_protection_rejeceted_and_valid(
     engine_l2.process_order(&mut market_sell_order, account_id);
     engine_l2.process_order(&mut market_buy_order, account_id);
 
-    // Check that we receive an OrderRejected event for the protected market sell order while the buy order is processed and partially filled
+    // Check that we receive an OrderRejected event for the protected market sell order
+    // while the buy order is processed and filled (no OrderAccepted since use_market_order_acks=false)
     let saved_messages = get_order_event_handler_messages(order_event_handler);
-    assert_eq!(saved_messages.len(), 4);
-    let event1 = saved_messages.first().unwrap();
-    let rejected = match event1 {
+    assert_eq!(saved_messages.len(), 3);
+
+    let rejected = match saved_messages.first().unwrap() {
         OrderEventAny::Rejected(rejected) => rejected,
         _ => panic!("Expected OrderRejected event in first message"),
     };
     assert_eq!(rejected.client_order_id, client_order_id_market_sell);
-
     assert_eq!(rejected.reason, "No market for ETHUSDT-PERP.BINANCE");
-    let event2 = saved_messages.get(1).unwrap();
-    let updated = match event2 {
+
+    let updated = match saved_messages.get(1).unwrap() {
         OrderEventAny::Updated(updated) => updated,
         _ => panic!("Expected OrderUpdated event in second message"),
     };
     assert_eq!(updated.client_order_id, client_order_id_market_buy);
-    //Protection price is calculated using the Best Ask Price + 6 Protection points
+
+    // Protection price is calculated using the Best Ask Price + 6 Protection points
     assert_eq!(updated.protection_price, Some(Price::new(1506.0, 2)));
 
-    let event3 = saved_messages.get(2).unwrap();
-    let accepted = match event3 {
-        OrderEventAny::Accepted(accepted) => accepted,
-        _ => panic!("Expected Accepted event in third message"),
-    };
-    assert_eq!(accepted.client_order_id, client_order_id_market_buy);
-
-    let event4 = saved_messages.get(3).unwrap();
-
-    //Aggressive order is partially filled
-    let filled = match event4 {
+    let filled = match saved_messages.get(2).unwrap() {
         OrderEventAny::Filled(filled) => filled,
-        _ => panic!("Expected Filled event in fourth message"),
+        _ => panic!("Expected Filled event in third message"),
     };
     assert_eq!(filled.client_order_id, client_order_id_market_buy);
 }
@@ -2938,7 +3050,7 @@ fn test_process_stop_orders_with_protection_rejeceted_and_valid(
     );
 
     let config = OrderMatchingEngineConfig::new(
-        false, false, false, false, false, false, false, false, false,
+        false, false, false, false, false, false, false, false, false, false,
     )
     .with_price_protection_points(Some(600));
 
@@ -3588,6 +3700,312 @@ fn test_liquidity_consumption_off_allows_repeated_fills(
     assert_eq!(filled_events.len(), 2);
     assert_eq!(filled_events[0].last_qty, Quantity::from("50.000"));
     assert_eq!(filled_events[1].last_qty, Quantity::from("50.000"));
+}
+
+/// Regression test for stop-limit double-accept bug.
+/// When a stop-limit order triggers but doesn't immediately fill, it should only be
+/// accepted once, not twice.
+#[rstest]
+fn test_stop_limit_triggered_not_filled_single_accept(
+    instrument_eth_usdt: InstrumentAny,
+    order_event_handler: ShareableMessageHandler,
+    account_id: AccountId,
+) {
+    msgbus::register(
+        MessagingSwitchboard::exec_engine_process(),
+        order_event_handler.clone(),
+    );
+
+    let mut engine_l2 =
+        get_order_matching_engine_l2(instrument_eth_usdt.clone(), None, None, None, None);
+
+    // Add sell order at 1500
+    let orderbook_delta_sell = OrderBookDeltaTestBuilder::new(instrument_eth_usdt.id())
+        .book_action(BookAction::Add)
+        .book_order(BookOrder::new(
+            OrderSide::Sell,
+            Price::from("1500.00"),
+            Quantity::from("1.000"),
+            1,
+        ))
+        .build();
+    engine_l2
+        .process_order_book_delta(&orderbook_delta_sell)
+        .unwrap();
+
+    let client_order_id = ClientOrderId::from("O-19700101-000000-001-001-1");
+
+    // Create stop-limit order: triggers at 1495 (below ask 1500), limit 1490 (not immediately filled)
+    let mut stop_order = OrderTestBuilder::new(OrderType::StopLimit)
+        .instrument_id(instrument_eth_usdt.id())
+        .side(OrderSide::Buy)
+        .trigger_price(Price::from("1495.00"))
+        .price(Price::from("1490.00"))
+        .quantity(Quantity::from("1.000"))
+        .client_order_id(client_order_id)
+        .submit(true)
+        .build();
+
+    engine_l2.process_order(&mut stop_order, account_id);
+
+    // Verify: should have exactly 1 Accepted event and 1 Triggered event
+    let saved_messages = get_order_event_handler_messages(order_event_handler);
+    let accepted_count = saved_messages
+        .iter()
+        .filter(|e| matches!(e, OrderEventAny::Accepted(_)))
+        .count();
+
+    assert_eq!(
+        accepted_count, 1,
+        "Expected exactly 1 Accepted event, got {accepted_count} (double-accept bug)"
+    );
+    assert_eq!(
+        saved_messages.len(),
+        2,
+        "Expected Accepted + Triggered events"
+    );
+
+    // Verify order exists in core exactly once
+    let orders = engine_l2.core.get_orders();
+    let matching_order_count = orders
+        .iter()
+        .filter(|o| o.client_order_id == client_order_id)
+        .count();
+    assert_eq!(
+        matching_order_count, 1,
+        "Order should exist exactly once in core"
+    );
+}
+
+/// Regression test for order modify persistence bug.
+/// When an order is modified, the new price should persist to the core
+/// and be used for subsequent matching.
+#[rstest]
+fn test_modify_limit_order_price_persists_to_core(
+    instrument_eth_usdt: InstrumentAny,
+    order_event_handler: ShareableMessageHandler,
+    account_id: AccountId,
+) {
+    msgbus::register(
+        MessagingSwitchboard::exec_engine_process(),
+        order_event_handler.clone(),
+    );
+
+    let mut engine_l2 =
+        get_order_matching_engine_l2(instrument_eth_usdt.clone(), None, None, None, None);
+
+    // Add sell order at 1500
+    let orderbook_delta_sell = OrderBookDeltaTestBuilder::new(instrument_eth_usdt.id())
+        .book_action(BookAction::Add)
+        .book_order(BookOrder::new(
+            OrderSide::Sell,
+            Price::from("1500.00"),
+            Quantity::from("1.000"),
+            1,
+        ))
+        .build();
+    engine_l2
+        .process_order_book_delta(&orderbook_delta_sell)
+        .unwrap();
+
+    let client_order_id = ClientOrderId::from("O-19700101-000000-001-001-1");
+
+    // Create limit buy at 1490 (below ask, won't fill)
+    let mut limit_order = OrderTestBuilder::new(OrderType::Limit)
+        .instrument_id(instrument_eth_usdt.id())
+        .side(OrderSide::Buy)
+        .price(Price::from("1490.00"))
+        .quantity(Quantity::from("1.000"))
+        .client_order_id(client_order_id)
+        .submit(true)
+        .build();
+
+    engine_l2.process_order(&mut limit_order, account_id);
+
+    // Verify order is in core at original price
+    let order_in_core = engine_l2.core.get_order(client_order_id).unwrap();
+    assert_eq!(order_in_core.limit_price, Some(Price::from("1490.00")));
+
+    clear_order_event_handler_messages(order_event_handler);
+
+    // Modify order to new price 1495 (still below ask, won't fill)
+    let modify_command = ModifyOrder::new(
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
+        instrument_eth_usdt.id(),
+        client_order_id,
+        Some(VenueOrderId::from("V1")),
+        Some(Quantity::from("1.000")),
+        Some(Price::from("1495.00")),
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+    );
+
+    engine_l2.process_modify(&modify_command, account_id);
+
+    // Verify: order in core should have new price
+    let order_in_core = engine_l2.core.get_order(client_order_id).unwrap();
+    assert_eq!(
+        order_in_core.limit_price,
+        Some(Price::from("1495.00")),
+        "Modified price should persist to core"
+    );
+}
+
+/// Regression test for rejected modify not changing book priority.
+/// When a modify is rejected (e.g., invalid precision), the order should remain
+/// unchanged in the book without affecting its time priority.
+#[rstest]
+fn test_rejected_modify_does_not_change_book_priority(
+    instrument_eth_usdt: InstrumentAny,
+    order_event_handler: ShareableMessageHandler,
+    account_id: AccountId,
+) {
+    msgbus::register(
+        MessagingSwitchboard::exec_engine_process(),
+        order_event_handler.clone(),
+    );
+
+    let mut engine_l2 =
+        get_order_matching_engine_l2(instrument_eth_usdt.clone(), None, None, None, None);
+
+    // Add sell order at 1500
+    let orderbook_delta_sell = OrderBookDeltaTestBuilder::new(instrument_eth_usdt.id())
+        .book_action(BookAction::Add)
+        .book_order(BookOrder::new(
+            OrderSide::Sell,
+            Price::from("1500.00"),
+            Quantity::from("1.000"),
+            1,
+        ))
+        .build();
+    engine_l2
+        .process_order_book_delta(&orderbook_delta_sell)
+        .unwrap();
+
+    let client_order_id = ClientOrderId::from("O-19700101-000000-001-001-1");
+
+    // Create limit buy at 1490 (below ask, won't fill)
+    let mut limit_order = OrderTestBuilder::new(OrderType::Limit)
+        .instrument_id(instrument_eth_usdt.id())
+        .side(OrderSide::Buy)
+        .price(Price::from("1490.00"))
+        .quantity(Quantity::from("1.000"))
+        .client_order_id(client_order_id)
+        .submit(true)
+        .build();
+
+    engine_l2.process_order(&mut limit_order, account_id);
+
+    // Get initial order count in core
+    let initial_order_count = engine_l2.core.get_orders().len();
+
+    clear_order_event_handler_messages(order_event_handler.clone());
+
+    // Try to modify with invalid precision (instrument has 2 decimal places for price)
+    let modify_command = ModifyOrder::new(
+        TraderId::test_default(),
+        Some(ClientId::from("CLIENT-001")),
+        StrategyId::test_default(),
+        instrument_eth_usdt.id(),
+        client_order_id,
+        Some(VenueOrderId::from("V1")),
+        Some(Quantity::from("1.000")),
+        Some(Price::from("1495.12345")), // Invalid precision
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+    );
+
+    engine_l2.process_modify(&modify_command, account_id);
+
+    // Verify: modify should be rejected
+    let saved_messages = get_order_event_handler_messages(order_event_handler);
+    let rejected_count = saved_messages
+        .iter()
+        .filter(|e| matches!(e, OrderEventAny::ModifyRejected(_)))
+        .count();
+    assert_eq!(rejected_count, 1, "Modify should be rejected");
+
+    // Verify: order should still be in core with original price
+    let order_in_core = engine_l2.core.get_order(client_order_id).unwrap();
+    assert_eq!(
+        order_in_core.limit_price,
+        Some(Price::from("1490.00")),
+        "Order price should be unchanged after rejected modify"
+    );
+
+    // Verify: order count unchanged (not deleted and re-added)
+    let final_order_count = engine_l2.core.get_orders().len();
+    assert_eq!(
+        initial_order_count, final_order_count,
+        "Order count should be unchanged"
+    );
+}
+
+/// Regression test for netting mode position ID.
+/// In netting mode, fills should not have a venue_position_id.
+#[rstest]
+fn test_netting_mode_fills_have_no_position_id(
+    instrument_eth_usdt: InstrumentAny,
+    order_event_handler: ShareableMessageHandler,
+    account_id: AccountId,
+) {
+    msgbus::register(
+        MessagingSwitchboard::exec_engine_process(),
+        order_event_handler.clone(),
+    );
+
+    // Create engine in netting mode (default)
+    let mut engine_l2 =
+        get_order_matching_engine_l2(instrument_eth_usdt.clone(), None, None, None, None);
+
+    // Add sell order at 1500
+    let orderbook_delta_sell = OrderBookDeltaTestBuilder::new(instrument_eth_usdt.id())
+        .book_action(BookAction::Add)
+        .book_order(BookOrder::new(
+            OrderSide::Sell,
+            Price::from("1500.00"),
+            Quantity::from("1.000"),
+            1,
+        ))
+        .build();
+    engine_l2
+        .process_order_book_delta(&orderbook_delta_sell)
+        .unwrap();
+
+    let client_order_id = ClientOrderId::from("O-19700101-000000-001-001-1");
+
+    // Create market buy that will fill
+    let mut market_order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(instrument_eth_usdt.id())
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from("1.000"))
+        .client_order_id(client_order_id)
+        .submit(true)
+        .build();
+
+    engine_l2.process_order(&mut market_order, account_id);
+
+    // Get fill event
+    let saved_messages = get_order_event_handler_messages(order_event_handler);
+    let fill_event = saved_messages
+        .iter()
+        .find_map(|e| match e {
+            OrderEventAny::Filled(fill) => Some(fill),
+            _ => None,
+        })
+        .expect("Expected a fill event");
+
+    // In netting mode, position_id should be None
+    assert!(
+        fill_event.position_id.is_none(),
+        "Netting mode fills should have position_id = None"
+    );
 }
 
 // NOTE: Trade consumption tests are in Python (test_matching_engine.py) because the Rust

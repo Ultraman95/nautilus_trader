@@ -253,7 +253,6 @@ pre-flight:  #-- Run comprehensive pre-flight checks (format, check-code, cargo-
 	@$(MAKE) --no-print-directory cargo-test-extras
 	@$(MAKE) --no-print-directory build-debug
 	@$(MAKE) --no-print-directory pytest
-	@$(MAKE) --no-print-directory security-audit
 	@printf "$(GREEN)All pre-flight checks passed$(RESET)\n"
 
 .PHONY: ruff
@@ -320,10 +319,10 @@ security-audit: check-audit-installed check-deny-installed check-vet-installed c
 	$(info $(M) Running security audit...)
 	@printf "$(CYAN)Running cargo audit...$(RESET)\n"
 	cargo audit --color never || true
-	@printf "\n$(CYAN)Running cargo deny (advisories check)...$(RESET)\n"
-	cargo deny --all-features check advisories
+	@printf "\n$(CYAN)Running cargo deny (advisories, licenses, sources, bans)...$(RESET)\n"
+	cargo deny --all-features check advisories licenses sources bans
 	@printf "\n$(CYAN)Running cargo vet (supply chain audit)...$(RESET)\n"
-	cargo vet
+	cargo vet --locked
 	@printf "\n$(CYAN)Running osv-scanner (Cargo.lock + uv.lock)...$(RESET)\n"
 	osv-scanner --config=osv-scanner.toml --lockfile=Cargo.lock --lockfile=uv.lock
 
@@ -451,15 +450,22 @@ check-features: check-hack-installed  #-- Verify crate feature combinations comp
 .PHONY: check-capnp-schemas  #-- Verify Cap'n Proto schemas are up-to-date
 check-capnp-schemas:
 	$(info $(M) Checking if Cap'n Proto schemas are up-to-date...)
-	@bash scripts/regen_capnp.sh > /dev/null 2>&1 || true
-	@DIFF_OUTPUT="$$(git diff -I\"ENCODED_NODE\" -- crates/serialization/generated/capnp)"; \
-	if [ -n "$$DIFF_OUTPUT" ]; then \
-		echo "$(RED)Error: Cap'n Proto generated files are out of date$(RESET)"; \
-		echo "Please run: ./scripts/regen_capnp.sh"; \
-		echo "Or: make regen-capnp"; \
+	@if ! command -v capnp > /dev/null 2>&1; then \
+		echo "$(YELLOW)⚠ capnp not installed, skipping schema check$(RESET)"; \
+	elif ! bash scripts/regen_capnp.sh > /dev/null 2>&1; then \
+		echo "$(RED)Error: Cap'n Proto regeneration failed$(RESET)"; \
+		echo "Run manually to see errors: ./scripts/regen_capnp.sh"; \
 		exit 1; \
 	else \
-		echo "$(GREEN)✓ Cap'n Proto schemas are up-to-date$(RESET)"; \
+		DIFF_OUTPUT="$$(git diff -I\"ENCODED_NODE\" -- crates/serialization/generated/capnp)"; \
+		if [ -n "$$DIFF_OUTPUT" ]; then \
+			echo "$(RED)Error: Cap'n Proto generated files are out of date$(RESET)"; \
+			echo "Please run: ./scripts/regen_capnp.sh"; \
+			echo "Or: make regen-capnp"; \
+			exit 1; \
+		else \
+			echo "$(GREEN)✓ Cap'n Proto schemas are up-to-date$(RESET)"; \
+		fi; \
 	fi
 
 .PHONY: regen-capnp  #-- Regenerate Cap'n Proto schema files

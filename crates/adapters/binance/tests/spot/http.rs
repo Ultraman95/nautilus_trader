@@ -1747,8 +1747,8 @@ async fn test_domain_cancel_all_orders() {
     let venue_order_ids = client.cancel_all_orders(instrument_id).await.unwrap();
 
     assert_eq!(venue_order_ids.len(), 2);
-    assert_eq!(venue_order_ids[0], VenueOrderId::from("12345"));
-    assert_eq!(venue_order_ids[1], VenueOrderId::from("12346"));
+    assert_eq!(venue_order_ids[0].0, VenueOrderId::from("12345"));
+    assert_eq!(venue_order_ids[1].0, VenueOrderId::from("12346"));
 }
 
 #[rstest]
@@ -1789,7 +1789,7 @@ async fn test_domain_request_order_status() {
     let venue_order_id = VenueOrderId::from("12345");
 
     let report = client
-        .request_order_status(account_id, instrument_id, Some(venue_order_id), None)
+        .request_order_status_report(account_id, instrument_id, Some(venue_order_id), None)
         .await
         .unwrap();
 

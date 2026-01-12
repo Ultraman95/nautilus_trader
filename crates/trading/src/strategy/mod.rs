@@ -120,12 +120,19 @@ pub trait Strategy: DataActor {
             Some(params)
         };
 
+        {
+            let cache_rc = core.cache_rc();
+            let mut cache = cache_rc.borrow_mut();
+            cache.add_order(order.clone(), position_id, client_id, true)?;
+        }
+
         let command = SubmitOrder::new(
             trader_id,
             client_id,
             strategy_id,
             order.instrument_id(),
-            order.clone(),
+            order.client_order_id(),
+            order.init_event().clone(),
             order.exec_algorithm_id(),
             position_id,
             params,
@@ -1206,7 +1213,7 @@ mod tests {
         clock::TestClock,
     };
     use nautilus_model::{
-        enums::{OrderSide, PositionSide},
+        enums::{LiquiditySide, OrderSide, OrderType, PositionSide},
         events::OrderRejected,
         identifiers::{
             AccountId, ClientOrderId, InstrumentId, PositionId, StrategyId, TradeId, TraderId,
@@ -1449,8 +1456,6 @@ mod tests {
             .core
             .gtd_timers
             .insert(client_order_id, Ustr::from("GTD-EXPIRY:O-001"));
-
-        use nautilus_model::enums::{LiquiditySide, OrderType};
 
         let event = OrderEventAny::Filled(OrderFilled {
             trader_id: TraderId::from("TRADER-001"),
