@@ -15,8 +15,6 @@
 
 //! Data structures for Deribit WebSocket JSON-RPC messages.
 
-use std::fmt::Display;
-
 use nautilus_model::{
     data::{Data, FundingRateUpdate, OrderBookDeltas},
     events::{
@@ -31,7 +29,10 @@ use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
 use super::enums::{DeribitBookAction, DeribitBookMsgType, DeribitHeartbeatType};
-pub use crate::common::rpc::{DeribitJsonRpcError, DeribitJsonRpcRequest, DeribitJsonRpcResponse};
+pub use crate::common::{
+    enums::DeribitInstrumentState,
+    rpc::{DeribitJsonRpcError, DeribitJsonRpcRequest, DeribitJsonRpcResponse},
+};
 use crate::websocket::error::DeribitWsError;
 
 /// JSON-RPC subscription notification from Deribit.
@@ -219,9 +220,11 @@ pub struct DeribitTickerMsg {
     /// Open interest.
     pub open_interest: f64,
     /// Current funding rate (perpetuals).
-    pub current_funding: Option<f64>,
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    pub current_funding: Option<Decimal>,
     /// Funding 8h rate (perpetuals).
-    pub funding_8h: Option<f64>,
+    #[serde(default, with = "rust_decimal::serde::float_option")]
+    pub funding_8h: Option<Decimal>,
     /// Settlement price (expired instruments).
     pub settlement_price: Option<f64>,
     /// 24h volume.
@@ -272,53 +275,6 @@ pub struct DeribitQuoteMsg {
     pub best_ask_amount: f64,
 }
 
-/// Instrument lifecycle state from Deribit.
-///
-/// Represents the current state of an instrument in its lifecycle.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    Serialize,
-    Deserialize,
-    strum::AsRefStr,
-    strum::EnumIter,
-    strum::EnumString,
-)]
-#[serde(rename_all = "snake_case")]
-#[strum(serialize_all = "snake_case")]
-#[cfg_attr(
-    feature = "python",
-    pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.deribit")
-)]
-pub enum DeribitInstrumentState {
-    /// Instrument has been created but not yet active.
-    Created,
-    /// Instrument is active and trading.
-    Started,
-    /// Instrument has been settled (options/futures at expiry).
-    Settled,
-    /// Instrument is closed for trading.
-    Closed,
-    /// Instrument has been terminated.
-    Terminated,
-}
-
-impl Display for DeribitInstrumentState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Created => write!(f, "created"),
-            Self::Started => write!(f, "started"),
-            Self::Settled => write!(f, "settled"),
-            Self::Closed => write!(f, "closed"),
-            Self::Terminated => write!(f, "terminated"),
-        }
-    }
-}
-
 /// Instrument state notification from `instrument.state.{kind}.{currency}` channel.
 ///
 /// Notifications are sent when an instrument's lifecycle state changes.
@@ -343,7 +299,8 @@ pub struct DeribitPerpetualMsg {
     /// Current index price.
     pub index_price: f64,
     /// Current interest rate (funding rate).
-    pub interest: f64,
+    #[serde(with = "rust_decimal::serde::float")]
+    pub interest: Decimal,
     /// Timestamp in milliseconds since Unix epoch.
     pub timestamp: u64,
 }
@@ -351,7 +308,18 @@ pub struct DeribitPerpetualMsg {
 /// Chart/OHLC bar data from chart.trades.{instrument}.{resolution} channel.
 ///
 /// Sent via the `chart.trades.{instrument_name}.{resolution}` channel.
-/// Example: `{"tick":1767199200000,"open":87699.5,"high":87699.5,"low":87699.5,"close":87699.5,"volume":1.1403e-4,"cost":10.0}`
+/// Status of a chart/candle bar from Deribit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeribitChartStatus {
+    /// Bar is closed/confirmed.
+    #[default]
+    Ok,
+    /// Bar is still in progress (imputed/partial data).
+    Imputed,
+}
+
+/// Example: `{"tick":1767199200000,"open":87699.5,"high":87699.5,"low":87699.5,"close":87699.5,"volume":1.1403e-4,"cost":10.0,"status":"ok"}`
 #[derive(Debug, Clone, Deserialize)]
 pub struct DeribitChartMsg {
     /// Bar timestamp in milliseconds since Unix epoch.
@@ -368,6 +336,9 @@ pub struct DeribitChartMsg {
     pub volume: f64,
     /// Volume in USD.
     pub cost: f64,
+    /// Bar status: `Ok` for closed bar, `Imputed` for in-progress bar.
+    #[serde(default)]
+    pub status: DeribitChartStatus,
 }
 
 /// Order parameters for private/buy and private/sell requests.
@@ -396,9 +367,14 @@ pub struct DeribitOrderParams {
     /// Time in force: "good_til_cancelled", "good_til_date", "fill_or_kill", "immediate_or_cancel".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub time_in_force: Option<String>,
-    /// Post-only flag (rejected if would take liquidity).
+    /// Post-only flag. If true and order would take liquidity, price is adjusted
+    /// to be just below the spread (unless reject_post_only is true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_only: Option<bool>,
+    /// If true with post_only, order is rejected instead of price being adjusted.
+    /// Only valid when post_only is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reject_post_only: Option<bool>,
     /// Reduce-only flag (only reduces position).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reduce_only: Option<bool>,
@@ -462,9 +438,14 @@ pub struct DeribitEditParams {
         with = "rust_decimal::serde::float_option"
     )]
     pub trigger_price: Option<Decimal>,
-    /// Post-only flag.
+    /// Post-only flag. If true and order would take liquidity, price is adjusted
+    /// to be just below the spread (unless reject_post_only is true).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_only: Option<bool>,
+    /// If true with post_only, order is rejected instead of price being adjusted.
+    /// Only valid when post_only is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reject_post_only: Option<bool>,
     /// Reduce-only flag.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reduce_only: Option<bool>,
@@ -507,13 +488,23 @@ pub struct DeribitOrderMsg {
     /// Order state: "open", "filled", "rejected", "cancelled", "untriggered".
     pub order_state: String,
     /// Limit price (None for market orders).
-    pub price: Option<f64>,
+    #[serde(
+        default,
+        deserialize_with = "nautilus_core::serialization::deserialize_optional_decimal_flexible"
+    )]
+    pub price: Option<Decimal>,
     /// Original order amount in contracts.
-    pub amount: f64,
+    #[serde(deserialize_with = "nautilus_core::serialization::deserialize_decimal")]
+    pub amount: Decimal,
     /// Amount filled so far.
-    pub filled_amount: f64,
+    #[serde(deserialize_with = "nautilus_core::serialization::deserialize_decimal")]
+    pub filled_amount: Decimal,
     /// Average fill price.
-    pub average_price: Option<f64>,
+    #[serde(
+        default,
+        deserialize_with = "nautilus_core::serialization::deserialize_optional_decimal_flexible"
+    )]
+    pub average_price: Option<Decimal>,
     /// Order creation timestamp in milliseconds.
     pub creation_timestamp: u64,
     /// Last update timestamp in milliseconds.
@@ -521,8 +512,11 @@ pub struct DeribitOrderMsg {
     /// Time in force setting.
     pub time_in_force: String,
     /// Commission paid in base currency.
-    #[serde(default)]
-    pub commission: f64,
+    #[serde(
+        default,
+        deserialize_with = "nautilus_core::serialization::deserialize_decimal"
+    )]
+    pub commission: Decimal,
     /// Post-only flag.
     #[serde(default)]
     pub post_only: bool,
@@ -530,11 +524,19 @@ pub struct DeribitOrderMsg {
     #[serde(default)]
     pub reduce_only: bool,
     /// Trigger price for stop/take orders.
-    pub trigger_price: Option<f64>,
+    #[serde(
+        default,
+        deserialize_with = "nautilus_core::serialization::deserialize_optional_decimal_flexible"
+    )]
+    pub trigger_price: Option<Decimal>,
     /// Trigger type: "last_price", "index_price", "mark_price".
     pub trigger: Option<String>,
     /// Max show quantity for iceberg orders.
-    pub max_show: Option<f64>,
+    #[serde(
+        default,
+        deserialize_with = "nautilus_core::serialization::deserialize_optional_decimal_flexible"
+    )]
+    pub max_show: Option<Decimal>,
     /// API request flag.
     #[serde(default)]
     pub api: bool,
@@ -547,7 +549,7 @@ pub struct DeribitOrderMsg {
 /// User trade message from Deribit.
 ///
 /// Received from order responses and user.trades subscription.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeribitUserTradeMsg {
     /// Unique trade ID.
     pub trade_id: String,
@@ -558,11 +560,23 @@ pub struct DeribitUserTradeMsg {
     /// Trade direction: "buy" or "sell".
     pub direction: String,
     /// Execution price.
-    pub price: f64,
+    #[serde(
+        serialize_with = "nautilus_core::serialization::serialize_decimal",
+        deserialize_with = "nautilus_core::serialization::deserialize_decimal"
+    )]
+    pub price: Decimal,
     /// Trade amount in contracts.
-    pub amount: f64,
+    #[serde(
+        serialize_with = "nautilus_core::serialization::serialize_decimal",
+        deserialize_with = "nautilus_core::serialization::deserialize_decimal"
+    )]
+    pub amount: Decimal,
     /// Fee amount.
-    pub fee: f64,
+    #[serde(
+        serialize_with = "nautilus_core::serialization::serialize_decimal",
+        deserialize_with = "nautilus_core::serialization::deserialize_decimal"
+    )]
+    pub fee: Decimal,
     /// Fee currency.
     pub fee_currency: String,
     /// Trade timestamp in milliseconds.
@@ -574,9 +588,17 @@ pub struct DeribitUserTradeMsg {
     /// Order type.
     pub order_type: String,
     /// Index price at trade time.
-    pub index_price: f64,
+    #[serde(
+        serialize_with = "nautilus_core::serialization::serialize_decimal",
+        deserialize_with = "nautilus_core::serialization::deserialize_decimal"
+    )]
+    pub index_price: Decimal,
     /// Mark price at trade time.
-    pub mark_price: f64,
+    #[serde(
+        serialize_with = "nautilus_core::serialization::serialize_decimal",
+        deserialize_with = "nautilus_core::serialization::deserialize_decimal"
+    )]
+    pub mark_price: Decimal,
     /// Tick direction (0-3).
     pub tick_direction: i8,
     /// Order state after this trade.
@@ -590,7 +612,12 @@ pub struct DeribitUserTradeMsg {
     #[serde(default)]
     pub post_only: bool,
     /// Profit/loss for this trade.
-    pub profit_loss: Option<f64>,
+    #[serde(
+        default,
+        serialize_with = "nautilus_core::serialization::serialize_optional_decimal",
+        deserialize_with = "nautilus_core::serialization::deserialize_optional_decimal_flexible"
+    )]
+    pub profit_loss: Option<Decimal>,
 }
 
 /// Portfolio/margin message from user.portfolio subscription.
@@ -734,17 +761,10 @@ pub fn parse_raw_message(text: &str) -> Result<DeribitWsMessage, DeribitWsError>
     }
 
     // Check for JSON-RPC response (has "id" field)
+    // IMPORTANT: Both success and error responses should be returned as Response
+    // so the handler can correlate them with pending requests using the ID.
+    // This allows proper cleanup of pending_requests and emission of rejection events.
     if value.get("id").is_some() {
-        // Check for error response
-        if value.get("error").is_some() {
-            let response: DeribitJsonRpcResponse<serde_json::Value> =
-                serde_json::from_value(value.clone())
-                    .map_err(|e| DeribitWsError::Json(e.to_string()))?;
-            if let Some(err) = response.error {
-                return Ok(DeribitWsMessage::Error(err));
-            }
-        }
-        // Success response
         let response: DeribitJsonRpcResponse<serde_json::Value> =
             serde_json::from_value(value).map_err(|e| DeribitWsError::Json(e.to_string()))?;
         return Ok(DeribitWsMessage::Response(response));
@@ -807,6 +827,8 @@ mod tests {
 
     #[rstest]
     fn test_parse_error_response() {
+        // Error responses with an ID are returned as Response (not Error)
+        // so the handler can correlate them with pending requests
         let json = r#"{
             "jsonrpc": "2.0",
             "id": 1,
@@ -817,7 +839,15 @@ mod tests {
         }"#;
 
         let msg = parse_raw_message(json).unwrap();
-        assert!(matches!(msg, DeribitWsMessage::Error(_)));
+        match msg {
+            DeribitWsMessage::Response(resp) => {
+                assert!(resp.error.is_some());
+                let error = resp.error.unwrap();
+                assert_eq!(error.code, 10028);
+                assert_eq!(error.message, "too_many_requests");
+            }
+            _ => panic!("Expected Response with error, got {msg:?}"),
+        }
     }
 
     #[rstest]

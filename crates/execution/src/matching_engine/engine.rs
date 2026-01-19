@@ -18,7 +18,6 @@
 #![allow(unused_variables)]
 
 use std::{
-    any::Any,
     cell::RefCell,
     cmp::min,
     fmt::Debug,
@@ -33,6 +32,7 @@ use nautilus_common::{
     clock::Clock,
     messages::execution::{BatchCancelOrders, CancelAllOrders, CancelOrder, ModifyOrder},
     msgbus,
+    msgbus::MessagingSwitchboard,
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_model::{
@@ -234,15 +234,16 @@ impl OrderMatchingEngine {
             }
 
             let price_raw = price.raw;
-            let book_size_f64 = self.book.get_quantity_for_price(price, order_side);
-            let book_size_raw = (book_size_f64 * 10f64.powi(FIXED_PRECISION as i32)) as QuantityRaw;
+            let level_size = self
+                .book
+                .get_quantity_at_level(price, order_side, qty.precision);
 
             let (original_size, consumed) =
-                consumption.entry(price_raw).or_insert((book_size_raw, 0));
+                consumption.entry(price_raw).or_insert((level_size.raw, 0));
 
             // Reset consumption when book size changes (fresh data)
-            if *original_size != book_size_raw {
-                *original_size = book_size_raw;
+            if *original_size != level_size.raw {
+                *original_size = level_size.raw;
                 *consumed = 0;
             }
 
@@ -1149,7 +1150,7 @@ impl OrderMatchingEngine {
         let open_orders = self
             .cache
             .borrow()
-            .orders_open(None, Some(&instrument_id), None, None)
+            .orders_open(None, Some(&instrument_id), None, None, None)
             .into_iter()
             .cloned()
             .collect::<Vec<OrderAny>>();
@@ -3227,7 +3228,8 @@ impl OrderMatchingEngine {
             false,
             due_post_only,
         ));
-        msgbus::send_any("ExecEngine.process".into(), &event as &dyn Any);
+        let endpoint = MessagingSwitchboard::exec_engine_process();
+        msgbus::send_order_event(endpoint, event);
     }
 
     fn generate_order_accepted(&self, order: &mut OrderAny, venue_order_id: VenueOrderId) {
@@ -3247,10 +3249,14 @@ impl OrderMatchingEngine {
             ts_now,
             false,
         ));
-        msgbus::send_any("ExecEngine.process".into(), &event as &dyn Any);
 
         // TODO: Remove when tests wire up ExecutionEngine to process events
-        order.apply(event).expect("Failed to apply order event");
+        order
+            .apply(event.clone())
+            .expect("Failed to apply order event");
+
+        let endpoint = MessagingSwitchboard::exec_engine_process();
+        msgbus::send_order_event(endpoint, event);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3278,7 +3284,8 @@ impl OrderMatchingEngine {
             venue_order_id,
             account_id,
         ));
-        msgbus::send_any("ExecEngine.process".into(), &event as &dyn Any);
+        let endpoint = MessagingSwitchboard::exec_engine_process();
+        msgbus::send_order_event(endpoint, event);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3306,7 +3313,8 @@ impl OrderMatchingEngine {
             venue_order_id,
             Some(account_id),
         ));
-        msgbus::send_any("ExecEngine.process".into(), &event as &dyn Any);
+        let endpoint = MessagingSwitchboard::exec_engine_process();
+        msgbus::send_order_event(endpoint, event);
     }
 
     fn generate_order_updated(
@@ -3334,10 +3342,14 @@ impl OrderMatchingEngine {
             trigger_price,
             protection_price,
         ));
-        msgbus::send_any("ExecEngine.process".into(), &event as &dyn Any);
 
         // TODO: Remove when tests wire up ExecutionEngine to process events
-        order.apply(event).expect("Failed to apply order event");
+        order
+            .apply(event.clone())
+            .expect("Failed to apply order event");
+
+        let endpoint = MessagingSwitchboard::exec_engine_process();
+        msgbus::send_order_event(endpoint, event);
     }
 
     fn generate_order_canceled(&self, order: &OrderAny, venue_order_id: VenueOrderId) {
@@ -3354,7 +3366,8 @@ impl OrderMatchingEngine {
             Some(venue_order_id),
             order.account_id(),
         ));
-        msgbus::send_any("ExecEngine.process".into(), &event as &dyn Any);
+        let endpoint = MessagingSwitchboard::exec_engine_process();
+        msgbus::send_order_event(endpoint, event);
     }
 
     fn generate_order_triggered(&self, order: &OrderAny) {
@@ -3371,7 +3384,8 @@ impl OrderMatchingEngine {
             order.venue_order_id(),
             order.account_id(),
         ));
-        msgbus::send_any("ExecEngine.process".into(), &event as &dyn Any);
+        let endpoint = MessagingSwitchboard::exec_engine_process();
+        msgbus::send_order_event(endpoint, event);
     }
 
     fn generate_order_expired(&self, order: &OrderAny) {
@@ -3388,7 +3402,8 @@ impl OrderMatchingEngine {
             order.venue_order_id(),
             order.account_id(),
         ));
-        msgbus::send_any("ExecEngine.process".into(), &event as &dyn Any);
+        let endpoint = MessagingSwitchboard::exec_engine_process();
+        msgbus::send_order_event(endpoint, event);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3435,9 +3450,13 @@ impl OrderMatchingEngine {
             venue_position_id,
             Some(commission),
         ));
-        msgbus::send_any("ExecEngine.process".into(), &event as &dyn Any);
 
         // TODO: Remove when tests wire up ExecutionEngine to process events
-        order.apply(event).expect("Failed to apply order event");
+        order
+            .apply(event.clone())
+            .expect("Failed to apply order event");
+
+        let endpoint = MessagingSwitchboard::exec_engine_process();
+        msgbus::send_order_event(endpoint, event);
     }
 }

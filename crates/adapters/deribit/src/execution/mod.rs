@@ -33,12 +33,18 @@ use nautilus_common::{
         ExecutionEvent, ExecutionReport as NautilusExecutionReport,
         execution::{
             BatchCancelOrders, CancelAllOrders, CancelOrder, GenerateFillReports,
-            GenerateOrderStatusReport, GenerateOrderStatusReports, GeneratePositionStatusReports,
-            ModifyOrder, QueryAccount, QueryOrder, SubmitOrder, SubmitOrderList,
+            GenerateFillReportsBuilder, GenerateOrderStatusReport, GenerateOrderStatusReports,
+            GenerateOrderStatusReportsBuilder, GeneratePositionStatusReports,
+            GeneratePositionStatusReportsBuilder, ModifyOrder, QueryAccount, QueryOrder,
+            SubmitOrder, SubmitOrderList,
         },
     },
 };
-use nautilus_core::{MUTEX_POISONED, UUID4, UnixNanos, time::get_atomic_clock_realtime};
+use nautilus_core::{
+    MUTEX_POISONED, UUID4, UnixNanos,
+    datetime::{NANOSECONDS_IN_SECOND, nanos_to_millis},
+    time::get_atomic_clock_realtime,
+};
 use nautilus_live::ExecutionClientCore;
 use nautilus_model::{
     accounts::AccountAny,
@@ -57,11 +63,12 @@ use tokio::task::JoinHandle;
 use crate::{
     common::consts::DERIBIT_VENUE,
     config::DeribitExecClientConfig,
-    http::{client::DeribitHttpClient, models::DeribitCurrency},
+    http::{client::DeribitHttpClient, models::DeribitCurrency, query::GetOrderStateParams},
     websocket::{
         auth::DERIBIT_EXECUTION_SESSION_NAME,
         client::DeribitWebSocketClient,
         messages::{DeribitOrderParams, NautilusWsMessage},
+        parse::parse_user_order_msg,
     },
 };
 
@@ -204,7 +211,7 @@ impl DeribitExecutionClient {
 
         // For GTD orders, extract expire_time and convert to milliseconds for Deribit
         let valid_until = if order.time_in_force() == TimeInForce::Gtd {
-            order.expire_time().map(|t| t.as_u64() / 1_000_000)
+            order.expire_time().map(|t| nanos_to_millis(t.as_u64()))
         } else {
             None
         };
@@ -228,6 +235,11 @@ impl DeribitExecutionClient {
             price: order.price().map(|p| p.as_decimal()),
             time_in_force,
             post_only: if order.is_post_only() {
+                Some(true)
+            } else {
+                None
+            },
+            reject_post_only: if order.is_post_only() {
                 Some(true)
             } else {
                 None
@@ -330,35 +342,16 @@ impl DeribitExecutionClient {
         let account_id = self.core.account_id;
 
         self.spawn_task(task_name, async move {
-            let result = match order_side {
-                OrderSide::Buy => {
-                    ws_client
-                        .buy(
-                            params,
-                            client_order_id,
-                            trader_id,
-                            strategy_id,
-                            instrument_id,
-                        )
-                        .await
-                }
-                OrderSide::Sell => {
-                    ws_client
-                        .sell(
-                            params,
-                            client_order_id,
-                            trader_id,
-                            strategy_id,
-                            instrument_id,
-                        )
-                        .await
-                }
-                OrderSide::NoOrderSide => {
-                    anyhow::bail!(
-                        "NoOrderSide is not allowed for order submission, must be Buy or Sell"
-                    );
-                }
-            };
+            let result = ws_client
+                .submit_order(
+                    order_side,
+                    params,
+                    client_order_id,
+                    trader_id,
+                    strategy_id,
+                    instrument_id,
+                )
+                .await;
 
             if let Err(e) = result {
                 let rejected_event = OrderRejected::new(
@@ -500,7 +493,7 @@ impl ExecutionClient for DeribitExecutionClient {
 
         // Check if credentials are available before requesting account state
         if !self.config.has_api_credentials() {
-            anyhow::bail!("Missing Deribit API credentials. Set Deribit environment variables.");
+            anyhow::bail!("Missing API credentials; set Deribit environment variables");
         }
 
         // Set account ID for order/fill reports
@@ -513,9 +506,7 @@ impl ExecutionClient for DeribitExecutionClient {
                     .http_client
                     .request_instruments(DeribitCurrency::ANY, Some(*kind))
                     .await
-                    .with_context(|| {
-                        format!("failed to request Deribit instruments for {kind:?}")
-                    })?;
+                    .with_context(|| format!("failed to request instruments for {kind:?}"))?;
 
                 if instruments.is_empty() {
                     log::warn!("No instruments returned for {kind:?}");
@@ -534,7 +525,7 @@ impl ExecutionClient for DeribitExecutionClient {
             .http_client
             .request_account_state(self.core.account_id)
             .await
-            .context("failed to request Deribit account state")?;
+            .context("failed to request account state")?;
 
         self.dispatch_account_state(account_state)?;
 
@@ -549,6 +540,18 @@ impl ExecutionClient for DeribitExecutionClient {
             .map_err(|e| anyhow::anyhow!("failed to authenticate WebSocket session: {e}"))?;
 
         log::info!("WebSocket client authenticated for execution");
+
+        // Subscribe to user order and trade updates for all instruments
+        self.ws_client
+            .subscribe_user_orders()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to subscribe to user orders: {e}"))?;
+        self.ws_client
+            .subscribe_user_trades()
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to subscribe to user trades: {e}"))?;
+
+        log::info!("Subscribed to user order and trade updates");
 
         // Spawn stream handler to dispatch WebSocket messages to the execution engine
         let stream = self.ws_client.stream();
@@ -583,38 +586,163 @@ impl ExecutionClient for DeribitExecutionClient {
 
     async fn generate_order_status_report(
         &self,
-        _cmd: &GenerateOrderStatusReport,
+        cmd: &GenerateOrderStatusReport,
     ) -> anyhow::Result<Option<OrderStatusReport>> {
-        todo!("Implement generate_order_status_report for Deribit execution client");
+        // If venue_order_id is provided, fetch the specific order by ID
+        if let Some(venue_order_id) = &cmd.venue_order_id {
+            let params = GetOrderStateParams {
+                order_id: venue_order_id.to_string(),
+            };
+            let ts_init = get_atomic_clock_realtime().get_time_ns();
+
+            match self.http_client.inner.get_order_state(params).await {
+                Ok(response) => {
+                    if let Some(order) = response.result {
+                        let symbol = ustr::Ustr::from(&order.instrument_name);
+                        if let Some(instrument) = self.http_client.get_instrument(&symbol) {
+                            let report = parse_user_order_msg(
+                                &order,
+                                &instrument,
+                                self.core.account_id,
+                                ts_init,
+                            )?;
+                            return Ok(Some(report));
+                        } else {
+                            log::warn!(
+                                "Instrument {} not in cache for order {}",
+                                order.instrument_name,
+                                order.order_id
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to get order state: {e}");
+                }
+            }
+            return Ok(None);
+        }
+
+        // If client_order_id is provided, search through open orders
+        if let Some(client_order_id) = &cmd.client_order_id {
+            let reports = self
+                .http_client
+                .request_order_status_reports(
+                    self.core.account_id,
+                    cmd.instrument_id,
+                    None,
+                    None,
+                    true, // open_only for efficiency
+                )
+                .await?;
+
+            // Filter by client_order_id
+            for report in reports {
+                if report.client_order_id == Some(*client_order_id) {
+                    return Ok(Some(report));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     async fn generate_order_status_reports(
         &self,
-        _cmd: &GenerateOrderStatusReports,
+        cmd: &GenerateOrderStatusReports,
     ) -> anyhow::Result<Vec<OrderStatusReport>> {
-        todo!("Implement generate_order_status_reports for Deribit execution client");
+        self.http_client
+            .request_order_status_reports(
+                self.core.account_id,
+                cmd.instrument_id,
+                cmd.start,
+                cmd.end,
+                cmd.open_only,
+            )
+            .await
     }
 
     async fn generate_fill_reports(
         &self,
-        _cmd: GenerateFillReports,
+        cmd: GenerateFillReports,
     ) -> anyhow::Result<Vec<FillReport>> {
-        todo!("Implement generate_fill_reports for Deribit execution client");
+        let mut reports = self
+            .http_client
+            .request_fill_reports(self.core.account_id, cmd.instrument_id, cmd.start, cmd.end)
+            .await?;
+
+        // Filter by venue_order_id if provided
+        if let Some(venue_order_id) = &cmd.venue_order_id {
+            reports.retain(|r| r.venue_order_id.to_string() == venue_order_id.to_string());
+        }
+
+        Ok(reports)
     }
 
     async fn generate_position_status_reports(
         &self,
-        _cmd: &GeneratePositionStatusReports,
+        cmd: &GeneratePositionStatusReports,
     ) -> anyhow::Result<Vec<PositionStatusReport>> {
-        todo!("Implement generate_position_status_reports for Deribit execution client");
+        self.http_client
+            .request_position_status_reports(self.core.account_id, cmd.instrument_id)
+            .await
     }
 
     async fn generate_mass_status(
         &self,
         lookback_mins: Option<u64>,
     ) -> anyhow::Result<Option<ExecutionMassStatus>> {
-        log::warn!("generate_mass_status not yet implemented (lookback_mins={lookback_mins:?})");
-        Ok(None)
+        log::info!("Generating ExecutionMassStatus (lookback_mins={lookback_mins:?})");
+        let ts_now = get_atomic_clock_realtime().get_time_ns();
+        let start = lookback_mins.map(|mins| {
+            let lookback_ns = mins
+                .saturating_mul(60)
+                .saturating_mul(NANOSECONDS_IN_SECOND);
+            UnixNanos::from(ts_now.as_u64().saturating_sub(lookback_ns))
+        });
+
+        let order_cmd = GenerateOrderStatusReportsBuilder::default()
+            .ts_init(ts_now)
+            .open_only(false) // get all orders for mass status
+            .start(start)
+            .build()
+            .context("Failed to build GenerateOrderStatusReports")?;
+
+        let fill_cmd = GenerateFillReportsBuilder::default()
+            .ts_init(ts_now)
+            .start(start)
+            .build()
+            .context("Failed to build GenerateFillReports")?;
+
+        let position_cmd = GeneratePositionStatusReportsBuilder::default()
+            .ts_init(ts_now)
+            .start(start)
+            .build()
+            .context("Failed to build GeneratePositionStatusReports")?;
+
+        let (order_reports, fill_reports, position_reports) = tokio::try_join!(
+            self.generate_order_status_reports(&order_cmd),
+            self.generate_fill_reports(fill_cmd),
+            self.generate_position_status_reports(&position_cmd),
+        )?;
+
+        log::info!("Received {} OrderStatusReports", order_reports.len());
+        log::info!("Received {} FillReports", fill_reports.len());
+        log::info!("Received {} PositionReports", position_reports.len());
+
+        let mut mass_status = ExecutionMassStatus::new(
+            self.core.client_id,
+            self.core.account_id,
+            *DERIBIT_VENUE,
+            ts_now,
+            None,
+        );
+
+        mass_status.add_order_reports(order_reports);
+        mass_status.add_fill_reports(fill_reports);
+        mass_status.add_position_reports(position_reports);
+
+        Ok(Some(mass_status))
     }
 
     fn query_account(&self, _cmd: &QueryAccount) -> anyhow::Result<()> {
@@ -626,9 +754,7 @@ impl ExecutionClient for DeribitExecutionClient {
             let account_state = http_client
                 .request_account_state(account_id)
                 .await
-                .context(
-                    "failed to query Deribit account state (check API credentials are valid)",
-                )?;
+                .context("failed to query account state (check API credentials are valid)")?;
 
             if let Some(sender) = exec_sender {
                 sender
@@ -662,7 +788,7 @@ impl ExecutionClient for DeribitExecutionClient {
         // Response will be dispatched through the WebSocket stream handler as OrderStatusReport
         self.spawn_task("query_order", async move {
             ws_client
-                .get_order_state(
+                .query_order(
                     &order_id,
                     client_order_id,
                     trader_id,
@@ -740,10 +866,10 @@ impl ExecutionClient for DeribitExecutionClient {
             "Modifying order: order_id={order_id}, quantity={quantity}, price={price}, client_order_id={client_order_id}"
         );
 
-        // Spawn async task to send edit via WebSocket
+        // Spawn async task to send modify via WebSocket
         self.spawn_task("modify_order", async move {
             if let Err(e) = ws_client
-                .edit(
+                .modify_order(
                     &order_id,
                     quantity,
                     price,
@@ -813,7 +939,7 @@ impl ExecutionClient for DeribitExecutionClient {
         // Spawn async task to send cancel via WebSocket
         self.spawn_task("cancel_order", async move {
             if let Err(e) = ws_client
-                .cancel(
+                .cancel_order(
                     &order_id,
                     client_order_id,
                     trader_id,
@@ -861,8 +987,8 @@ impl ExecutionClient for DeribitExecutionClient {
         // Deribit doesn't support side filtering - log warning if specified
         if cmd.order_side != OrderSide::NoOrderSide {
             log::warn!(
-                "Deribit cancel_all_by_instrument doesn't support order_side filtering. \
-                 Cancelling all orders for instrument regardless of side."
+                "Deribit cancel_all_by_instrument doesn't support order_side filtering; \
+                 cancelling all orders for instrument regardless of side"
             );
         }
 
@@ -877,10 +1003,7 @@ impl ExecutionClient for DeribitExecutionClient {
         );
 
         self.spawn_task("cancel_all_orders", async move {
-            if let Err(e) = ws_client
-                .cancel_all_by_instrument(&instrument_name, instrument_id, None)
-                .await
-            {
+            if let Err(e) = ws_client.cancel_all_orders(instrument_id, None).await {
                 log::error!("Cancel all orders failed for instrument {instrument_id}: {e}");
                 anyhow::bail!("Cancel all orders failed: {e}");
             }
@@ -949,7 +1072,7 @@ impl ExecutionClient for DeribitExecutionClient {
 
             self.spawn_task("batch_cancel_order", async move {
                 if let Err(e) = ws_client
-                    .cancel(
+                    .cancel_order(
                         &order_id,
                         client_order_id,
                         trader_id,

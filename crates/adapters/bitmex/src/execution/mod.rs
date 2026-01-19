@@ -18,7 +18,7 @@
 pub mod canceller;
 pub mod submitter;
 
-use std::{any::Any, future::Future, sync::Mutex};
+use std::{future::Future, sync::Mutex};
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -35,6 +35,7 @@ use nautilus_common::{
         },
     },
     msgbus,
+    msgbus::MessagingSwitchboard,
 };
 use nautilus_core::{UUID4, UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_live::ExecutionClientCore;
@@ -757,7 +758,8 @@ fn dispatch_ws_message(message: NautilusWsMessage) {
 }
 
 fn dispatch_account_state(state: AccountState) {
-    msgbus::send_any("Portfolio.update_account".into(), &state as &dyn Any);
+    let endpoint = MessagingSwitchboard::portfolio_update_account();
+    msgbus::send_account_state(endpoint, &state);
 }
 
 fn dispatch_order_status_report(report: OrderStatusReport) {

@@ -42,6 +42,8 @@ use super::consts::{
     Serialize,
     Deserialize,
 )]
+#[strum(ascii_case_insensitive)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.architect")
@@ -387,6 +389,19 @@ impl From<AxOrderType> for OrderType {
     }
 }
 
+impl TryFrom<OrderType> for AxOrderType {
+    type Error = &'static str;
+
+    fn try_from(order_type: OrderType) -> Result<Self, Self::Error> {
+        match order_type {
+            OrderType::Limit => Ok(Self::Limit),
+            OrderType::StopLimit => Ok(Self::StopLossLimit),
+            OrderType::LimitIfTouched => Ok(Self::TakeProfitLimit),
+            _ => Err("Unsupported order type for AX"),
+        }
+    }
+}
+
 /// Market data subscription level.
 ///
 /// # References
@@ -405,6 +420,7 @@ impl From<AxOrderType> for OrderType {
     Serialize,
     Deserialize,
 )]
+#[strum(ascii_case_insensitive)]
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.architect")

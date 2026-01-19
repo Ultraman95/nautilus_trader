@@ -174,8 +174,9 @@ pub trait Strategy: DataActor {
         let strategy_id = StrategyId::from(core.actor_id().inner().as_str());
         let ts_init = core.clock().timestamp_ns();
         {
-            let cache_rc = core.cache();
-            if cache_rc.order_list_exists(&order_list.id) {
+            let cache_rc = core.cache_rc();
+            let cache = cache_rc.borrow();
+            if cache.order_list_exists(&order_list.id) {
                 anyhow::bail!("OrderList denied: duplicate {}", order_list.id);
             }
 
@@ -186,12 +187,21 @@ pub trait Strategy: DataActor {
                         order.client_order_id()
                     );
                 }
-                if cache_rc.order_exists(&order.client_order_id()) {
+                if cache.order_exists(&order.client_order_id()) {
                     anyhow::bail!(
                         "Order in list denied: duplicate {}",
                         order.client_order_id()
                     );
                 }
+            }
+        }
+
+        {
+            let cache_rc = core.cache_rc();
+            let mut cache = cache_rc.borrow_mut();
+            cache.add_order_list(order_list.clone())?;
+            for order in &order_list.orders {
+                cache.add_order(order.clone(), position_id, client_id, true)?;
             }
         }
 
@@ -255,8 +265,9 @@ pub trait Strategy: DataActor {
         let strategy_id = StrategyId::from(core.actor_id().inner().as_str());
         let ts_init = core.clock().timestamp_ns();
         {
-            let cache_rc = core.cache();
-            if cache_rc.order_list_exists(&order_list.id) {
+            let cache_rc = core.cache_rc();
+            let cache = cache_rc.borrow();
+            if cache.order_list_exists(&order_list.id) {
                 anyhow::bail!("OrderList denied: duplicate {}", order_list.id);
             }
 
@@ -267,12 +278,21 @@ pub trait Strategy: DataActor {
                         order.client_order_id()
                     );
                 }
-                if cache_rc.order_exists(&order.client_order_id()) {
+                if cache.order_exists(&order.client_order_id()) {
                     anyhow::bail!(
                         "Order in list denied: duplicate {}",
                         order.client_order_id()
                     );
                 }
+            }
+        }
+
+        {
+            let cache_rc = core.cache_rc();
+            let mut cache = cache_rc.borrow_mut();
+            cache.add_order_list(order_list.clone())?;
+            for order in &order_list.orders {
+                cache.add_order(order.clone(), position_id, client_id, true)?;
             }
         }
 
@@ -586,11 +606,21 @@ pub trait Strategy: DataActor {
         let ts_init = core.clock().timestamp_ns();
         let cache = core.cache();
 
-        let open_orders =
-            cache.orders_open(None, Some(&instrument_id), Some(&strategy_id), order_side);
+        let open_orders = cache.orders_open(
+            None,
+            Some(&instrument_id),
+            Some(&strategy_id),
+            None,
+            order_side,
+        );
 
-        let emulated_orders =
-            cache.orders_emulated(None, Some(&instrument_id), Some(&strategy_id), order_side);
+        let emulated_orders = cache.orders_emulated(
+            None,
+            Some(&instrument_id),
+            Some(&strategy_id),
+            None,
+            order_side,
+        );
 
         let exec_algorithm_ids = cache.exec_algorithm_ids();
         let mut algo_orders = Vec::new();
@@ -601,6 +631,7 @@ pub trait Strategy: DataActor {
                 None,
                 Some(&instrument_id),
                 Some(&strategy_id),
+                None,
                 order_side,
             );
             algo_orders.extend(orders.iter().map(|o| (*o).clone()));
@@ -737,6 +768,7 @@ pub trait Strategy: DataActor {
             None,
             Some(&instrument_id),
             Some(&strategy_id),
+            None,
             position_side,
         );
 
@@ -1169,7 +1201,7 @@ pub trait Strategy: DataActor {
         let current_time_ns = core.clock().timestamp_ns();
         let cache = core.cache();
 
-        let open_orders = cache.orders_open(None, None, Some(&strategy_id), None);
+        let open_orders = cache.orders_open(None, None, Some(&strategy_id), None, None);
 
         let gtd_orders: Vec<_> = open_orders
             .iter()
