@@ -189,12 +189,41 @@ impl NautilusKernel {
         instance_id: UUID4,
         config: LoggerConfig,
     ) -> anyhow::Result<LogGuard> {
-        let log_guard = init_logging(
+        #[cfg(feature = "tracing-bridge")]
+        let use_tracing = config.use_tracing;
+
+        let log_guard = match init_logging(
             trader_id,
             instance_id,
             config,
             FileWriterConfig::default(), // TODO: Properly incorporate file writer config
-        )?;
+        ) {
+            Ok(guard) => guard,
+            Err(e) => {
+                // Only recover from SetLoggerError (logger already registered).
+                // This is common in tests where multiple kernels are created and
+                // the log crate's global logger persists after LogGuard teardown.
+                // Any other error (e.g. thread spawn failure) is propagated.
+                if e.downcast_ref::<log::SetLoggerError>().is_some() {
+                    if let Some(guard) = LogGuard::new() {
+                        guard
+                    } else {
+                        return Err(e.context(
+                            "A non-Nautilus logger is already registered; \
+                             cannot initialize Nautilus logging",
+                        ));
+                    }
+                } else {
+                    return Err(e);
+                }
+            }
+        };
+
+        // Initialize tracing subscriber if enabled (idempotent)
+        #[cfg(feature = "tracing-bridge")]
+        if use_tracing && !nautilus_common::logging::bridge::tracing_is_initialized() {
+            nautilus_common::logging::bridge::init_tracing()?;
+        }
 
         Ok(log_guard)
     }
@@ -347,8 +376,8 @@ impl NautilusKernel {
         &self.trader
     }
 
-    /// Starts the Nautilus system kernel.
-    pub async fn start_async(&mut self) {
+    /// Starts the Nautilus system kernel synchronously (for backtest use).
+    pub fn start(&mut self) {
         log::info!("Starting");
         self.start_engines();
 
@@ -366,6 +395,11 @@ impl NautilusKernel {
 
         self.ts_started = Some(self.clock.borrow().timestamp_ns());
         log::info!("Started");
+    }
+
+    /// Starts the Nautilus system kernel asynchronously.
+    pub async fn start_async(&mut self) {
+        self.start();
     }
 
     /// Starts the trader (strategies and actors).

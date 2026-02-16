@@ -269,7 +269,7 @@ cdef class AccountsManager:
             cumulative_locked = total_locked.get(currency)
 
             if cumulative_locked is not None:
-                cumulative_locked.add_assign(balance_locked)
+                total_locked[currency] = cumulative_locked + balance_locked
             else:
                 total_locked[currency] = balance_locked
 
@@ -557,7 +557,7 @@ cdef class AccountsManager:
                 if (
                     pnl.is_positive()
                     or fill.order_type == OrderType.MARKET
-                    or instrument.instrument_class in [InstrumentClass.SPORTS_BETTING]
+                    or (instrument is not None and instrument.instrument_class in [InstrumentClass.SPORTS_BETTING])
                 ):
                     new_free = new_free.add(pnl)
                 else:

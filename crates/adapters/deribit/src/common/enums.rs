@@ -21,7 +21,7 @@ use nautilus_model::enums::TimeInForce;
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display as StrumDisplay, EnumIter, EnumString};
 
-/// Deribit instrument kind/type.
+/// Deribit product type.
 #[derive(
     Clone,
     Copy,
@@ -42,7 +42,7 @@ use strum::{AsRefStr, Display as StrumDisplay, EnumIter, EnumString};
     feature = "python",
     pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.deribit")
 )]
-pub enum DeribitInstrumentKind {
+pub enum DeribitProductType {
     /// Future contract
     Future,
     /// Option contract
@@ -166,9 +166,9 @@ pub enum DeribitTimeInForce {
     /// Good till cancelled.
     #[serde(rename = "good_til_cancelled")]
     GoodTilCancelled,
-    /// Good till date.
-    #[serde(rename = "good_til_date")]
-    GoodTilDate,
+    /// Good till day (expires at end of trading day).
+    #[serde(rename = "good_til_day")]
+    GoodTilDay,
     /// Immediate or cancel.
     #[serde(rename = "immediate_or_cancel")]
     ImmediateOrCancel,
@@ -183,7 +183,7 @@ impl DeribitTimeInForce {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::GoodTilCancelled => "good_til_cancelled",
-            Self::GoodTilDate => "good_til_date",
+            Self::GoodTilDay => "good_til_day",
             Self::ImmediateOrCancel => "immediate_or_cancel",
             Self::FillOrKill => "fill_or_kill",
         }
@@ -198,7 +198,7 @@ impl TryFrom<TimeInForce> for DeribitTimeInForce {
             TimeInForce::Gtc => Ok(Self::GoodTilCancelled),
             TimeInForce::Ioc => Ok(Self::ImmediateOrCancel),
             TimeInForce::Fok => Ok(Self::FillOrKill),
-            TimeInForce::Gtd => Ok(Self::GoodTilDate),
+            TimeInForce::Gtd => Ok(Self::GoodTilDay),
             _ => Err(format!(
                 "TimeInForce::{tif} is not supported on Deribit (valid: GTC, IOC, FOK, GTD)"
             )),

@@ -27,13 +27,12 @@ use nautilus_model::{
 use rust_decimal::Decimal;
 
 use crate::{
+    common::parse::ax_timestamp_s_to_unix_nanos,
     http::parse::candle_width_to_bar_spec,
     websocket::messages::{
         AxBookLevel, AxBookLevelL3, AxMdBookL1, AxMdBookL2, AxMdBookL3, AxMdCandle, AxMdTrade,
     },
 };
-
-const NANOSECONDS_IN_SECOND: u64 = 1_000_000_000;
 
 /// Converts a Decimal to Price with specified precision.
 fn decimal_to_price_dp(value: Decimal, precision: u8, field: &str) -> anyhow::Result<Price> {
@@ -75,7 +74,7 @@ pub fn parse_book_l1_quote(
         (Price::zero(price_precision), Quantity::zero(size_precision))
     };
 
-    let ts_event = UnixNanos::from((book.ts as u64) * NANOSECONDS_IN_SECOND);
+    let ts_event = ax_timestamp_s_to_unix_nanos(book.ts);
 
     QuoteTick::new_checked(
         instrument.id(),
@@ -111,14 +110,14 @@ fn parse_book_level(
 pub fn parse_book_l2_deltas(
     book: &AxMdBookL2,
     instrument: &InstrumentAny,
+    sequence: u64,
     ts_init: UnixNanos,
 ) -> anyhow::Result<OrderBookDeltas> {
     let instrument_id = instrument.id();
     let price_precision = instrument.price_precision();
     let size_precision = instrument.size_precision();
 
-    let ts_event = UnixNanos::from((book.ts as u64) * NANOSECONDS_IN_SECOND);
-    let sequence = book.tn as u64;
+    let ts_event = ax_timestamp_s_to_unix_nanos(book.ts);
 
     let total_levels = book.b.len() + book.a.len();
     let capacity = total_levels + 1;
@@ -214,14 +213,14 @@ fn parse_book_level_l3(
 pub fn parse_book_l3_deltas(
     book: &AxMdBookL3,
     instrument: &InstrumentAny,
+    sequence: u64,
     ts_init: UnixNanos,
 ) -> anyhow::Result<OrderBookDeltas> {
     let instrument_id = instrument.id();
     let price_precision = instrument.price_precision();
     let size_precision = instrument.size_precision();
 
-    let ts_event = UnixNanos::from((book.ts as u64) * NANOSECONDS_IN_SECOND);
-    let sequence = book.tn as u64;
+    let ts_event = ax_timestamp_s_to_unix_nanos(book.ts);
 
     let total_orders: usize = book.b.iter().map(|l| l.o.len()).sum::<usize>()
         + book.a.iter().map(|l| l.o.len()).sum::<usize>();
@@ -326,11 +325,12 @@ pub fn parse_trade_tick(
     let size = Quantity::new(trade.q as f64, size_precision);
     let aggressor_side: AggressorSide = trade.d.map_or(AggressorSide::NoAggressor, |d| d.into());
 
-    // Use transaction number as trade ID
-    let trade_id = TradeId::new_checked(trade.tn.to_string())
+    // Use transaction number as trade ID (stack-formatted to avoid heap alloc)
+    let mut buf = itoa::Buffer::new();
+    let trade_id = TradeId::new_checked(buf.format(trade.tn))
         .context("Failed to create TradeId from transaction number")?;
 
-    let ts_event = UnixNanos::from((trade.ts as u64) * NANOSECONDS_IN_SECOND);
+    let ts_event = ax_timestamp_s_to_unix_nanos(trade.ts);
 
     TradeTick::new_checked(
         instrument.id(),
@@ -363,7 +363,7 @@ pub fn parse_candle_bar(
     let close = decimal_to_price_dp(candle.close, price_precision, "candle.close")?;
     let volume = Quantity::new(candle.volume as f64, size_precision);
 
-    let ts_event = UnixNanos::from((candle.ts as u64) * NANOSECONDS_IN_SECOND);
+    let ts_event = ax_timestamp_s_to_unix_nanos(candle.ts);
 
     let bar_spec = candle_width_to_bar_spec(candle.width);
     let bar_type = BarType::new(instrument.id(), bar_spec, AggregationSource::External);
@@ -442,7 +442,6 @@ mod tests {
     #[rstest]
     fn test_parse_book_l1_quote() {
         let book = AxMdBookL1 {
-            t: "1".to_string(),
             ts: 1700000000,
             tn: 12345,
             s: Ustr::from("BTC-PERP"),
@@ -470,7 +469,6 @@ mod tests {
     #[rstest]
     fn test_parse_book_l2_deltas() {
         let book = AxMdBookL2 {
-            t: "2".to_string(),
             ts: 1700000000,
             tn: 12345,
             s: Ustr::from("BTC-PERP"),
@@ -499,7 +497,7 @@ mod tests {
         let instrument = create_test_instrument();
         let ts_init = UnixNanos::default();
 
-        let deltas = parse_book_l2_deltas(&book, &instrument, ts_init).unwrap();
+        let deltas = parse_book_l2_deltas(&book, &instrument, 1, ts_init).unwrap();
 
         // 1 clear + 4 levels
         assert_eq!(deltas.deltas.len(), 5);
@@ -511,7 +509,6 @@ mod tests {
     #[rstest]
     fn test_parse_book_l3_deltas() {
         let book = AxMdBookL3 {
-            t: "3".to_string(),
             ts: 1700000000,
             tn: 12345,
             s: Ustr::from("BTC-PERP"),
@@ -530,7 +527,7 @@ mod tests {
         let instrument = create_test_instrument();
         let ts_init = UnixNanos::default();
 
-        let deltas = parse_book_l3_deltas(&book, &instrument, ts_init).unwrap();
+        let deltas = parse_book_l3_deltas(&book, &instrument, 1, ts_init).unwrap();
 
         // 1 clear + 4 individual orders
         assert_eq!(deltas.deltas.len(), 5);
@@ -540,7 +537,6 @@ mod tests {
     #[rstest]
     fn test_parse_trade_tick() {
         let trade = AxMdTrade {
-            t: "s".to_string(),
             ts: 1700000000,
             tn: 12345,
             s: Ustr::from("BTC-PERP"),
@@ -592,7 +588,7 @@ mod tests {
         let instrument = create_eurusd_instrument();
         let ts_init = UnixNanos::default();
 
-        let deltas = parse_book_l2_deltas(&book, &instrument, ts_init).unwrap();
+        let deltas = parse_book_l2_deltas(&book, &instrument, 1, ts_init).unwrap();
 
         // 1 clear + 13 bids + 12 asks = 26 deltas
         assert_eq!(deltas.deltas.len(), 26);
@@ -630,7 +626,7 @@ mod tests {
         let instrument = create_eurusd_instrument();
         let ts_init = UnixNanos::default();
 
-        let deltas = parse_book_l3_deltas(&book, &instrument, ts_init).unwrap();
+        let deltas = parse_book_l3_deltas(&book, &instrument, 1, ts_init).unwrap();
 
         // 1 clear + individual orders from each level
         // Each level has one order in the captured data
@@ -676,7 +672,6 @@ mod tests {
     #[rstest]
     fn test_parse_book_l1_empty_sides() {
         let book = AxMdBookL1 {
-            t: "1".to_string(),
             ts: 1700000000,
             tn: 12345,
             s: Ustr::from("TEST-PERP"),
@@ -698,7 +693,6 @@ mod tests {
     #[rstest]
     fn test_parse_book_l2_empty_book() {
         let book = AxMdBookL2 {
-            t: "2".to_string(),
             ts: 1700000000,
             tn: 12345,
             s: Ustr::from("TEST-PERP"),
@@ -709,7 +703,7 @@ mod tests {
         let instrument = create_test_instrument();
         let ts_init = UnixNanos::default();
 
-        let deltas = parse_book_l2_deltas(&book, &instrument, ts_init).unwrap();
+        let deltas = parse_book_l2_deltas(&book, &instrument, 1, ts_init).unwrap();
 
         // Just clear delta with F_LAST
         assert_eq!(deltas.deltas.len(), 1);
@@ -722,7 +716,6 @@ mod tests {
         use crate::common::enums::AxCandleWidth;
 
         let candle = AxMdCandle {
-            t: "c".to_string(),
             symbol: Ustr::from("BTC-PERP"),
             ts: 1700000000,
             open: dec!(50000.00),

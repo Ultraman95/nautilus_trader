@@ -605,7 +605,7 @@ impl Portfolio {
         for (currency, unrealized) in unrealized_pnls {
             match total_pnls.get_mut(&currency) {
                 Some(total) => {
-                    *total = Money::new(total.as_f64() + unrealized.as_f64(), currency);
+                    *total = *total + unrealized;
                 }
                 None => {
                     total_pnls.insert(currency, unrealized);
@@ -1848,9 +1848,9 @@ fn update_order(
     );
 
     let mut cache_ref = cache.borrow_mut();
-    cache_ref.update_account(account.clone()).unwrap();
 
-    if let Some((_, account_state)) = account_state {
+    if let Some((updated_account, account_state)) = account_state {
+        cache_ref.update_account(updated_account).unwrap();
         msgbus::publish_account_state(
             format!("events.account.{}", account.id()).into(),
             &account_state,

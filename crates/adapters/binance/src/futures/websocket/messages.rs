@@ -19,21 +19,29 @@
 //!
 //! Message types are separated into data (public market data) and execution
 //! (private user data stream) concerns:
-//! - [`NautilusFuturesDataWsMessage`] - Market data for data clients
-//! - [`NautilusFuturesExecWsMessage`] - User data for execution clients
-//! - [`BinanceFuturesWsMessage`] - Wrapper enum containing both
+//! - [`NautilusDataWsMessage`] - Market data for data clients.
+//! - [`NautilusExecWsMessage`] - User data for execution clients.
+//! - [`NautilusWsMessage`] - Wrapper enum containing both.
 
 use nautilus_model::{
     data::{Data, OrderBookDeltas},
+    events::{
+        AccountState, OrderAccepted, OrderCanceled, OrderFilled, OrderRejected, OrderUpdated,
+    },
+    identifiers::{ClientOrderId, InstrumentId, StrategyId, TraderId, VenueOrderId},
     instruments::InstrumentAny,
 };
 use nautilus_network::websocket::WebSocketClient;
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
-use crate::common::enums::{
-    BinanceFuturesOrderType, BinanceKlineInterval, BinanceMarginType, BinanceOrderStatus,
-    BinancePositionSide, BinanceSide, BinanceTimeInForce, BinanceWorkingType, BinanceWsMethod,
+use crate::{
+    common::enums::{
+        BinanceAlgoStatus, BinanceAlgoType, BinanceFuturesOrderType, BinanceKlineInterval,
+        BinanceMarginType, BinanceOrderStatus, BinancePositionSide, BinanceSide,
+        BinanceTimeInForce, BinanceWorkingType, BinanceWsMethod,
+    },
+    futures::http::BinanceFuturesInstrument,
 };
 
 /// Output message from the Futures WebSocket handler.
@@ -41,11 +49,13 @@ use crate::common::enums::{
 /// Wraps data and execution message types, allowing the single handler to
 /// produce messages for both data and execution clients.
 #[derive(Debug, Clone)]
-pub enum BinanceFuturesWsMessage {
-    /// Public market data message.
-    Data(NautilusFuturesDataWsMessage),
-    /// Private user data stream message.
-    Exec(NautilusFuturesExecWsMessage),
+pub enum NautilusWsMessage {
+    /// Public market data message (normalized Nautilus types).
+    Data(NautilusDataWsMessage),
+    /// Private user data stream message (normalized Nautilus events).
+    Exec(Box<NautilusExecWsMessage>),
+    /// Raw user data stream message (for internal processing by exec handler).
+    ExecRaw(BinanceFuturesExecWsMessage),
     /// Error from the server.
     Error(BinanceFuturesWsErrorMsg),
     /// WebSocket reconnected - subscriptions should be restored.
@@ -56,27 +66,59 @@ pub enum BinanceFuturesWsMessage {
 ///
 /// These are public messages that don't require authentication.
 #[derive(Debug, Clone)]
-pub enum NautilusFuturesDataWsMessage {
+pub enum NautilusDataWsMessage {
     /// Market data (trades, quotes, etc.).
     Data(Vec<Data>),
-    /// Order book deltas.
-    Deltas(OrderBookDeltas),
+    /// Order book deltas with Binance-specific sequence metadata for validation.
+    DepthUpdate {
+        deltas: OrderBookDeltas,
+        first_update_id: u64,
+        prev_final_update_id: u64,
+    },
     /// Instrument update.
     Instrument(Box<InstrumentAny>),
     /// Raw JSON message (for debugging or unhandled types).
     RawJson(serde_json::Value),
 }
 
-/// User data stream message from Binance Futures WebSocket.
+/// Normalized execution event from Binance Futures.
 ///
-/// These are private messages from the user data stream that require
-/// a listen key for authentication.
+/// These are normalized Nautilus events produced by the execution handler
+/// from raw WebSocket messages. The handler correlates updates with
+/// the original order context (strategy_id, etc.) using pending order maps.
 #[derive(Debug, Clone)]
-pub enum NautilusFuturesExecWsMessage {
+pub enum NautilusExecWsMessage {
+    /// Account state update (balance changes).
+    AccountUpdate(AccountState),
+    /// Order accepted by the exchange.
+    OrderAccepted(OrderAccepted),
+    /// Order canceled.
+    OrderCanceled(OrderCanceled),
+    /// Order rejected.
+    OrderRejected(OrderRejected),
+    /// Order filled (partial or full).
+    OrderFilled(OrderFilled),
+    /// Order modified/amended.
+    OrderUpdated(OrderUpdated),
+    /// Listen key expired - need to reconnect user data stream.
+    ListenKeyExpired,
+    /// WebSocket reconnected - subscriptions should be restored.
+    Reconnected,
+}
+
+/// Raw user data stream message from Binance Futures WebSocket.
+///
+/// These are raw messages from the user data stream that require
+/// a listen key for authentication. The execution handler processes these
+/// and emits normalized Nautilus events via [`NautilusExecWsMessage`].
+#[derive(Debug, Clone)]
+pub enum BinanceFuturesExecWsMessage {
     /// Account update (balance/position changes).
     AccountUpdate(BinanceFuturesAccountUpdateMsg),
     /// Order/trade update.
     OrderUpdate(Box<BinanceFuturesOrderUpdateMsg>),
+    /// Algo order update (conditional orders via Algo Service).
+    AlgoUpdate(Box<BinanceFuturesAlgoUpdateMsg>),
     /// Margin call warning.
     MarginCall(BinanceFuturesMarginCallMsg),
     /// Account configuration change (leverage, etc.).
@@ -94,13 +136,13 @@ pub struct BinanceFuturesWsErrorMsg {
     pub msg: String,
 }
 
-/// Handler command for client-handler communication.
+/// Handler command for data client-handler communication.
 #[derive(Debug)]
 #[allow(
     clippy::large_enum_variant,
     reason = "Commands are ephemeral and immediately consumed"
 )]
-pub enum BinanceFuturesHandlerCommand {
+pub enum DataHandlerCommand {
     /// Set the WebSocket client reference.
     SetClient(WebSocketClient),
     /// Disconnect from the WebSocket.
@@ -113,6 +155,48 @@ pub enum BinanceFuturesHandlerCommand {
     Subscribe { streams: Vec<String> },
     /// Unsubscribe from streams.
     Unsubscribe { streams: Vec<String> },
+}
+
+/// Handler command for execution client-handler communication.
+#[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Commands are ephemeral and immediately consumed"
+)]
+pub enum ExecHandlerCommand {
+    /// Set the WebSocket client reference.
+    SetClient(WebSocketClient),
+    /// Disconnect from the WebSocket.
+    Disconnect,
+    /// Initialize instruments in the handler cache.
+    InitializeInstruments(Vec<BinanceFuturesInstrument>),
+    /// Update a single instrument in the handler cache.
+    UpdateInstrument(BinanceFuturesInstrument),
+    /// Subscribe to user data stream.
+    Subscribe { streams: Vec<String> },
+    /// Register an order for context tracking.
+    RegisterOrder {
+        client_order_id: ClientOrderId,
+        trader_id: TraderId,
+        strategy_id: StrategyId,
+        instrument_id: InstrumentId,
+    },
+    /// Register a cancel request for context tracking.
+    RegisterCancel {
+        client_order_id: ClientOrderId,
+        trader_id: TraderId,
+        strategy_id: StrategyId,
+        instrument_id: InstrumentId,
+        venue_order_id: Option<VenueOrderId>,
+    },
+    /// Register a modify request for context tracking.
+    RegisterModify {
+        client_order_id: ClientOrderId,
+        trader_id: TraderId,
+        strategy_id: StrategyId,
+        instrument_id: InstrumentId,
+        venue_order_id: Option<VenueOrderId>,
+    },
 }
 
 /// Aggregate trade stream message.
@@ -781,6 +865,111 @@ pub struct AssetIndexConfig {
     /// Symbol.
     #[serde(rename = "s")]
     pub symbol: Ustr,
+}
+
+/// Algo order update event from user data stream (Binance Futures Algo Service).
+///
+/// This event is triggered for conditional orders (STOP_MARKET, STOP_LIMIT,
+/// TAKE_PROFIT, TAKE_PROFIT_MARKET, TRAILING_STOP_MARKET) managed by the
+/// Algo Service.
+///
+/// # References
+///
+/// - <https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams/Event-Algo-Order-Update>
+#[derive(Debug, Clone, Deserialize)]
+pub struct BinanceFuturesAlgoUpdateMsg {
+    /// Event type ("ALGO_UPDATE").
+    #[serde(rename = "e")]
+    pub event_type: String,
+    /// Event time in milliseconds.
+    #[serde(rename = "E")]
+    pub event_time: i64,
+    /// Transaction time in milliseconds.
+    #[serde(rename = "T")]
+    pub transaction_time: i64,
+    /// Algo order data.
+    #[serde(rename = "ao")]
+    pub algo_order: AlgoOrderUpdateData,
+}
+
+/// Algo order update data payload.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AlgoOrderUpdateData {
+    /// Client algo order ID.
+    #[serde(rename = "caid")]
+    pub client_algo_id: String,
+    /// Algo order ID.
+    #[serde(rename = "aid")]
+    pub algo_id: i64,
+    /// Algo type (currently only `Conditional`).
+    #[serde(rename = "at")]
+    pub algo_type: BinanceAlgoType,
+    /// Order type (STOP_MARKET, STOP, TAKE_PROFIT, TAKE_PROFIT_MARKET, TRAILING_STOP_MARKET).
+    #[serde(rename = "o")]
+    pub order_type: BinanceFuturesOrderType,
+    /// Symbol.
+    #[serde(rename = "s")]
+    pub symbol: Ustr,
+    /// Order side.
+    #[serde(rename = "S")]
+    pub side: BinanceSide,
+    /// Position side.
+    #[serde(rename = "ps")]
+    pub position_side: BinancePositionSide,
+    /// Time in force.
+    #[serde(rename = "f")]
+    pub time_in_force: BinanceTimeInForce,
+    /// Order quantity.
+    #[serde(rename = "q")]
+    pub quantity: String,
+    /// Algo order status (NEW, TRIGGERING, TRIGGERED, FINISHED, CANCELED, EXPIRED, REJECTED).
+    #[serde(rename = "X")]
+    pub algo_status: BinanceAlgoStatus,
+    /// Trigger price.
+    #[serde(rename = "tp")]
+    pub trigger_price: String,
+    /// Limit price.
+    #[serde(rename = "p")]
+    pub price: String,
+    /// Working type for trigger price calculation.
+    #[serde(rename = "wt")]
+    pub working_type: BinanceWorkingType,
+    /// Price match mode.
+    #[serde(rename = "pm", default)]
+    pub price_match: Option<String>,
+    /// Close position flag.
+    #[serde(rename = "cp", default)]
+    pub close_position: Option<bool>,
+    /// Price protection flag.
+    #[serde(rename = "pP", default)]
+    pub price_protect: Option<bool>,
+    /// Reduce-only flag.
+    #[serde(rename = "R", default)]
+    pub reduce_only: Option<bool>,
+    /// Trigger time in milliseconds.
+    #[serde(rename = "tt", default)]
+    pub trigger_time: Option<i64>,
+    /// Good till date in milliseconds.
+    #[serde(rename = "gtd", default)]
+    pub good_till_date: Option<i64>,
+    /// Order ID in matching engine (populated when triggered).
+    #[serde(rename = "ai", default)]
+    pub actual_order_id: Option<String>,
+    /// Average fill price in matching engine (populated when triggered).
+    #[serde(rename = "ap", default)]
+    pub avg_price: Option<String>,
+    /// Executed quantity in matching engine (populated when triggered).
+    #[serde(rename = "aq", default)]
+    pub executed_qty: Option<String>,
+    /// Actual order type in matching engine (populated when triggered).
+    #[serde(rename = "act", default)]
+    pub actual_order_type: Option<String>,
+    /// Callback rate for trailing stop (0.1 to 10, where 1 = 1%).
+    #[serde(rename = "cr", default)]
+    pub callback_rate: Option<String>,
+    /// Self-trade prevention mode.
+    #[serde(rename = "V", default)]
+    pub stp_mode: Option<String>,
 }
 
 /// Listen key expired event.

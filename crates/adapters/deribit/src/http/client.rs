@@ -23,6 +23,7 @@ use std::{
     },
 };
 
+use ahash::AHashSet;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use nautilus_core::{datetime::nanos_to_millis, nanos::UnixNanos, time::get_atomic_clock_realtime};
@@ -49,7 +50,7 @@ use super::{
     error::DeribitHttpError,
     models::{
         DeribitAccountSummariesResponse, DeribitCurrency, DeribitInstrument, DeribitJsonRpcRequest,
-        DeribitJsonRpcResponse, DeribitPosition, DeribitUserTradesResponse,
+        DeribitJsonRpcResponse, DeribitPosition, DeribitProductType, DeribitUserTradesResponse,
     },
     query::{
         GetAccountSummariesParams, GetInstrumentParams, GetInstrumentsParams,
@@ -84,6 +85,11 @@ use crate::{
         parse::{parse_position_status_report, parse_user_order_msg, parse_user_trade_msg},
     },
 };
+
+/// Maximum number of trades per request for Deribit's historical trades API.
+/// Deribit's default is 10 which is insufficient for most use cases.
+/// The API maximum is 1000.
+pub const DERIBIT_HISTORICAL_TRADES_MAX_COUNT: u32 = 1000;
 
 /// Low-level Deribit HTTP client for raw API operations.
 ///
@@ -357,9 +363,11 @@ impl DeribitRawHttpClient {
     {
         // Create operation identifier combining URL and RPC method
         let operation_id = format!("{}#{}", self.base_url, method);
+        let params_clone = serde_json::to_value(&params)?;
+
         let operation = || {
             let method = method.to_string();
-            let params_clone = serde_json::to_value(&params).unwrap();
+            let params_clone = params_clone.clone();
 
             async move {
                 // Build JSON-RPC request
@@ -848,11 +856,11 @@ impl DeribitHttpClient {
     pub async fn request_instruments(
         &self,
         currency: DeribitCurrency,
-        kind: Option<super::models::DeribitInstrumentKind>,
+        product_type: Option<DeribitProductType>,
     ) -> anyhow::Result<Vec<InstrumentAny>> {
         // Build parameters
-        let params = if let Some(k) = kind {
-            GetInstrumentsParams::with_kind(currency, k)
+        let params = if let Some(pt) = product_type {
+            GetInstrumentsParams::with_kind(currency, pt)
         } else {
             GetInstrumentsParams::new(currency)
         };
@@ -957,6 +965,12 @@ impl DeribitHttpClient {
     /// Returns an error if:
     /// - The request fails
     /// - Trade parsing fails
+    ///
+    /// # Pagination
+    ///
+    /// When `limit` is `None`, this function automatically paginates through all available
+    /// trades in the time range using the `has_more` field from the API response.
+    /// When `limit` is specified, pagination stops once that many trades are collected.
     pub async fn request_trades(
         &self,
         instrument_id: InstrumentId,
@@ -974,58 +988,98 @@ impl DeribitHttpClient {
             };
 
         // Convert timestamps to milliseconds
-        let start_timestamp = start.map_or_else(
-            || Utc::now().timestamp_millis() - 3_600_000, // Default: 1 hour ago
-            |dt| dt.timestamp_millis(),
-        );
+        let now = Utc::now();
+        let end_dt = end.unwrap_or(now);
+        let start_dt = start.unwrap_or(end_dt - chrono::Duration::hours(1));
 
-        let end_timestamp = end.map_or_else(
-            || Utc::now().timestamp_millis(), // Default: now
-            |dt| dt.timestamp_millis(),
-        );
+        if let (Some(s), Some(e)) = (start, end) {
+            anyhow::ensure!(s < e, "Invalid time range: start={s:?} end={e:?}");
+        }
 
-        let params = GetLastTradesByInstrumentAndTimeParams::new(
-            instrument_id.symbol.to_string(),
-            start_timestamp,
-            end_timestamp,
-            limit,
-            Some("asc".to_string()), // Sort ascending for historical data
-        );
-
-        let full_response = self
-            .inner
-            .get_last_trades_by_instrument_and_time(params)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))?;
-
-        let response_data = full_response
-            .result
-            .ok_or_else(|| anyhow::anyhow!("No result in response"))?;
-
+        let mut current_start_timestamp = start_dt.timestamp_millis();
+        let end_timestamp = end_dt.timestamp_millis();
         let ts_init = self.generate_ts_init();
-        let mut trades = Vec::with_capacity(response_data.trades.len());
+        let mut all_trades = Vec::new();
+        let mut has_more = true;
 
-        for raw_trade in &response_data.trades {
-            match parse_trade_tick(
-                raw_trade,
-                instrument_id,
-                price_precision,
-                size_precision,
-                ts_init,
-            ) {
-                Ok(trade) => trades.push(trade),
-                Err(e) => {
-                    log::warn!(
-                        "Failed to parse trade {} for {}: {}",
-                        raw_trade.trade_id,
-                        instrument_id,
-                        e
-                    );
+        // Paginate through all trades in the time range
+        while has_more {
+            let params = GetLastTradesByInstrumentAndTimeParams::new(
+                instrument_id.symbol.to_string(),
+                current_start_timestamp,
+                end_timestamp,
+                Some(DERIBIT_HISTORICAL_TRADES_MAX_COUNT),
+                Some("asc".to_string()), // Sort ascending for pagination
+            );
+
+            let full_response = self
+                .inner
+                .get_last_trades_by_instrument_and_time(params)
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+
+            let response_data = full_response
+                .result
+                .ok_or_else(|| anyhow::anyhow!("No result in response"))?;
+
+            has_more = response_data.has_more;
+
+            if response_data.trades.is_empty() {
+                break;
+            }
+
+            // Track last timestamp for pagination
+            let mut last_timestamp = current_start_timestamp;
+
+            for raw_trade in &response_data.trades {
+                match parse_trade_tick(
+                    raw_trade,
+                    instrument_id,
+                    price_precision,
+                    size_precision,
+                    ts_init,
+                ) {
+                    Ok(trade) => {
+                        last_timestamp = raw_trade.timestamp;
+                        all_trades.push(trade);
+
+                        // If user specified a limit, stop when reached
+                        if let Some(max) = limit
+                            && all_trades.len() >= max as usize
+                        {
+                            return Ok(all_trades);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to parse trade {} for {}: {}",
+                            raw_trade.trade_id,
+                            instrument_id,
+                            e
+                        );
+                    }
                 }
+            }
+
+            // Move start timestamp forward for next page
+            // Add 1ms to avoid re-fetching the last trade
+            current_start_timestamp = last_timestamp + 1;
+
+            // Safety check: if we're past the end timestamp, stop
+            if current_start_timestamp >= end_timestamp {
+                break;
             }
         }
 
-        Ok(trades)
+        log::info!(
+            "Fetched {} historical trades for {} from {} to {}",
+            all_trades.len(),
+            instrument_id,
+            start_dt,
+            end_dt
+        );
+
+        Ok(all_trades)
     }
 
     /// Requests historical bars (OHLCV) for an instrument.
@@ -1273,8 +1327,8 @@ impl DeribitHttpClient {
     ) -> anyhow::Result<Vec<OrderStatusReport>> {
         let ts_init = self.generate_ts_init();
         let mut reports = Vec::new();
+        let mut seen_order_ids = AHashSet::new();
 
-        // Helper closure to parse order and add to reports
         let mut parse_and_add = |order: &DeribitOrderMsg| {
             let symbol = Ustr::from(&order.instrument_name);
             if let Some(instrument) = self.get_instrument(&symbol) {
@@ -1288,7 +1342,8 @@ impl DeribitHttpClient {
                             (None, Some(e)) => ts_last <= e,
                             (None, None) => true,
                         };
-                        if in_range {
+                        // Only deduplicate if in range (prevents dropping valid historical reports)
+                        if in_range && seen_order_ids.insert(order.order_id.clone()) {
                             reports.push(report);
                         }
                     }
@@ -1487,7 +1542,7 @@ impl DeribitHttpClient {
     /// Fetches positions from Deribit and converts them to Nautilus [`PositionStatusReport`].
     ///
     /// # Strategy
-    /// - Must iterate over currencies (Deribit requires currency param for positions)
+    /// - Uses `currency=any` to fetch all positions in one call
     /// - Filters by instrument_id if provided
     ///
     /// # Errors
@@ -1513,7 +1568,7 @@ impl DeribitHttpClient {
                     continue;
                 }
 
-                let symbol = Ustr::from(position.instrument_name.as_str());
+                let symbol = position.instrument_name;
                 if let Some(instrument) = self.get_instrument(&symbol) {
                     let report =
                         parse_position_status_report(position, &instrument, account_id, ts_init);

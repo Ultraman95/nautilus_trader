@@ -114,10 +114,10 @@ class DeribitExecutionClient(LiveExecutionClient):
 
         # Configuration
         self._config = config
-        instrument_kinds = (
-            [i.name.upper() for i in config.instrument_kinds] if config.instrument_kinds else None
+        product_types = (
+            [i.name.upper() for i in config.product_types] if config.product_types else None
         )
-        self._log.info(f"config.instrument_kinds={instrument_kinds}", LogColor.BLUE)
+        self._log.info(f"config.product_types={product_types}", LogColor.BLUE)
         self._log.info(f"{config.is_testnet=}", LogColor.BLUE)
         self._log.info(f"{config.http_timeout_secs=}", LogColor.BLUE)
         self._log.info(f"{config.max_retries=}", LogColor.BLUE)
@@ -164,7 +164,8 @@ class DeribitExecutionClient(LiveExecutionClient):
 
         await self._ws_client.subscribe_user_orders()
         await self._ws_client.subscribe_user_trades()
-        self._log.info("Subscribed to user order and trade updates", LogColor.BLUE)
+        await self._ws_client.subscribe_user_portfolio()
+        self._log.info("Subscribed to user order, trade, and portfolio updates", LogColor.BLUE)
 
         # Fetch initial account state
         try:
@@ -217,8 +218,8 @@ class DeribitExecutionClient(LiveExecutionClient):
                 report = OrderStatusReport.from_pyo3(pyo3_report)
                 self._log.debug(f"Received {report}", LogColor.MAGENTA)
                 reports.append(report)
-        except Exception as e:
-            self._log.exception("Failed to generate OrderStatusReports", e)
+        except (asyncio.CancelledError, Exception) as e:
+            self._log_report_error(e, "OrderStatusReports")
 
         self._log_report_receipt(
             len(reports),
@@ -255,8 +256,8 @@ class DeribitExecutionClient(LiveExecutionClient):
                 report = FillReport.from_pyo3(pyo3_report)
                 self._log.debug(f"Received {report}", LogColor.MAGENTA)
                 reports.append(report)
-        except Exception as e:
-            self._log.exception("Failed to generate FillReports", e)
+        except (asyncio.CancelledError, Exception) as e:
+            self._log_report_error(e, "FillReports")
 
         self._log_report_receipt(len(reports), "FillReport", LogLevel.INFO)
 
@@ -283,8 +284,8 @@ class DeribitExecutionClient(LiveExecutionClient):
                 report = PositionStatusReport.from_pyo3(pyo3_report)
                 self._log.debug(f"Received {report}", LogColor.MAGENTA)
                 reports.append(report)
-        except Exception as e:
-            self._log.exception("Failed to generate PositionStatusReports", e)
+        except (asyncio.CancelledError, Exception) as e:
+            self._log_report_error(e, "PositionStatusReports")
 
         self._log_report_receipt(
             len(reports),
@@ -487,8 +488,8 @@ class DeribitExecutionClient(LiveExecutionClient):
         pyo3_client_order_id = nautilus_pyo3.ClientOrderId(order.client_order_id.value)
 
         # Use command values if provided, otherwise fall back to existing order values
-        price = command.price if command.price else order.price
-        quantity = command.quantity if command.quantity else order.quantity
+        price = command.price or order.price
+        quantity = command.quantity or order.quantity
 
         pyo3_quantity = nautilus_pyo3.Quantity.from_str(str(quantity))
         pyo3_price = nautilus_pyo3.Price.from_str(str(price))
@@ -576,15 +577,64 @@ class DeribitExecutionClient(LiveExecutionClient):
             )
 
     async def _cancel_all_orders(self, command: CancelAllOrders) -> None:
-        # Deribit doesn't support side filtering - log warning if specified
+        # If specific side requested, cancel orders individually (Deribit API doesn't support side filtering)
         if command.order_side != OrderSide.NO_ORDER_SIDE:
-            self._log.warning(
-                "Deribit cancel_all_by_instrument doesn't support order_side filtering. "
-                "Cancelling all orders for instrument regardless of side.",
+            open_orders = self._cache.orders_open(
+                instrument_id=command.instrument_id,
+                side=command.order_side,
             )
 
-        pyo3_instrument_id = nautilus_pyo3.InstrumentId.from_str(command.instrument_id.value)
+            if not open_orders:
+                self._log.debug(
+                    f"No open {command.order_side.name} orders to cancel for {command.instrument_id}",
+                )
+                return
 
+            self._log.info(
+                f"Cancelling {len(open_orders)} {command.order_side.name} orders "
+                f"for {command.instrument_id} (side-filtered)",
+            )
+
+            for order in open_orders:
+                if order.venue_order_id is None:
+                    self._log.warning(
+                        f"Cannot cancel order {order.client_order_id} - no venue_order_id",
+                    )
+                    continue
+
+                try:
+                    pyo3_trader_id = nautilus_pyo3.TraderId.from_str(order.trader_id.value)
+                    pyo3_strategy_id = nautilus_pyo3.StrategyId.from_str(order.strategy_id.value)
+                    pyo3_order_instrument_id = nautilus_pyo3.InstrumentId.from_str(
+                        order.instrument_id.value,
+                    )
+                    pyo3_client_order_id = nautilus_pyo3.ClientOrderId.from_str(
+                        order.client_order_id.value,
+                    )
+
+                    await self._ws_client.cancel_order(
+                        order_id=order.venue_order_id.value,
+                        client_order_id=pyo3_client_order_id,
+                        trader_id=pyo3_trader_id,
+                        strategy_id=pyo3_strategy_id,
+                        instrument_id=pyo3_order_instrument_id,
+                    )
+                except Exception as e:
+                    self._log.error(
+                        f"Failed to cancel order {order.client_order_id}: {e}",
+                    )
+                    self.generate_order_cancel_rejected(
+                        strategy_id=order.strategy_id,
+                        instrument_id=order.instrument_id,
+                        client_order_id=order.client_order_id,
+                        venue_order_id=order.venue_order_id,
+                        reason=str(e),
+                        ts_event=self._clock.timestamp_ns(),
+                    )
+            return
+
+        # No side filtering - use bulk cancel API
+        pyo3_instrument_id = nautilus_pyo3.InstrumentId.from_str(command.instrument_id.value)
         try:
             self._log.info(
                 f"Cancelling all orders for instrument {command.instrument_id}",

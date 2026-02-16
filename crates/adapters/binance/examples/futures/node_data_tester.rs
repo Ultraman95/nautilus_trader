@@ -51,8 +51,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         environment: BinanceEnvironment::Testnet,
         api_key: None,
         api_secret: None,
-        ed25519_api_key: None,
-        ed25519_api_secret: None,
         ..Default::default()
     };
 
@@ -67,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tester_config = DataTesterConfig::new(client_id, instrument_ids)
         .with_subscribe_book_at_interval(true)
+        .with_book_depth(NonZeroUsize::new(20))
         .with_book_interval_ms(NonZeroUsize::new(10).unwrap());
     let tester = DataTester::new(tester_config);
 

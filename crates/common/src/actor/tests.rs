@@ -41,13 +41,17 @@ use nautilus_model::{
     types::{Price, Quantity},
 };
 use rstest::*;
+use rust_decimal_macros::dec;
 use ustr::Ustr;
 #[cfg(feature = "defi")]
 use {
-    alloy_primitives::Address,
-    nautilus_model::defi::{
-        Block, Blockchain, Dex, DexType, Pool, PoolIdentifier, PoolLiquidityUpdate, PoolSwap,
-        Token, chain::chains, dex::AmmType,
+    alloy_primitives::{Address, I256, U160},
+    nautilus_model::{
+        defi::{
+            Block, Blockchain, Dex, DexType, Pool, PoolIdentifier, PoolLiquidityUpdate, PoolSwap,
+            Token, chain::chains, dex::AmmType,
+        },
+        identifiers::InstrumentId,
     },
 };
 
@@ -63,8 +67,8 @@ use crate::{
     component::Component,
     logging::{logger::LogGuard, logging_is_initialized},
     messages::data::{
-        BarsResponse, BookResponse, CustomDataResponse, DataResponse, InstrumentResponse,
-        InstrumentsResponse, QuotesResponse, TradesResponse,
+        BarsResponse, BookResponse, CustomDataResponse, DataResponse, FundingRatesResponse,
+        InstrumentResponse, InstrumentsResponse, QuotesResponse, TradesResponse,
     },
     msgbus::{
         self, MessageBus, get_message_bus,
@@ -175,6 +179,14 @@ impl DataActor for TestDataActor {
     fn on_historical_trades(&mut self, trades: &[TradeTick]) -> anyhow::Result<()> {
         // Push to common received vec
         self.received_trades.extend(trades);
+        Ok(())
+    }
+
+    fn on_historical_funding_rates(
+        &mut self,
+        funding_rates: &[FundingRateUpdate],
+    ) -> anyhow::Result<()> {
+        self.received_funding_rates.extend(funding_rates);
         Ok(())
     }
 
@@ -332,8 +344,7 @@ fn register_data_actor(
     trader_id: TraderId,
 ) -> Ustr {
     // Set up sync data command sender for tests
-    let sender = SyncDataCommandSender;
-    set_data_cmd_sender(Arc::new(sender));
+    set_data_cmd_sender(Arc::new(SyncDataCommandSender));
 
     let config = DataActorConfig::default();
     // Ensure clean message bus state for this actor's subscriptions
@@ -778,7 +789,7 @@ fn test_request_instrument(
     );
 
     let data_response = DataResponse::Instrument(Box::new(response));
-    msgbus::send_response(&request_id, &data_response);
+    msgbus::send_response(&request_id, data_response);
 
     assert_eq!(actor.received_instruments.len(), 1);
     assert_eq!(actor.received_instruments[0], instrument);
@@ -818,7 +829,7 @@ fn test_request_instruments(
     );
 
     let data_response = DataResponse::Instruments(response);
-    msgbus::send_response(&request_id, &data_response);
+    msgbus::send_response(&request_id, data_response);
 
     assert_eq!(actor.received_instruments.len(), 2);
     assert_eq!(actor.received_instruments[0], instrument1);
@@ -856,7 +867,7 @@ fn test_request_quotes(
     );
 
     let data_response = DataResponse::Quotes(response);
-    msgbus::send_response(&request_id, &data_response);
+    msgbus::send_response(&request_id, data_response);
 
     assert_eq!(actor.received_quotes.len(), 1);
     assert_eq!(actor.received_quotes[0], quote);
@@ -893,10 +904,53 @@ fn test_request_trades(
     );
 
     let data_response = DataResponse::Trades(response);
-    msgbus::send_response(&request_id, &data_response);
+    msgbus::send_response(&request_id, data_response);
 
     assert_eq!(actor.received_trades.len(), 1);
     assert_eq!(actor.received_trades[0], trade);
+}
+
+#[rstest]
+fn test_request_funding_rates(
+    clock: Rc<RefCell<TestClock>>,
+    cache: Rc<RefCell<Cache>>,
+    trader_id: TraderId,
+    audusd_sim: CurrencyPair,
+) {
+    let actor_id = register_data_actor(clock, cache, trader_id);
+    let mut actor = get_actor_unchecked::<TestDataActor>(&actor_id);
+    actor.start().unwrap();
+
+    let request_id = actor
+        .request_funding_rates(audusd_sim.id, None, None, None, None, None)
+        .unwrap();
+
+    let client_id = ClientId::new("TestClient");
+    let funding_rate = FundingRateUpdate::new(
+        audusd_sim.id,
+        dec!(0.0001),
+        None,
+        UnixNanos::default(),
+        UnixNanos::default(),
+    );
+    let data = vec![funding_rate];
+    let ts_init = UnixNanos::default();
+    let response = FundingRatesResponse::new(
+        request_id,
+        client_id,
+        audusd_sim.id,
+        data,
+        Some(UnixNanos::from(1_695_000_000_000_000_000)),
+        Some(UnixNanos::from(1_699_000_000_000_000_000)),
+        ts_init,
+        None,
+    );
+
+    let data_response = DataResponse::FundingRates(response);
+    msgbus::send_response(&request_id, data_response);
+
+    assert_eq!(actor.received_funding_rates.len(), 1);
+    assert_eq!(actor.received_funding_rates[0], funding_rate);
 }
 
 #[rstest]
@@ -932,7 +986,7 @@ fn test_request_bars(
     );
 
     let data_response = DataResponse::Bars(response);
-    msgbus::send_response(&request_id, &data_response);
+    msgbus::send_response(&request_id, data_response);
 
     assert_eq!(actor.received_bars.len(), 1);
     assert_eq!(actor.received_bars[0], bar);
@@ -1406,7 +1460,7 @@ fn test_request_book_snapshot(
         None,
     );
     let data_response = DataResponse::Book(response);
-    msgbus::send_response(&request_id, &data_response);
+    msgbus::send_response(&request_id, data_response);
 
     // Should trigger on_book and record the book
     assert_eq!(actor.received_books.len(), 1);
@@ -1451,16 +1505,12 @@ fn test_request_data(
 
     // Publish the response
     let data_response = DataResponse::Data(response);
-    msgbus::send_response(&request_id, &data_response);
+    msgbus::send_response(&request_id, data_response);
 
     // Actor should receive the custom data
     assert_eq!(actor.received_data.len(), 1);
     assert_eq!(actor.received_data[0], "Any { .. }");
 }
-
-// ------------------------------------------------------------------------------------------------
-// DeFi Tests
-// ------------------------------------------------------------------------------------------------
 
 #[cfg(feature = "defi")]
 #[rstest]
@@ -1610,12 +1660,6 @@ fn test_subscribe_and_receive_pool_swaps(
     cache: Rc<RefCell<Cache>>,
     trader_id: TraderId,
 ) {
-    use alloy_primitives::{I256, U160};
-    use nautilus_model::{
-        defi::{AmmType, Dex, DexType, chain::chains},
-        identifiers::InstrumentId,
-    };
-
     let actor_id = register_data_actor(clock, cache, trader_id);
     let mut actor = get_actor_unchecked::<TestDataActor>(&actor_id);
     actor.start().unwrap();
@@ -1674,9 +1718,6 @@ fn test_unsubscribe_pool_swaps(
     cache: Rc<RefCell<Cache>>,
     trader_id: TraderId,
 ) {
-    use alloy_primitives::{I256, U160};
-    use nautilus_model::defi::{Dex, DexType, Pool, chain::chains, dex::AmmType};
-
     let actor_id = register_data_actor(clock, cache, trader_id);
     let mut actor = get_actor_unchecked::<TestDataActor>(&actor_id);
     actor.start().unwrap();
@@ -1796,10 +1837,6 @@ fn test_unsubscribe_before_subscribe_custom_data(
 
     assert!(actor.received_data.is_empty());
 }
-
-// ---------------------------------------------------------------------------------------------
-// save / load round-trip
-// ---------------------------------------------------------------------------------------------
 
 #[derive(Debug)]
 struct SaveLoadActor {

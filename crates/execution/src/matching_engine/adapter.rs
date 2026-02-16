@@ -32,7 +32,7 @@ use crate::{
         TriggerStopOrderHandlerAny,
     },
     matching_engine::{config::OrderMatchingEngineConfig, engine::OrderMatchingEngine},
-    models::{fee::FeeModelAny, fill::FillModel},
+    models::{fee::FeeModelAny, fill::FillModelAny},
 };
 
 #[derive(Debug)]
@@ -45,7 +45,7 @@ impl OrderEngineAdapter {
     pub fn new(
         instrument: InstrumentAny,
         raw_id: u32,
-        fill_model: FillModel,
+        fill_model: FillModelAny,
         fee_model: FeeModelAny,
         book_type: BookType,
         oms_type: OmsType,
@@ -80,7 +80,7 @@ impl OrderEngineAdapter {
         );
         engine
             .borrow_mut()
-            .core
+            .get_core_mut()
             .set_fill_limit_order_handler(handler);
     }
 
@@ -90,7 +90,7 @@ impl OrderEngineAdapter {
         );
         engine
             .borrow_mut()
-            .core
+            .get_core_mut()
             .set_fill_market_order_handler(handler);
     }
 
@@ -100,7 +100,7 @@ impl OrderEngineAdapter {
         );
         engine
             .borrow_mut()
-            .core
+            .get_core_mut()
             .set_trigger_stop_order_handler(handler);
     }
 

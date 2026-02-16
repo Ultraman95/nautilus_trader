@@ -374,6 +374,34 @@ Always use the `FAILED` constant for `.expect()` messages related to correctness
 use nautilus_core::correctness::FAILED;
 ```
 
+### Type conversion patterns
+
+For types that parse from strings, provide both fallible and infallible conversions:
+
+1. **`FromStr`**: Fallible parsing via `.parse()` or `from_str()`. Returns `Result`.
+
+2. **`From<T: AsRef<str>>`**: Ergonomic infallible conversion that accepts `&str`, `String`, `Cow<str>`, etc. directly without requiring `.as_str()`.
+
+```rust
+impl FromStr for Symbol {
+    type Err = SymbolParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // parsing logic
+    }
+}
+
+impl<T: AsRef<str>> From<T> for Symbol {
+    fn from(value: T) -> Self {
+        Self::from_str(value.as_ref()).expect(FAILED)
+    }
+}
+```
+
+**Design note**: The `From` impl may panic on invalid input. This is intentional for API ergonomics—use `FromStr` / `.parse()` when error handling is needed. The `From` impl provides convenience for cases where the input is known to be valid.
+
+**Constraint**: This pattern cannot be used for types that implement `AsRef<str>` themselves (e.g., string wrapper types), as it would conflict with the blanket `impl<T> From<T> for T`. For such types, provide separate `From<&str>` and `From<String>` impls instead.
+
 ### Constants and naming conventions
 
 Use SCREAMING_SNAKE_CASE for constants with descriptive names:
@@ -716,6 +744,58 @@ fn test_symbol_is_composite(#[case] input: &str, #[case] expected: bool) {
     assert_eq!(symbol.is_composite(), expected);
 }
 ```
+
+#### Property-based testing
+
+Use the `proptest` crate for property-based tests. Place these in a separate
+`property_tests` module (not inside `mod tests`) to keep deterministic unit
+tests separate from randomized property tests:
+
+```rust
+#[cfg(test)]
+mod property_tests {
+    use proptest::prelude::*;
+    use rstest::rstest;
+
+    use super::*;
+
+    // Define strategies for generating test inputs
+    fn my_strategy() -> impl Strategy<Value = MyType> {
+        prop_oneof![
+            Just(MyType::VariantA),
+            Just(MyType::VariantB),
+        ]
+    }
+
+    fn value_strategy() -> impl Strategy<Value = f64> {
+        prop_oneof![
+            -1000.0..1000.0,
+            Just(0.0),
+        ]
+    }
+
+    // Group all property tests inside the proptest! macro
+    proptest! {
+        #[rstest]
+        fn prop_construction_roundtrip(
+            value in value_strategy(),
+            variant in my_strategy()
+        ) {
+            // Test invariants that should hold for all generated inputs
+        }
+    }
+}
+```
+
+Conventions:
+
+- Name the module `property_tests`, separate from `mod tests`.
+- Import `proptest::prelude::*` and `rstest::rstest`.
+- Define strategy functions returning `impl Strategy<Value = T>`.
+- Combine value ranges with edge cases using `prop_oneof!`.
+- Filter invalid combinations with `prop_filter_map`.
+- Prefix test names with `prop_`.
+- Mark each test inside `proptest!` with `#[rstest]`.
 
 #### Test naming
 

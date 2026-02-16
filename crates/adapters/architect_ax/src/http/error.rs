@@ -59,6 +59,9 @@ pub enum AxHttpError {
     /// Error variant when credentials are missing but the request is authenticated.
     #[error("Missing credentials for authenticated request")]
     MissingCredentials,
+    /// Error variant when session token is not set (not yet authenticated).
+    #[error("Session token not set (not authenticated)")]
+    MissingSessionToken,
     /// Errors returned directly by AX Exchange API.
     #[error("AX Exchange API error: {message}")]
     ApiError { message: String },
@@ -107,6 +110,26 @@ impl From<AxErrorResponse> for AxHttpError {
             .or(error.error)
             .unwrap_or_else(|| "Unknown error".to_string());
         Self::ApiError { message }
+    }
+}
+
+impl AxHttpError {
+    /// Returns `true` if the error is transient and the request should be retried.
+    ///
+    /// Retries on network errors, rate limiting (429), and server errors (5xx).
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::NetworkError(_) => true,
+            Self::UnexpectedStatus { status, .. } => *status == 429 || *status >= 500,
+            Self::MissingCredentials
+            | Self::MissingSessionToken
+            | Self::ApiError { .. }
+            | Self::JsonError(_)
+            | Self::ValidationError(_)
+            | Self::BuildError(_)
+            | Self::Canceled(_) => false,
+        }
     }
 }
 
