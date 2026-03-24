@@ -476,6 +476,7 @@ pub fn parse_ws_order_status_report(
             | OrderType::MarketIfTouched
             | OrderType::LimitIfTouched
     );
+
     if is_conditional {
         report = report.with_trigger_type(TriggerType::Default);
     }
@@ -606,6 +607,7 @@ mod tests {
             None,
             None,
             None,
+            None, // info
             TS,
             TS,
         ))

@@ -32,7 +32,10 @@ use nautilus_common::{
 };
 use nautilus_core::{
     UUID4, UnixNanos,
-    datetime::{NANOSECONDS_IN_MILLISECOND, NANOSECONDS_IN_SECOND, nanos_to_millis},
+    datetime::{
+        NANOSECONDS_IN_MILLISECOND, NANOSECONDS_IN_SECOND, mins_to_nanos, mins_to_secs,
+        nanos_to_millis,
+    },
 };
 use nautilus_execution::{
     engine::ExecutionEngine,
@@ -134,6 +137,8 @@ pub struct ExecutionManagerConfig {
     pub position_check_lookback_mins: u64,
     /// Threshold in nanoseconds before acting on venue discrepancies for positions.
     pub position_check_threshold_ns: u64,
+    /// Maximum retries before stopping position discrepancy reconciliation.
+    pub position_check_retries: u32,
     /// The time buffer (minutes) before closed orders can be purged.
     pub purge_closed_orders_buffer_mins: Option<u32>,
     /// The time buffer (minutes) before closed positions can be purged.
@@ -169,6 +174,7 @@ impl Default for ExecutionManagerConfig {
             position_check_interval_secs: None,
             position_check_lookback_mins: 60,
             position_check_threshold_ns: 60_000_000_000,
+            position_check_retries: 3,
             purge_closed_orders_buffer_mins: None,
             purge_closed_positions_buffer_mins: None,
             purge_account_events_lookback_mins: None,
@@ -223,6 +229,7 @@ impl From<&LiveExecEngineConfig> for ExecutionManagerConfig {
             position_check_interval_secs: config.position_check_interval_secs,
             position_check_lookback_mins: config.position_check_lookback_mins as u64,
             position_check_threshold_ns,
+            position_check_retries: config.position_check_retries,
             purge_closed_orders_buffer_mins: config.purge_closed_orders_buffer_mins,
             purge_closed_positions_buffer_mins: config.purge_closed_positions_buffer_mins,
             purge_account_events_lookback_mins: config.purge_account_events_lookback_mins,
@@ -242,7 +249,7 @@ impl ExecutionManagerConfig {
 
 /// Execution report for continuous reconciliation.
 /// This is a simplified report type used during runtime reconciliation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ExecutionReport {
     pub client_order_id: ClientOrderId,
     pub venue_order_id: Option<VenueOrderId>,
@@ -296,6 +303,7 @@ pub struct ExecutionManager {
     ts_last_query: AHashMap<ClientOrderId, UnixNanos>,
     order_local_activity_ns: AHashMap<ClientOrderId, UnixNanos>,
     position_local_activity_ns: AHashMap<InstrumentId, UnixNanos>,
+    position_recon_retries: AHashMap<InstrumentId, u32>,
     recent_fills_cache: AHashMap<TradeId, UnixNanos>,
 }
 
@@ -329,8 +337,15 @@ impl ExecutionManager {
             ts_last_query: AHashMap::new(),
             order_local_activity_ns: AHashMap::new(),
             position_local_activity_ns: AHashMap::new(),
+            position_recon_retries: AHashMap::new(),
             recent_fills_cache: AHashMap::new(),
         }
+    }
+
+    /// Returns the current clock timestamp in nanoseconds.
+    #[must_use]
+    pub fn generate_timestamp_ns(&self) -> UnixNanos {
+        self.clock.borrow().timestamp_ns()
     }
 
     /// Reconciles orders and fills from a mass status report.
@@ -424,7 +439,7 @@ impl ExecutionManager {
                     continue;
                 }
 
-                if let Some(mut order) = self.get_order(client_order_id) {
+                if let Some(order) = self.get_order(client_order_id) {
                     let instrument = self.get_instrument(&report.instrument_id);
                     log::info!(
                         color = LogColor::Blue as u8;
@@ -441,11 +456,12 @@ impl ExecutionManager {
                         .map(|f| f.iter().collect())
                         .unwrap_or_default();
                     let order_events = self.reconcile_order_with_fills(
-                        &mut order,
+                        &order,
                         report,
                         &order_fills,
                         instrument.as_ref(),
                     );
+
                     if !order_events.is_empty() {
                         orders_reconciled += 1;
                         fills_applied += order_events
@@ -463,8 +479,7 @@ impl ExecutionManager {
                     ) {
                         log::warn!("Failed to add venue order ID index: {e}");
                     }
-                } else if let Some(mut order) =
-                    self.get_order_by_venue_order_id(&report.venue_order_id)
+                } else if let Some(order) = self.get_order_by_venue_order_id(&report.venue_order_id)
                 {
                     // Fallback: match by venue_order_id
                     let instrument = self.get_instrument(&report.instrument_id);
@@ -484,7 +499,7 @@ impl ExecutionManager {
                         .map(|f| f.iter().collect())
                         .unwrap_or_default();
                     let order_events = self.reconcile_order_with_fills(
-                        &mut order,
+                        &order,
                         report,
                         &order_fills,
                         instrument.as_ref(),
@@ -541,8 +556,7 @@ impl ExecutionManager {
                         orders_skipped_no_instrument += 1;
                     }
                 }
-            } else if let Some(mut order) = self.get_order_by_venue_order_id(&report.venue_order_id)
-            {
+            } else if let Some(order) = self.get_order_by_venue_order_id(&report.venue_order_id) {
                 // Fallback: match by venue_order_id
                 let instrument = self.get_instrument(&report.instrument_id);
                 log::info!(
@@ -560,7 +574,7 @@ impl ExecutionManager {
                     .map(|f| f.iter().collect())
                     .unwrap_or_default();
                 let order_events = self.reconcile_order_with_fills(
-                    &mut order,
+                    &order,
                     report,
                     &order_fills,
                     instrument.as_ref(),
@@ -674,14 +688,14 @@ impl ExecutionManager {
                 continue;
             }
 
-            if let Some(mut order) = order {
+            if let Some(order) = order {
                 let instrument_id = order.instrument_id();
                 if let Some(instrument) = self.get_instrument(&instrument_id) {
                     let mut sorted_fills: Vec<&FillReport> = fills.iter().collect();
                     sorted_fills.sort_by_key(|f| f.ts_event);
 
                     for fill in sorted_fills {
-                        if let Some(event) = self.create_order_fill(&mut order, fill, &instrument) {
+                        if let Some(event) = self.create_order_fill(&order, fill, &instrument) {
                             fills_applied += 1;
                             events.push(event);
                         }
@@ -693,10 +707,11 @@ impl ExecutionManager {
         events.sort_by_key(|e| e.ts_event());
 
         for event in &events {
-            exec_engine.borrow_mut().process(event.clone());
+            exec_engine.borrow_mut().process(event);
         }
 
         let mut positions_created = 0usize;
+
         if !self.config.filter_position_reports {
             // Collect instruments with fills that lack venue_position_id (can't attribute to
             // specific hedge position, so must skip all hedge reports for that instrument)
@@ -745,7 +760,7 @@ impl ExecutionManager {
                         &positions_with_fills,
                     ) {
                         for event in position_events {
-                            exec_engine.borrow_mut().process(event.clone());
+                            exec_engine.borrow_mut().process(&event);
                             events.push(event);
                         }
                         positions_created += 1;
@@ -821,6 +836,7 @@ impl ExecutionManager {
             }
 
             let instrument = self.get_instrument(&order.instrument_id());
+
             if let Some(event) =
                 self.reconcile_order_report(&order, &order_report, instrument.as_ref())
             {
@@ -870,6 +886,7 @@ impl ExecutionManager {
                 if check.retry_count >= self.config.inflight_max_retries {
                     // Generate rejection after max retries
                     let ts_now = self.clock.borrow().timestamp_ns();
+
                     if let Some(order) = self.get_order(&client_order_id)
                         && let Some(event) =
                             create_reconciliation_rejected(&order, Some("INFLIGHT_TIMEOUT"), ts_now)
@@ -896,18 +913,19 @@ impl ExecutionManager {
     /// A vector of order events generated to reconcile discrepancies.
     pub async fn check_open_orders(
         &mut self,
-        clients: &[Rc<dyn ExecutionClient>],
+        clients: &[&dyn ExecutionClient],
     ) -> Vec<OrderEventAny> {
         log::debug!("Checking order consistency between cached-state and venues");
 
         let filtered_orders: Vec<OrderAny> = {
             let cache = self.cache.borrow();
-            let open_orders = cache.orders_open(None, None, None, None, None);
+            let mut orders = cache.orders_open(None, None, None, None, None);
+            orders.extend(cache.orders_inflight(None, None, None, None, None));
 
             if self.config.reconciliation_instrument_ids.is_empty() {
-                open_orders.iter().map(|o| (*o).clone()).collect()
+                orders.iter().map(|o| (*o).clone()).collect()
             } else {
-                open_orders
+                orders
                     .iter()
                     .filter(|o| {
                         self.config
@@ -928,13 +946,19 @@ impl ExecutionManager {
         let mut all_reports = Vec::new();
         let mut venue_reported_ids = AHashSet::new();
 
+        let ts_now = self.clock.borrow().timestamp_ns();
+        let start = self.config.open_check_lookback_mins.map(|mins| {
+            let lookback_ns = mins_to_nanos(mins);
+            UnixNanos::from(ts_now.as_u64().saturating_sub(lookback_ns))
+        });
+
         for client in clients {
             let mut cmd = GenerateOrderStatusReports::new(
                 UUID4::new(),
-                self.clock.borrow().timestamp_ns(),
-                true, // open_only
+                ts_now,
+                self.config.open_check_open_only,
                 None, // instrument_id - query all
-                None, // start
+                start,
                 None, // end
                 None, // params
                 None, // correlation_id
@@ -989,12 +1013,21 @@ impl ExecutionManager {
             }
         }
 
-        // Handle orders missing at venue
+        // Handle orders missing at venue (skip in open_only mode where the
+        // venue response may omit recently closed orders). When a lookback
+        // window is set, only consider orders within that window so older
+        // GTC orders outside the query range are not falsely marked missing.
         if !self.config.open_check_open_only {
-            let cached_ids: AHashSet<ClientOrderId> = filtered_orders
-                .iter()
-                .map(|o| o.client_order_id())
-                .collect();
+            let candidates: Vec<&OrderAny> = if let Some(cutoff) = start {
+                filtered_orders
+                    .iter()
+                    .filter(|o| o.ts_last() >= cutoff)
+                    .collect()
+            } else {
+                filtered_orders.iter().collect()
+            };
+            let cached_ids: AHashSet<ClientOrderId> =
+                candidates.iter().map(|o| o.client_order_id()).collect();
             let missing_at_venue: AHashSet<ClientOrderId> = cached_ids
                 .difference(&venue_reported_ids)
                 .copied()
@@ -1019,7 +1052,7 @@ impl ExecutionManager {
     /// A vector of fill events generated to reconcile position discrepancies.
     pub async fn check_positions_consistency(
         &mut self,
-        clients: &[Rc<dyn ExecutionClient>],
+        clients: &[&dyn ExecutionClient],
     ) -> Vec<OrderEventAny> {
         log::debug!("Checking position consistency between cached-state and venues");
 
@@ -1078,10 +1111,16 @@ impl ExecutionManager {
             }
         }
 
-        // Check for discrepancies
+        // Check for discrepancies (one check per instrument per cycle to avoid
+        // burning multiple retries for hedging positions on the same instrument)
         let mut events = Vec::new();
+        let mut checked_instruments = AHashSet::new();
 
         for position in &open_positions {
+            if !checked_instruments.insert(position.instrument_id) {
+                continue;
+            }
+
             // Skip if not in filter
             if !self.config.reconciliation_instrument_ids.is_empty()
                 && !self
@@ -1100,6 +1139,21 @@ impl ExecutionManager {
                 events.extend(discrepancy_events);
             }
         }
+
+        // Prune retry counters for instruments no longer actively tracked,
+        // excluding flat venue reports which shouldn't protect stale counters
+        let active_instruments: AHashSet<InstrumentId> = open_positions
+            .iter()
+            .map(|p| p.instrument_id)
+            .chain(
+                venue_positions
+                    .iter()
+                    .filter(|(_, r)| r.signed_decimal_qty != Decimal::ZERO)
+                    .map(|(id, _)| *id),
+            )
+            .collect();
+        self.position_recon_retries
+            .retain(|iid, _| active_instruments.contains(iid));
 
         events
     }
@@ -1135,6 +1189,7 @@ impl ExecutionManager {
     pub fn clear_recon_tracking(&mut self, client_order_id: &ClientOrderId, drop_last_query: bool) {
         self.inflight_checks.remove(client_order_id);
         self.recon_check_retries.remove(client_order_id);
+
         if drop_last_query {
             self.ts_last_query.remove(client_order_id);
         }
@@ -1182,7 +1237,7 @@ impl ExecutionManager {
         };
 
         let ts_now = self.clock.borrow().timestamp_ns();
-        let buffer_secs = (buffer_mins as u64) * 60;
+        let buffer_secs = mins_to_secs(buffer_mins as u64);
 
         self.cache
             .borrow_mut()
@@ -1196,7 +1251,7 @@ impl ExecutionManager {
         };
 
         let ts_now = self.clock.borrow().timestamp_ns();
-        let buffer_secs = (buffer_mins as u64) * 60;
+        let buffer_secs = mins_to_secs(buffer_mins as u64);
 
         self.cache
             .borrow_mut()
@@ -1210,7 +1265,7 @@ impl ExecutionManager {
         };
 
         let ts_now = self.clock.borrow().timestamp_ns();
-        let lookback_secs = (lookback_mins as u64) * 60;
+        let lookback_secs = mins_to_secs(lookback_mins as u64);
 
         self.cache
             .borrow_mut()
@@ -1299,6 +1354,7 @@ impl ExecutionManager {
             );
 
             let ts_now = self.clock.borrow().timestamp_ns();
+
             if let Some(rejected) =
                 create_reconciliation_rejected(&order, Some("NOT_FOUND_AT_VENUE"), ts_now)
             {
@@ -1329,11 +1385,13 @@ impl ExecutionManager {
 
         let tolerance = Decimal::from_str("0.00000001").unwrap();
         if (cached_signed_qty - venue_signed_qty).abs() <= tolerance {
+            self.position_recon_retries.remove(&position.instrument_id);
             return None; // No discrepancy
         }
 
         // Check activity threshold
         let ts_now = self.clock.borrow().timestamp_ns();
+
         if let Some(&last_activity) = self.position_local_activity_ns.get(&position.instrument_id)
             && (ts_now - last_activity) < self.config.position_check_threshold_ns
         {
@@ -1344,6 +1402,15 @@ impl ExecutionManager {
             return None;
         }
 
+        let retries = *self
+            .position_recon_retries
+            .get(&position.instrument_id)
+            .unwrap_or(&0);
+
+        if retries >= self.config.position_check_retries {
+            return None;
+        }
+
         log::warn!(
             "Position discrepancy detected for {}: cached_signed_qty={}, venue_signed_qty={}",
             position.instrument_id,
@@ -1351,14 +1418,24 @@ impl ExecutionManager {
             venue_signed_qty
         );
 
-        let instrument = self
-            .cache
-            .borrow()
-            .instrument(&position.instrument_id)?
-            .clone();
-
         let account_id = position.account_id;
         let instrument_id = position.instrument_id;
+
+        let Some(instrument) = self.cache.borrow().instrument(&instrument_id).cloned() else {
+            log::debug!("Cannot reconcile position for {instrument_id}: instrument not in cache");
+            let new_retries = retries + 1;
+            self.position_recon_retries
+                .insert(instrument_id, new_retries);
+            if new_retries >= self.config.position_check_retries {
+                log::error!(
+                    "Position discrepancy for {instrument_id} unresolved after {} attempts \
+                     (cached_qty={cached_signed_qty}, venue_qty={venue_signed_qty}); \
+                     no further reconciliation attempts will be made",
+                    self.config.position_check_retries,
+                );
+            }
+            return None;
+        };
 
         let cached_avg_px = if position.avg_px_open > 0.0 {
             Decimal::from_str(&position.avg_px_open.to_string()).ok()
@@ -1371,9 +1448,9 @@ impl ExecutionManager {
         let crosses_zero = (cached_signed_qty > Decimal::ZERO && venue_signed_qty < Decimal::ZERO)
             || (cached_signed_qty < Decimal::ZERO && venue_signed_qty > Decimal::ZERO);
 
-        if crosses_zero {
+        let result = if crosses_zero {
             // Split into two fills: close existing position, then open new position
-            return self.reconcile_cross_zero_position(
+            self.reconcile_cross_zero_position(
                 &instrument,
                 account_id,
                 instrument_id,
@@ -1382,57 +1459,91 @@ impl ExecutionManager {
                 venue_signed_qty,
                 venue_avg_px,
                 ts_now,
-            );
-        }
-
-        let qty_diff = venue_signed_qty - cached_signed_qty;
-        let order_side = if qty_diff > Decimal::ZERO {
-            OrderSide::Buy
+            )
         } else {
-            OrderSide::Sell
+            let qty_diff = venue_signed_qty - cached_signed_qty;
+            let order_side = if qty_diff > Decimal::ZERO {
+                OrderSide::Buy
+            } else {
+                OrderSide::Sell
+            };
+
+            let reconciliation_px = calculate_reconciliation_price(
+                cached_signed_qty,
+                cached_avg_px,
+                venue_signed_qty,
+                venue_avg_px,
+            );
+
+            match reconciliation_px.or(venue_avg_px).or(cached_avg_px) {
+                Some(fill_px) => {
+                    let fill_qty = qty_diff.abs();
+                    let ts_event = ts_now.as_u64();
+                    let venue_order_id = create_synthetic_venue_order_id(ts_event);
+
+                    Quantity::from_decimal_dp(fill_qty, instrument.size_precision())
+                        .ok()
+                        .and_then(|order_qty| {
+                            OrderStatusReport::new(
+                                account_id,
+                                instrument_id,
+                                None,
+                                venue_order_id,
+                                order_side,
+                                OrderType::Market,
+                                TimeInForce::Gtc,
+                                OrderStatus::Filled,
+                                order_qty,
+                                order_qty,
+                                ts_now,
+                                ts_now,
+                                ts_now,
+                                None,
+                            )
+                            .with_avg_px(fill_px.to_f64().unwrap_or(0.0))
+                            .ok()
+                        })
+                        .map(|order_report| {
+                            log::info!(
+                                color = LogColor::Blue as u8;
+                                "Generating synthetic fill for position reconciliation {instrument_id}: side={order_side:?}, qty={}, px={fill_px}", qty_diff.abs(),
+                            );
+
+                            let (events, _) = self.handle_external_order(
+                                &order_report,
+                                &account_id,
+                                &instrument,
+                                &[],
+                                true,
+                            );
+                            events
+                        })
+                }
+                None => None,
+            }
         };
 
-        let reconciliation_px = calculate_reconciliation_price(
-            cached_signed_qty,
-            cached_avg_px,
-            venue_signed_qty,
-            venue_avg_px,
-        );
+        // Track retries when reconciliation didn't produce events
+        if result.is_none() || result.as_ref().is_some_and(|e| e.is_empty()) {
+            let new_retries = retries + 1;
+            self.position_recon_retries
+                .insert(instrument_id, new_retries);
+            if new_retries >= self.config.position_check_retries {
+                log::error!(
+                    "Position discrepancy for {} unresolved after {} attempts \
+                     (cached_qty={}, venue_qty={}); \
+                     no further reconciliation attempts will be made",
+                    instrument_id,
+                    self.config.position_check_retries,
+                    cached_signed_qty,
+                    venue_signed_qty,
+                );
+            }
+        } else {
+            self.position_recon_retries.remove(&instrument_id);
+        }
 
-        let fill_px = reconciliation_px.or(venue_avg_px).or(cached_avg_px)?;
-        let fill_qty = qty_diff.abs();
-
-        let ts_event = ts_now.as_u64();
-        let venue_order_id = create_synthetic_venue_order_id(ts_event);
-        let order_qty = Quantity::from_decimal_dp(fill_qty, instrument.size_precision()).ok()?;
-
-        let order_report = OrderStatusReport::new(
-            account_id,
-            instrument_id,
-            None,
-            venue_order_id,
-            order_side,
-            OrderType::Market,
-            TimeInForce::Gtc,
-            OrderStatus::Filled,
-            order_qty,
-            order_qty,
-            ts_now,
-            ts_now,
-            ts_now,
-            None,
-        )
-        .with_avg_px(fill_px.to_f64().unwrap_or(0.0))
-        .ok()?;
-
-        log::info!(
-            color = LogColor::Blue as u8;
-            "Generating synthetic fill for position reconciliation {instrument_id}: side={order_side:?}, qty={fill_qty}, px={fill_px}",
-        );
-
-        let (events, _) =
-            self.handle_external_order(&order_report, &account_id, &instrument, &[], true);
-        Some(events)
+        result
     }
 
     /// Handles position reconciliation when position flips sign, splitting into two
@@ -1658,8 +1769,7 @@ impl ExecutionManager {
             return None;
         }
 
-        log::info!(
-            color = LogColor::Blue as u8;
+        log::debug!(
             "Reconciling HEDGE position for {}, venue_position_id={}",
             report.instrument_id,
             venue_position_id
@@ -1808,16 +1918,14 @@ impl ExecutionManager {
     ) -> Option<Vec<OrderEventAny>> {
         let instrument_id = report.instrument_id;
 
-        log::info!(
-            color = LogColor::Blue as u8;
-            "Reconciling NET position for {instrument_id}",
-        );
+        log::debug!("Reconciling NET position for {instrument_id}");
 
         let instrument = self.get_instrument(&instrument_id)?;
 
         let (cached_signed_qty, cached_avg_px) = {
             let cache = self.cache.borrow();
-            let positions = cache.positions_open(None, Some(&instrument_id), None, None, None);
+            let positions =
+                cache.positions_open(None, Some(&instrument_id), None, Some(account_id), None);
 
             if positions.is_empty() {
                 (Decimal::ZERO, None)
@@ -1850,10 +1958,7 @@ impl ExecutionManager {
 
         let venue_signed_qty = report.signed_decimal_qty;
 
-        log::info!(
-            color = LogColor::Blue as u8;
-            "venue_signed_qty={venue_signed_qty}, cached_signed_qty={cached_signed_qty}",
-        );
+        log::debug!("venue_signed_qty={venue_signed_qty}, cached_signed_qty={cached_signed_qty}");
 
         let tolerance = Decimal::from_str("0.00000001").unwrap_or(Decimal::ZERO);
         if (cached_signed_qty - venue_signed_qty).abs() <= tolerance {
@@ -1992,7 +2097,7 @@ impl ExecutionManager {
     /// to ensure correct state transitions (matching Python behavior).
     fn reconcile_order_with_fills(
         &mut self,
-        order: &mut OrderAny,
+        order: &OrderAny,
         report: &OrderStatusReport,
         fills: &[&FillReport],
         instrument: Option<&InstrumentAny>,
@@ -2019,6 +2124,7 @@ impl ExecutionManager {
                         }
                     }
                 }
+
                 if let Some(event) = self.reconcile_order_report(order, report, instrument) {
                     events.push(event);
                 }
@@ -2037,6 +2143,7 @@ impl ExecutionManager {
                         }
                     }
                 }
+
                 if let Some(event) = self.reconcile_order_report(order, report, instrument) {
                     events.push(event);
                 }
@@ -2045,6 +2152,7 @@ impl ExecutionManager {
                 if let Some(event) = self.reconcile_order_report(order, report, instrument) {
                     events.push(event);
                 }
+
                 if let Some(inst) = instrument {
                     for fill in &sorted_fills {
                         if let Some(event) = self.create_order_fill(order, fill, inst) {
@@ -2176,7 +2284,7 @@ impl ExecutionManager {
             generate_external_order_status_events(&order, report, account_id, instrument, ts_now);
 
         if !fills.is_empty() {
-            let mut cached_order = self.get_order(&client_order_id).unwrap();
+            let cached_order = self.get_order(&client_order_id).unwrap();
             let mut sorted_fills: Vec<&FillReport> = fills.to_vec();
             sorted_fills.sort_by_key(|f| f.ts_event);
 
@@ -2185,11 +2293,12 @@ impl ExecutionManager {
                     let terminal_event = order_events.pop();
                     for fill in sorted_fills {
                         if let Some(fill_event) =
-                            self.create_order_fill(&mut cached_order, fill, instrument)
+                            self.create_order_fill(&cached_order, fill, instrument)
                         {
                             order_events.push(fill_event);
                         }
                     }
+
                     if let Some(event) = terminal_event {
                         order_events.push(event);
                     }
@@ -2206,7 +2315,7 @@ impl ExecutionManager {
                     let mut real_fill_total = Decimal::ZERO;
                     for fill in &sorted_fills {
                         if let Some(fill_event) =
-                            self.create_order_fill(&mut cached_order, fill, instrument)
+                            self.create_order_fill(&cached_order, fill, instrument)
                         {
                             real_fill_total += fill.last_qty.as_decimal();
                             order_events.push(fill_event);
@@ -2216,6 +2325,7 @@ impl ExecutionManager {
                     let report_filled = report.filled_qty.as_decimal();
                     if real_fill_total < report_filled {
                         let diff_decimal = report_filled - real_fill_total;
+
                         if let Ok(diff) =
                             Quantity::from_decimal_dp(diff_decimal, instrument.size_precision())
                             && let Some(inferred_fill) = create_inferred_fill_for_qty(
@@ -2275,6 +2385,7 @@ impl ExecutionManager {
             let is_hedge_mode = position_reports
                 .iter()
                 .any(|r| r.venue_position_id.is_some());
+
             if is_hedge_mode {
                 log::debug!(
                     "Skipping fill adjustment for {instrument_id}: hedge mode (has venue_position_id)"
@@ -2363,6 +2474,7 @@ impl ExecutionManager {
         if a.filled_qty > b.filled_qty {
             return true;
         }
+
         if a.filled_qty < b.filled_qty {
             return false;
         }
@@ -2391,7 +2503,7 @@ impl ExecutionManager {
 
     fn create_order_fill(
         &mut self,
-        order: &mut OrderAny,
+        order: &OrderAny,
         fill: &FillReport,
         instrument: &InstrumentAny,
     ) -> Option<OrderEventAny> {

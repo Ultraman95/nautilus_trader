@@ -150,6 +150,7 @@ class DeribitExecutionClient(LiveExecutionClient):
         # Connect WebSocket with instruments and callback dispatch
         self._log.info("Connecting WebSocket for execution...")
         await self._ws_client.connect(
+            loop_=self._loop,
             instruments=instruments,
             callback=self._handle_ws_message,
         )
@@ -197,6 +198,7 @@ class DeribitExecutionClient(LiveExecutionClient):
         reports: list[OrderStatusReport] = []
         try:
             pyo3_instrument_id = None
+
             if command.instrument_id:
                 pyo3_instrument_id = nautilus_pyo3.InstrumentId.from_str(
                     command.instrument_id.value,
@@ -236,6 +238,7 @@ class DeribitExecutionClient(LiveExecutionClient):
         reports: list[FillReport] = []
         try:
             pyo3_instrument_id = None
+
             if command.instrument_id:
                 pyo3_instrument_id = nautilus_pyo3.InstrumentId.from_str(
                     command.instrument_id.value,
@@ -270,6 +273,7 @@ class DeribitExecutionClient(LiveExecutionClient):
         reports: list[PositionStatusReport] = []
         try:
             pyo3_instrument_id = None
+
             if command.instrument_id:
                 pyo3_instrument_id = nautilus_pyo3.InstrumentId.from_str(
                     command.instrument_id.value,

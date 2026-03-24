@@ -45,8 +45,8 @@ use nautilus_bybit::{
 use nautilus_common::testing::wait_until_async;
 use nautilus_model::{
     data::BarType,
-    identifiers::{InstrumentId, StrategyId, TraderId},
-    instruments::{CurrencyPair, InstrumentAny},
+    identifiers::InstrumentId,
+    instruments::CurrencyPair,
     types::{Currency, Price, Quantity},
 };
 use rstest::rstest;
@@ -135,6 +135,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
         let mut interval = tokio::time::interval(Duration::from_millis(100));
         loop {
             interval.tick().await;
+
             if state_clone.disconnect_trigger.load(Ordering::Relaxed) {
                 break;
             }
@@ -184,6 +185,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                             "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
                             "op": "pong"
                         });
+
                         if socket
                             .send(Message::Text(pong_response.to_string().into()))
                             .await
@@ -213,6 +215,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                                 "op": "auth",
                                 "conn_id": "test-conn-id"
                             });
+
                             if socket
                                 .send(Message::Text(auth_response.to_string().into()))
                                 .await
@@ -228,6 +231,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                                 "op": "auth",
                                 "conn_id": "test-conn-id"
                             });
+
                             if socket
                                 .send(Message::Text(auth_response.to_string().into()))
                                 .await
@@ -275,6 +279,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                                 "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
                                 "op": "subscribe"
                             });
+
                             if socket
                                 .send(Message::Text(sub_response.to_string().into()))
                                 .await
@@ -292,6 +297,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                                 "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
                                 "op": "subscribe"
                             });
+
                             if socket
                                 .send(Message::Text(error_response.to_string().into()))
                                 .await
@@ -308,6 +314,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                             if first_topic.contains("publicTrade") {
                                 // Send a trade message
                                 let trade_msg = load_test_data("ws_public_trade.json");
+
                                 if socket
                                     .send(Message::Text(trade_msg.to_string().into()))
                                     .await
@@ -318,6 +325,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                             } else if first_topic.contains("orderbook") {
                                 // Send an orderbook message
                                 let orderbook_msg = load_test_data("ws_orderbook_snapshot.json");
+
                                 if socket
                                     .send(Message::Text(orderbook_msg.to_string().into()))
                                     .await
@@ -351,6 +359,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                             "req_id": value.get("req_id").and_then(|v| v.as_str()).unwrap_or(""),
                             "op": "unsubscribe"
                         });
+
                         if socket
                             .send(Message::Text(unsub_response.to_string().into()))
                             .await
@@ -369,6 +378,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                             "req_id": req_id.unwrap_or(""),
                             "op": "order.place"
                         });
+
                         if socket
                             .send(Message::Text(response.to_string().into()))
                             .await
@@ -387,6 +397,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                             "req_id": req_id.unwrap_or(""),
                             "op": "order.amend"
                         });
+
                         if socket
                             .send(Message::Text(response.to_string().into()))
                             .await
@@ -405,6 +416,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
                             "req_id": req_id.unwrap_or(""),
                             "op": "order.cancel"
                         });
+
                         if socket
                             .send(Message::Text(response.to_string().into()))
                             .await
@@ -418,6 +430,7 @@ async fn handle_socket(mut socket: WebSocket, state: TestServerState) {
             }
             Message::Ping(_) => {
                 state.ping_count.fetch_add(1, Ordering::Relaxed);
+
                 if socket.send(Message::Pong(vec![].into())).await.is_err() {
                     break;
                 }
@@ -457,20 +470,21 @@ fn make_linear_pair(raw_symbol: &str, base: &str, quote: &str) -> CurrencyPair {
         5,
         Price::from("0.01"),
         Quantity::from("0.00001"),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        0.into(),
-        0.into(),
+        None,     // multiplier
+        None,     // lot_size
+        None,     // max_quantity
+        None,     // min_quantity
+        None,     // max_notional
+        None,     // min_notional
+        None,     // max_price
+        None,     // min_price
+        None,     // margin_init
+        None,     // margin_maint
+        None,     // maker_fee
+        None,     // taker_fee
+        None,     // info
+        0.into(), // ts_event
+        0.into(), // ts_init
     )
 }
 
@@ -2177,11 +2191,6 @@ async fn test_batch_place_orders_with_cache_keys() {
     )
     .await;
 
-    // Cache instrument with proper key format (symbol-PRODUCT_TYPE)
-    let btcusdt_linear = make_linear_pair("BTCUSDT", "BTC", "USDT");
-    client.cache_instrument(InstrumentAny::CurrencyPair(btcusdt_linear));
-
-    // Create batch place orders with raw symbol (will be converted to cache key internally)
     let orders = vec![BybitWsPlaceOrderParams {
         category: BybitProductType::Linear,
         symbol: Ustr::from("BTCUSDT"),
@@ -2211,12 +2220,7 @@ async fn test_batch_place_orders_with_cache_keys() {
         tp_limit_price: None,
     }];
 
-    let trader_id = TraderId::from("TRADER-001");
-    let strategy_id = StrategyId::from("STRATEGY-001");
-
-    let result = client
-        .batch_place_orders(trader_id, strategy_id, orders)
-        .await;
+    let result = client.batch_place_orders(orders).await;
 
     assert!(
         result.is_ok(),
@@ -2263,12 +2267,7 @@ async fn test_batch_amend_orders() {
         sl_trigger_by: None,
     }];
 
-    let trader_id = TraderId::from("TRADER-001");
-    let strategy_id = StrategyId::from("STRATEGY-001");
-
-    let result = client
-        .batch_amend_orders(trader_id, strategy_id, orders)
-        .await;
+    let result = client.batch_amend_orders(orders).await;
 
     assert!(result.is_ok(), "Batch amend orders should succeed");
 
@@ -2298,15 +2297,6 @@ async fn test_batch_cancel_orders() {
     )
     .await;
 
-    let trader_id = TraderId::from("TESTER-001");
-    let strategy_id = StrategyId::from("S-001");
-
-    // Cache instruments so cancel registration can resolve instrument IDs
-    let btcusdt_linear = make_linear_pair("BTCUSDT", "BTC", "USDT");
-    let ethusdt_linear = make_linear_pair("ETHUSDT", "ETH", "USDT");
-    client.cache_instrument(InstrumentAny::CurrencyPair(btcusdt_linear));
-    client.cache_instrument(InstrumentAny::CurrencyPair(ethusdt_linear));
-
     let orders = vec![
         BybitWsCancelOrderParams {
             category: BybitProductType::Linear,
@@ -2322,9 +2312,7 @@ async fn test_batch_cancel_orders() {
         },
     ];
 
-    let result = client
-        .batch_cancel_orders(trader_id, strategy_id, orders)
-        .await;
+    let result = client.batch_cancel_orders(orders).await;
 
     assert!(result.is_ok(), "Batch cancel orders should succeed");
 
@@ -2352,11 +2340,6 @@ async fn test_batch_cancel_orders_chunking_over_20() {
     )
     .await;
 
-    let trader_id = TraderId::from("TESTER-001");
-    let strategy_id = StrategyId::from("S-001");
-    let btcusdt_linear = make_linear_pair("BTCUSDT", "BTC", "USDT");
-    client.cache_instrument(InstrumentAny::CurrencyPair(btcusdt_linear));
-
     // 25 orders forces chunking into batches of 20 + 5
     let orders: Vec<BybitWsCancelOrderParams> = (0..25)
         .map(|i| BybitWsCancelOrderParams {
@@ -2367,9 +2350,7 @@ async fn test_batch_cancel_orders_chunking_over_20() {
         })
         .collect();
 
-    let result = client
-        .batch_cancel_orders(trader_id, strategy_id, orders)
-        .await;
+    let result = client.batch_cancel_orders(orders).await;
 
     assert!(result.is_ok(), "Batch cancel with chunking should succeed");
 
@@ -2397,13 +2378,9 @@ async fn test_batch_cancel_orders_empty_list() {
     )
     .await;
 
-    let trader_id = TraderId::from("TESTER-001");
-    let strategy_id = StrategyId::from("S-001");
     let orders: Vec<BybitWsCancelOrderParams> = vec![];
 
-    let result = client
-        .batch_cancel_orders(trader_id, strategy_id, orders)
-        .await;
+    let result = client.batch_cancel_orders(orders).await;
 
     assert!(
         result.is_ok(),
@@ -2435,7 +2412,6 @@ async fn test_build_cancel_order_params_requires_order_id() {
     .await;
 
     let btcusdt_linear = make_linear_pair("BTCUSDT", "BTC", "USDT");
-    client.cache_instrument(InstrumentAny::CurrencyPair(btcusdt_linear));
 
     let result =
         client.build_cancel_order_params(BybitProductType::Linear, btcusdt_linear.id, None, None);

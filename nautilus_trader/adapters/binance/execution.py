@@ -24,6 +24,7 @@ from nautilus_trader.adapters.binance.common.constants import BINANCE_MIN_CALLBA
 from nautilus_trader.adapters.binance.common.constants import BINANCE_PRICE_MATCH_ORDER_TYPES
 from nautilus_trader.adapters.binance.common.constants import BINANCE_PRICE_MATCH_VALUES
 from nautilus_trader.adapters.binance.common.constants import BINANCE_RETRY_WARNINGS
+from nautilus_trader.adapters.binance.common.constants import BINANCE_SPOT_POST_ONLY_REJECT_MSG
 from nautilus_trader.adapters.binance.common.credentials import is_ed25519_private_key
 from nautilus_trader.adapters.binance.common.enums import BinanceAccountType
 from nautilus_trader.adapters.binance.common.enums import BinanceEnumParser
@@ -218,6 +219,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
 
         # Futures events arrive on a separate stream (different endpoint)
         stream_base_url: str | None = None
+
         if account_type.is_futures:
             stream_base_url = config.base_url_ws_stream or get_ws_base_url(
                 account_type=account_type,
@@ -235,6 +237,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
         # (Binance Futures WS API session.logon only accepts Ed25519)
         http_client_for_ws: BinanceHttpClient | None = None
         account_type_for_ws: BinanceAccountType | None = None
+
         if account_type.is_futures and not is_ed25519:
             http_client_for_ws = client
             account_type_for_ws = account_type
@@ -317,16 +320,14 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
 
     def _log_retry_error(self, message: str, exception: BaseException | None) -> None:
         error_code = get_binance_error_code(exception) if exception else None
+        is_post_only = isinstance(exception, BinanceError) and _is_post_only_rejection(exception)
 
-        match error_code:
-            case BinanceErrorCode.GTX_ORDER_REJECT if (
-                not self._log_rejected_due_post_only_as_warning
-            ):
-                self._log.info(message)
-            case code if code in BINANCE_RETRY_WARNINGS:
-                self._log.warning(message)
-            case _:
-                self._log.error(message)
+        if is_post_only and not self._log_rejected_due_post_only_as_warning:
+            self._log.info(message)
+        elif is_post_only or error_code in BINANCE_RETRY_WARNINGS:
+            self._log.warning(message)
+        else:
+            self._log.error(message)
 
     async def _connect(self) -> None:
         await self._instrument_provider.initialize()
@@ -712,6 +713,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
             return None
 
         good_till_date = nanos_to_millis(order.expire_time_ns) if order.expire_time_ns else None
+
         if self._binance_account_type.is_spot_or_margin:
             good_till_date = None
             self._log.warning("Cannot set GTD time in force with `expiry_time` for Binance Spot")
@@ -808,6 +810,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                 position_side,
                 price_match,
             )
+
             if not retry_manager.result:
                 # Determine if the rejection was specifically due to a POST-ONLY order
                 # that would have executed immediately as a taker (GTX_ORDER_REJECT -5022).
@@ -1221,6 +1224,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                 quantity=str(command.quantity) if command.quantity else str(order.quantity),
                 price=str(command.price) if command.price else str(order.price),
             )
+
             if not retry_manager.result:
                 self.generate_order_modify_rejected(
                     command.strategy_id,
@@ -1244,6 +1248,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                 client_order_id=command.client_order_id,
                 venue_order_id=command.venue_order_id,
             )
+
             if not retry_manager.result:
                 self.generate_order_cancel_rejected(
                     command.strategy_id,
@@ -1269,6 +1274,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                 self._http_account.cancel_all_open_orders,
                 symbol=instrument_id.symbol.value,
             )
+
             if not retry_manager.result:
                 if (
                     retry_manager.message is not None
@@ -1306,6 +1312,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                 self._http_account.cancel_all_open_algo_orders,  # type: ignore [attr-defined]
                 symbol=instrument_id.symbol.value,
             )
+
             if not retry_manager.result:
                 if (
                     retry_manager.message is not None
@@ -1460,6 +1467,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                     client_order_id=order.client_order_id,
                     venue_order_id=order.venue_order_id,
                 )
+
                 if not retry_manager.result:
                     self.generate_order_cancel_rejected(
                         order.strategy_id,
@@ -1479,4 +1487,24 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
 
 def _is_post_only_rejection(error: BinanceError) -> bool:
     error_code = get_binance_error_code(error)
-    return error_code == BinanceErrorCode.GTX_ORDER_REJECT
+    if error_code == BinanceErrorCode.GTX_ORDER_REJECT:
+        return True
+    if error_code == BinanceErrorCode.NEW_ORDER_REJECTED:
+        msg = _get_error_msg(error)
+        return msg == BINANCE_SPOT_POST_ONLY_REJECT_MSG
+    return False
+
+
+def _get_error_msg(error: BinanceError) -> str:
+    if isinstance(error.message, dict):
+        return error.message.get("msg", "")
+    if isinstance(error.message, str):
+        import json
+
+        try:
+            parsed = json.loads(error.message)
+            if isinstance(parsed, dict):
+                return parsed.get("msg", "")
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return ""

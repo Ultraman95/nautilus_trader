@@ -49,7 +49,18 @@ impl ClientConfig for HyperliquidExecClientConfig {
 }
 
 /// Factory for creating Hyperliquid data clients.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.hyperliquid",
+        from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.hyperliquid")
+)]
 pub struct HyperliquidDataClientFactory;
 
 impl HyperliquidDataClientFactory {
@@ -103,6 +114,17 @@ impl DataClientFactory for HyperliquidDataClientFactory {
 /// This wraps [`HyperliquidExecClientConfig`] with the additional trader and account
 /// identifiers required by the [`ExecutionClientCore`].
 #[derive(Clone, Debug)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.hyperliquid",
+        from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.hyperliquid")
+)]
 pub struct HyperliquidExecFactoryConfig {
     /// The trader ID for the execution client.
     pub trader_id: TraderId,
@@ -119,7 +141,18 @@ impl ClientConfig for HyperliquidExecFactoryConfig {
 }
 
 /// Factory for creating Hyperliquid execution clients.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.hyperliquid",
+        from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.hyperliquid")
+)]
 pub struct HyperliquidExecutionClientFactory;
 
 impl HyperliquidExecutionClientFactory {
@@ -237,7 +270,7 @@ mod tests {
         let config = HyperliquidExecFactoryConfig {
             trader_id: TraderId::from("TRADER-001"),
             account_id: AccountId::from("HYPERLIQUID-001"),
-            config: HyperliquidExecClientConfig::new("test_private_key".to_string()),
+            config: HyperliquidExecClientConfig::new(Some("test_private_key".to_string())),
         };
 
         let boxed_config: Box<dyn ClientConfig> = Box::new(config);
@@ -254,7 +287,7 @@ mod tests {
         let wrong_config = HyperliquidExecFactoryConfig {
             trader_id: TraderId::from("TRADER-001"),
             account_id: AccountId::from("HYPERLIQUID-001"),
-            config: HyperliquidExecClientConfig::new("test_private_key".to_string()),
+            config: HyperliquidExecClientConfig::new(Some("test_private_key".to_string())),
         };
 
         let cache = Rc::new(RefCell::new(Cache::default()));

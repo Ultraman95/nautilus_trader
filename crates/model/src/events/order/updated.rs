@@ -40,7 +40,11 @@ use crate::{
 #[cfg_attr(any(test, feature = "stubs"), builder(default))]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.model")
 )]
 pub struct OrderUpdated {
     /// The trader ID associated with the event.
@@ -63,6 +67,9 @@ pub struct OrderUpdated {
     pub trigger_price: Option<Price>,
     /// The order calculated protection price.
     pub protection_price: Option<Price>,
+    /// If the order quantity is denominated in the quote currency.
+    #[serde(default)]
+    pub is_quote_quantity: bool,
     /// The unique identifier for the event.
     pub event_id: UUID4,
     /// UNIX timestamp (nanoseconds) when the event occurred.
@@ -92,6 +99,7 @@ impl OrderUpdated {
         price: Option<Price>,
         trigger_price: Option<Price>,
         protection_price: Option<Price>,
+        is_quote_quantity: bool,
     ) -> Self {
         Self {
             trader_id,
@@ -108,6 +116,7 @@ impl OrderUpdated {
             price,
             trigger_price,
             protection_price,
+            is_quote_quantity,
         }
     }
 }
@@ -178,7 +187,7 @@ impl OrderEvent for OrderUpdated {
         self.event_id
     }
 
-    fn kind(&self) -> &str {
+    fn type_name(&self) -> &'static str {
         stringify!(OrderUpdated)
     }
 
@@ -239,11 +248,11 @@ impl OrderEvent for OrderUpdated {
     }
 
     fn quote_quantity(&self) -> Option<bool> {
-        None
+        Some(self.is_quote_quantity)
     }
 
     fn reconciliation(&self) -> bool {
-        false
+        self.reconciliation != 0
     }
 
     fn price(&self) -> Option<Price> {

@@ -16,6 +16,7 @@
 import asyncio
 import functools
 import os
+import traceback
 from collections.abc import Callable
 from collections.abc import Coroutine
 from inspect import iscoroutinefunction
@@ -95,6 +96,7 @@ class InteractiveBrokersClient(
         port: int = 7497,
         client_id: int = 1,
         fetch_all_open_orders: bool = False,
+        request_timeout_secs: int = 60,
     ) -> None:
         super().__init__(
             clock=clock,
@@ -110,6 +112,7 @@ class InteractiveBrokersClient(
         self._port = port
         self._client_id = client_id
         self._fetch_all_open_orders = fetch_all_open_orders
+        self._request_timeout_secs = request_timeout_secs
 
         # TWS API
         self._eclient: EClient = EClient(
@@ -196,6 +199,7 @@ class InteractiveBrokersClient(
         while not self._is_ib_connected.is_set():
             try:
                 self._connection_attempts += 1
+
                 if (
                     not self._indefinite_reconnect
                     and self._connection_attempts > self._max_connection_attempts
@@ -585,6 +589,7 @@ class InteractiveBrokersClient(
                 request.future.set_result(request.result)
             else:
                 request.cancel()
+
                 if exception:
                     request.future.set_exception(exception)
 
@@ -722,19 +727,17 @@ class InteractiveBrokersClient(
         try:
             while True:
                 handler_task = await self._msg_handler_task_queue.get()
-                await handler_task()
-                # try:
-                #     await handler_task()
-                # except Exception as e:
-                #     exc_type = type(e)
-                #     exc_traceback = e.__traceback__
-                #     stack_trace = traceback.format_exception(exc_type, e, exc_traceback)
-                #     stack_trace_str = "".join(stack_trace)
-                #     task_name = getattr(handler_task, "__name__", str(handler_task))
-                #     self._log.error(
-                #         f"Exception in message handler task '{task_name}': {e!r}\n{stack_trace_str}",
-                #     )
-                #     raise
+                try:
+                    await handler_task()
+                except Exception as e:
+                    exc_type = type(e)
+                    exc_traceback = e.__traceback__
+                    stack_trace = traceback.format_exception(exc_type, e, exc_traceback)
+                    stack_trace_str = "".join(stack_trace)
+                    task_name = getattr(handler_task, "__name__", str(handler_task))
+                    self._log.error(
+                        f"Exception in message handler task '{task_name}': {e!r}\n{stack_trace_str}",
+                    )
                 self._msg_handler_task_queue.task_done()
         except asyncio.CancelledError:
             log_msg = f"Handler task processing was cancelled. (qsize={self._msg_handler_task_queue.qsize()})."

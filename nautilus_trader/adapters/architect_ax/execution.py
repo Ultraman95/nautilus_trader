@@ -55,6 +55,7 @@ from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.enums import OrderType
+from nautilus_trader.model.enums import position_side_to_str
 from nautilus_trader.model.events import AccountState
 from nautilus_trader.model.events import OrderAccepted
 from nautilus_trader.model.events import OrderCanceled
@@ -167,6 +168,7 @@ class AxExecutionClient(LiveExecutionClient):
                 self._ws_orders_client.cache_instrument(inst)
 
             await self._ws_orders_client.connect(
+                loop_=self._loop,
                 callback=self._handle_msg,
                 bearer_token=bearer_token,
             )
@@ -320,7 +322,7 @@ class AxExecutionClient(LiveExecutionClient):
             for pyo3_report in pyo3_reports:
                 report = PositionStatusReport.from_pyo3(pyo3_report)
                 self._log.info(
-                    f"Position: {report.instrument_id} side={report.position_side} "
+                    f"Position: {report.instrument_id} side={position_side_to_str(report.position_side)} "
                     f"qty={report.quantity} avg_px={report.avg_px_open}",
                     LogColor.MAGENTA,
                 )
@@ -365,6 +367,7 @@ class AxExecutionClient(LiveExecutionClient):
             return
 
         pyo3_price = None
+
         if order.has_price:
             pyo3_price = nautilus_pyo3.Price.from_str(str(order.price))
         elif order.order_type == OrderType.MARKET:
@@ -393,6 +396,7 @@ class AxExecutionClient(LiveExecutionClient):
                 return
 
         pyo3_trigger_price = None
+
         if order.has_trigger_price:
             pyo3_trigger_price = nautilus_pyo3.Price.from_str(str(order.trigger_price))
 

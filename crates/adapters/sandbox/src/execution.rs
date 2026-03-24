@@ -24,10 +24,14 @@ use nautilus_common::{
     clients::ExecutionClient,
     clock::Clock,
     factories::OrderEventFactory,
-    messages::execution::{
-        BatchCancelOrders, CancelAllOrders, CancelOrder, GenerateFillReports,
-        GenerateOrderStatusReport, GenerateOrderStatusReports, GeneratePositionStatusReports,
-        ModifyOrder, QueryAccount, QueryOrder, SubmitOrder, SubmitOrderList,
+    live::try_get_exec_event_sender,
+    messages::{
+        ExecutionEvent,
+        execution::{
+            BatchCancelOrders, CancelAllOrders, CancelOrder, GenerateFillReports,
+            GenerateOrderStatusReport, GenerateOrderStatusReports, GeneratePositionStatusReports,
+            ModifyOrder, QueryAccount, QueryOrder, SubmitOrder, SubmitOrderList,
+        },
     },
     msgbus::{self, MStr, MessagingSwitchboard, Pattern, TypedHandler},
 };
@@ -44,6 +48,7 @@ use nautilus_model::{
     accounts::AccountAny,
     data::{Bar, OrderBookDeltas, QuoteTick, TradeTick},
     enums::OmsType,
+    events::OrderEventAny,
     identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, Venue},
     instruments::{Instrument, InstrumentAny},
     orders::{Order, OrderAny},
@@ -69,6 +74,7 @@ struct SandboxInner {
     next_engine_raw_id: u32,
     /// Current account balances.
     balances: AHashMap<String, Money>,
+    event_handler: Option<Rc<dyn Fn(OrderEventAny)>>,
 }
 
 impl SandboxInner {
@@ -96,6 +102,10 @@ impl SandboxInner {
                 engine_config,
             );
 
+            if let Some(handler) = &self.event_handler {
+                engine.get_engine_mut().set_event_handler(handler.clone());
+            }
+
             self.matching_engines.insert(instrument_id, engine);
         }
     }
@@ -108,6 +118,7 @@ impl SandboxInner {
         let instrument = self.cache.borrow().instrument(&instrument_id).cloned();
         if let Some(instrument) = instrument {
             self.ensure_matching_engine(&instrument);
+
             if let Some(engine) = self.matching_engines.get_mut(&instrument_id) {
                 engine.get_engine_mut().process_quote_tick(quote);
             }
@@ -125,6 +136,7 @@ impl SandboxInner {
         let instrument = self.cache.borrow().instrument(&instrument_id).cloned();
         if let Some(instrument) = instrument {
             self.ensure_matching_engine(&instrument);
+
             if let Some(engine) = self.matching_engines.get_mut(&instrument_id) {
                 engine.get_engine_mut().process_trade_tick(trade);
             }
@@ -142,8 +154,24 @@ impl SandboxInner {
         let instrument = self.cache.borrow().instrument(&instrument_id).cloned();
         if let Some(instrument) = instrument {
             self.ensure_matching_engine(&instrument);
+
             if let Some(engine) = self.matching_engines.get_mut(&instrument_id) {
                 engine.get_engine_mut().process_bar(bar);
+            }
+        }
+    }
+
+    fn process_order_book_deltas(&mut self, deltas: &OrderBookDeltas) {
+        let instrument_id = deltas.instrument_id;
+
+        let instrument = self.cache.borrow().instrument(&instrument_id).cloned();
+        if let Some(instrument) = instrument {
+            self.ensure_matching_engine(&instrument);
+
+            if let Some(engine) = self.matching_engines.get_mut(&instrument_id)
+                && let Err(e) = engine.get_engine_mut().process_order_book_deltas(deltas)
+            {
+                log::error!("Error processing order book deltas: {e}");
             }
         }
     }
@@ -151,6 +179,8 @@ impl SandboxInner {
 
 /// Registered message handlers for later deregistration.
 struct RegisteredHandlers {
+    deltas_pattern: MStr<Pattern>,
+    deltas_handler: TypedHandler<OrderBookDeltas>,
     quote_pattern: MStr<Pattern>,
     quote_handler: TypedHandler<QuoteTick>,
     trade_pattern: MStr<Pattern>,
@@ -216,6 +246,7 @@ impl SandboxExecutionClient {
             matching_engines: AHashMap::new(),
             next_engine_raw_id: 0,
             balances,
+            event_handler: None,
         }));
 
         let factory = OrderEventFactory::new(
@@ -248,10 +279,19 @@ impl SandboxExecutionClient {
         self.inner.borrow().matching_engines.len()
     }
 
+    fn dispatch_order_event(&self, event: OrderEventAny) {
+        if let Some(handler) = &self.inner.borrow().event_handler {
+            handler(event);
+        } else {
+            let endpoint = MessagingSwitchboard::exec_engine_process();
+            msgbus::send_order_event(endpoint, event);
+        }
+    }
+
     /// Registers message handlers for market data subscriptions.
     ///
-    /// This subscribes to quotes, trades, and bars for the configured venue,
-    /// routing all received data to the matching engines.
+    /// This subscribes to order book deltas, quotes, trades, and bars for the
+    /// configured venue, routing all received data to the matching engines.
     fn register_message_handlers(&self) {
         if self.handlers.borrow().is_some() {
             log::warn!("Sandbox message handlers already registered");
@@ -260,6 +300,18 @@ impl SandboxExecutionClient {
 
         let inner_weak = WeakCell::from(Rc::downgrade(&self.inner));
         let venue = self.config.venue;
+
+        // Order book deltas handler
+        let deltas_handler = {
+            let inner = inner_weak.clone();
+            TypedHandler::from(move |deltas: &OrderBookDeltas| {
+                if deltas.instrument_id.venue == venue
+                    && let Some(inner_rc) = inner.upgrade()
+                {
+                    inner_rc.borrow_mut().process_order_book_deltas(deltas);
+                }
+            })
+        };
 
         // Quote tick handler
         let quote_handler = {
@@ -297,17 +349,21 @@ impl SandboxExecutionClient {
             })
         };
 
-        // Subscribe patterns (bar topic is data.bars.{bar_type} so use wildcard)
+        // Subscribe patterns
+        let deltas_pattern: MStr<Pattern> = format!("data.book.deltas.{venue}.*").into();
         let quote_pattern: MStr<Pattern> = format!("data.quotes.{venue}.*").into();
         let trade_pattern: MStr<Pattern> = format!("data.trades.{venue}.*").into();
         let bar_pattern: MStr<Pattern> = "data.bars.*".into();
 
+        msgbus::subscribe_book_deltas(deltas_pattern, deltas_handler.clone(), Some(10));
         msgbus::subscribe_quotes(quote_pattern, quote_handler.clone(), Some(10));
         msgbus::subscribe_trades(trade_pattern, trade_handler.clone(), Some(10));
         msgbus::subscribe_bars(bar_pattern, bar_handler.clone(), Some(10));
 
         // Store handlers for later deregistration
         *self.handlers.borrow_mut() = Some(RegisteredHandlers {
+            deltas_pattern,
+            deltas_handler,
             quote_pattern,
             quote_handler,
             trade_pattern,
@@ -325,6 +381,7 @@ impl SandboxExecutionClient {
     /// Deregisters message handlers to stop receiving market data.
     fn deregister_message_handlers(&self) {
         if let Some(handlers) = self.handlers.borrow_mut().take() {
+            msgbus::unsubscribe_book_deltas(handlers.deltas_pattern, &handlers.deltas_handler);
             msgbus::unsubscribe_quotes(handlers.quote_pattern, &handlers.quote_handler);
             msgbus::unsubscribe_trades(handlers.trade_pattern, &handlers.trade_handler);
             msgbus::unsubscribe_bars(handlers.bar_pattern, &handlers.bar_handler);
@@ -533,6 +590,19 @@ impl ExecutionClient for SandboxExecutionClient {
             return Ok(());
         }
 
+        if let Some(sender) = try_get_exec_event_sender() {
+            let handler: Rc<dyn Fn(OrderEventAny)> = Rc::new(move |event: OrderEventAny| {
+                if let Err(e) = sender.send(ExecutionEvent::Order(event)) {
+                    log::warn!("Failed to send order event: {e}");
+                }
+            });
+            let mut inner = self.inner.borrow_mut();
+            inner.event_handler = Some(handler.clone());
+            for engine in inner.matching_engines.values_mut() {
+                engine.get_engine_mut().set_event_handler(handler.clone());
+            }
+        }
+
         // Register message handlers to receive market data
         self.register_message_handlers();
 
@@ -605,8 +675,7 @@ impl ExecutionClient for SandboxExecutionClient {
 
         let ts_init = self.clock.borrow().timestamp_ns();
         let event = self.factory.generate_order_submitted(&order, ts_init);
-        let endpoint = MessagingSwitchboard::exec_engine_process();
-        msgbus::send_order_event(endpoint, event);
+        self.dispatch_order_event(event);
 
         let instrument_id = order.instrument_id();
         let instrument = self
@@ -621,10 +690,12 @@ impl ExecutionClient for SandboxExecutionClient {
 
         // Update matching engine with latest market data from cache
         let cache = self.cache.borrow();
+
         if let Some(engine) = inner.matching_engines.get_mut(&instrument_id) {
             if let Some(quote) = cache.quote(&instrument_id) {
                 engine.get_engine_mut().process_quote_tick(quote);
             }
+
             if self.config.trade_execution
                 && let Some(trade) = cache.trade(&instrument_id)
             {
@@ -634,6 +705,7 @@ impl ExecutionClient for SandboxExecutionClient {
         drop(cache);
 
         let account_id = self.core.borrow().account_id;
+
         if let Some(engine) = inner.matching_engines.get_mut(&instrument_id) {
             engine
                 .get_engine_mut()
@@ -645,7 +717,6 @@ impl ExecutionClient for SandboxExecutionClient {
 
     fn submit_order_list(&self, cmd: &SubmitOrderList) -> anyhow::Result<()> {
         let ts_init = self.clock.borrow().timestamp_ns();
-        let endpoint = MessagingSwitchboard::exec_engine_process();
 
         let orders: Vec<OrderAny> = self
             .cache
@@ -659,7 +730,7 @@ impl ExecutionClient for SandboxExecutionClient {
             }
 
             let event = self.factory.generate_order_submitted(order, ts_init);
-            msgbus::send_order_event(endpoint, event);
+            self.dispatch_order_event(event);
         }
 
         let account_id = self.core.borrow().account_id;
@@ -677,10 +748,12 @@ impl ExecutionClient for SandboxExecutionClient {
 
                 // Update with latest market data
                 let cache = self.cache.borrow();
+
                 if let Some(engine) = inner.matching_engines.get_mut(&instrument_id) {
                     if let Some(quote) = cache.quote(&instrument_id) {
                         engine.get_engine_mut().process_quote_tick(quote);
                     }
+
                     if self.config.trade_execution
                         && let Some(trade) = cache.trade(&instrument_id)
                     {

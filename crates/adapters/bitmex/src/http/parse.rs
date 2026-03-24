@@ -18,7 +18,7 @@
 use std::str::FromStr;
 
 use dashmap::DashMap;
-use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime, uuid::UUID4};
+use nautilus_core::{UnixNanos, uuid::UUID4};
 use nautilus_model::{
     data::{Bar, BarType, TradeTick},
     enums::{ContingencyType, OrderSide, OrderStatus, OrderType, TimeInForce, TrailingOffsetType},
@@ -222,6 +222,7 @@ pub fn parse_index_instrument(
         None, // margin_maint
         None, // maker_fee
         None, // taker_fee
+        None, // info
         ts_init,
         ts_init,
     )))
@@ -313,6 +314,7 @@ pub fn parse_spot_instrument(
         Some(margin_maint),
         Some(maker_fee),
         Some(taker_fee),
+        None, // info
         ts_event,
         ts_init,
     );
@@ -410,6 +412,7 @@ pub fn parse_perpetual_instrument(
         Some(margin_maint),
         Some(maker_fee),
         Some(taker_fee),
+        None, // info
         ts_event,
         ts_init,
     );
@@ -514,6 +517,7 @@ pub fn parse_futures_instrument(
         Some(margin_maint),
         Some(maker_fee),
         Some(taker_fee),
+        None, // info
         ts_event,
         ts_init,
     );
@@ -528,7 +532,7 @@ pub fn parse_futures_instrument(
 /// Currently this function does not return errors as all fields are handled gracefully,
 /// but returns `Result` for future error handling compatibility.
 pub fn parse_trade(
-    trade: BitmexTrade,
+    trade: &BitmexTrade,
     instrument: &InstrumentAny,
     ts_init: UnixNanos,
 ) -> anyhow::Result<TradeTick> {
@@ -559,13 +563,8 @@ pub fn parse_trade(
 /// # Errors
 ///
 /// Returns an error when required OHLC fields are missing from the payload.
-///
-/// # Panics
-///
-/// Panics if the bar type or price precision cannot be determined for the instrument, which
-/// indicates the instrument cache was not hydrated prior to parsing.
 pub fn parse_trade_bin(
-    bin: BitmexTradeBin,
+    bin: &BitmexTradeBin,
     instrument: &InstrumentAny,
     bar_type: &BarType,
     ts_init: UnixNanos,
@@ -619,10 +618,6 @@ pub fn parse_trade_bin(
 /// - Order is missing `ord_status` and status cannot be inferred from quantity fields.
 /// - Order is missing `order_qty` and cannot be reconstructed from `cum_qty` + `leaves_qty`.
 ///
-/// # Panics
-///
-/// Panics if:
-/// - Unsupported `ExecInstruction` type is encountered (other than `ParticipateDoNotInitiate` or `ReduceOnly`)
 pub fn parse_order_status_report(
     order: &BitmexOrder,
     instrument: &InstrumentAny,
@@ -779,14 +774,8 @@ pub fn parse_order_status_report(
         );
     };
     let report_id = UUID4::new();
-    let ts_accepted = order.transact_time.map_or_else(
-        || get_atomic_clock_realtime().get_time_ns(),
-        UnixNanos::from,
-    );
-    let ts_last = order.timestamp.map_or_else(
-        || get_atomic_clock_realtime().get_time_ns(),
-        UnixNanos::from,
-    );
+    let ts_accepted = order.transact_time.map_or(ts_init, UnixNanos::from);
+    let ts_last = order.timestamp.map_or(ts_init, UnixNanos::from);
 
     let mut report = OrderStatusReport::new(
         account_id,
@@ -927,16 +916,11 @@ pub fn parse_order_status_report(
 ///
 /// Parse a BitMEX execution into a Nautilus `FillReport` using instrument scaling.
 ///
-/// # Panics
-///
-/// Panics if:
-/// - Execution is missing required fields: `symbol`, `order_id`, `trd_match_id`, `last_qty`, `last_px`, or `transact_time`
-///
 /// # Errors
 ///
 /// Returns an error when the execution does not represent a trade or lacks required identifiers.
 pub fn parse_fill_report(
-    exec: BitmexExecution,
+    exec: &BitmexExecution,
     instrument: &InstrumentAny,
     ts_init: UnixNanos,
 ) -> anyhow::Result<FillReport> {
@@ -977,10 +961,7 @@ pub fn parse_fill_report(
     let liquidity_side = parse_liquidity_side(&exec.last_liquidity_ind);
     let client_order_id = exec.cl_ord_id.map(ClientOrderId::new);
     let venue_position_id = None; // Not applicable on BitMEX
-    let ts_event = exec.transact_time.map_or_else(
-        || get_atomic_clock_realtime().get_time_ns(),
-        UnixNanos::from,
-    );
+    let ts_event = exec.transact_time.map_or(ts_init, UnixNanos::from);
 
     Ok(FillReport::new(
         account_id,
@@ -1007,7 +988,7 @@ pub fn parse_fill_report(
 /// Currently this function does not return errors as all fields are handled gracefully,
 /// but returns `Result` for future error handling compatibility.
 pub fn parse_position_report(
-    position: BitmexPosition,
+    position: &BitmexPosition,
     instrument: &InstrumentAny,
     ts_init: UnixNanos,
 ) -> anyhow::Result<PositionStatusReport> {
@@ -1236,7 +1217,7 @@ mod tests {
         let spec = BarSpecification::new(1, BarAggregation::Minute, PriceType::Last);
         let bar_type = BarType::new(instrument_any.id(), spec, AggregationSource::External);
 
-        let bar = parse_trade_bin(bins[0].clone(), &instrument_any, &bar_type, ts_init).unwrap();
+        let bar = parse_trade_bin(&bins[0], &instrument_any, &bar_type, ts_init).unwrap();
 
         let precision = instrument_any.price_precision();
         let expected_open =
@@ -1283,7 +1264,7 @@ mod tests {
             foreign_notional: None,
         };
 
-        let bar = parse_trade_bin(bin, &instrument_any, &bar_type, ts_init).unwrap();
+        let bar = parse_trade_bin(&bin, &instrument_any, &bar_type, ts_init).unwrap();
 
         let precision = instrument_any.price_precision();
         let expected_high =
@@ -1888,7 +1869,7 @@ mod tests {
             parse_perpetual_instrument(&create_test_perpetual_instrument(), UnixNanos::default())
                 .unwrap();
 
-        let report = parse_fill_report(exec, &instrument, UnixNanos::from(1)).unwrap();
+        let report = parse_fill_report(&exec, &instrument, UnixNanos::from(1)).unwrap();
 
         assert_eq!(report.account_id.to_string(), "BITMEX-654321");
         assert_eq!(report.instrument_id.to_string(), "XBTUSD.BITMEX");
@@ -1968,7 +1949,7 @@ mod tests {
         instrument_def.settl_currency = Some(Ustr::from("USDt"));
         let instrument = parse_perpetual_instrument(&instrument_def, UnixNanos::default()).unwrap();
 
-        let report = parse_fill_report(exec, &instrument, UnixNanos::from(1)).unwrap();
+        let report = parse_fill_report(&exec, &instrument, UnixNanos::from(1)).unwrap();
 
         assert_eq!(report.account_id.to_string(), "BITMEX-111111");
         assert_eq!(report.instrument_id.to_string(), "ETHUSD.BITMEX");
@@ -2081,7 +2062,7 @@ mod tests {
             parse_perpetual_instrument(&create_test_perpetual_instrument(), UnixNanos::default())
                 .unwrap();
 
-        let report = parse_position_report(position, &instrument, UnixNanos::from(1)).unwrap();
+        let report = parse_position_report(&position, &instrument, UnixNanos::from(1)).unwrap();
 
         assert_eq!(report.account_id.to_string(), "BITMEX-789012");
         assert_eq!(report.instrument_id.to_string(), "XBTUSD.BITMEX");
@@ -2191,7 +2172,7 @@ mod tests {
         instrument_def.settl_currency = Some(Ustr::from("USD"));
         let instrument = parse_futures_instrument(&instrument_def, UnixNanos::default()).unwrap();
 
-        let report = parse_position_report(position, &instrument, UnixNanos::from(1)).unwrap();
+        let report = parse_position_report(&position, &instrument, UnixNanos::from(1)).unwrap();
 
         assert_eq!(report.position_side.as_position_side(), PositionSide::Short);
         assert_eq!(report.quantity.as_f64(), 500.0); // Should be absolute value
@@ -2298,7 +2279,7 @@ mod tests {
         instrument_def.quote_currency = Ustr::from("USD");
         let instrument = parse_spot_instrument(&instrument_def, UnixNanos::default()).unwrap();
 
-        let report = parse_position_report(position, &instrument, UnixNanos::from(1)).unwrap();
+        let report = parse_position_report(&position, &instrument, UnixNanos::from(1)).unwrap();
 
         assert_eq!(report.position_side.as_position_side(), PositionSide::Flat);
         assert_eq!(report.quantity.as_f64(), 0.0);
@@ -2405,7 +2386,7 @@ mod tests {
         instrument_def.quote_currency = Ustr::from("USD");
         let instrument = parse_spot_instrument(&instrument_def, UnixNanos::default()).unwrap();
 
-        let report = parse_position_report(position, &instrument, UnixNanos::from(1)).unwrap();
+        let report = parse_position_report(&position, &instrument, UnixNanos::from(1)).unwrap();
 
         assert_eq!(report.position_side.as_position_side(), PositionSide::Long);
         assert!((report.quantity.as_f64() - 0.1).abs() < 1e-9);

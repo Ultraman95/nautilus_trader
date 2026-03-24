@@ -40,7 +40,7 @@ use nautilus_kraken::{
         KrakenSendStatus,
     },
     http::{
-        KrakenFuturesRawHttpClient, KrakenSpotAddOrderParamsBuilder,
+        KrakenFuturesHttpClient, KrakenFuturesRawHttpClient, KrakenSpotAddOrderParamsBuilder,
         KrakenSpotCancelOrderParamsBuilder, KrakenSpotHttpClient, KrakenSpotRawHttpClient,
     },
 };
@@ -121,6 +121,7 @@ fn create_test_futures_instrument() -> InstrumentAny {
         None, // margin_maint
         None, // maker_fee
         None, // taker_fee
+        None,
         0.into(),
         0.into(),
     ))
@@ -133,9 +134,9 @@ fn manifest_path() -> PathBuf {
 fn load_test_data(filename: &str) -> Value {
     let path = manifest_path().join("test_data").join(filename);
     let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("Failed to load test data from {path:?}: {e}"));
+        .unwrap_or_else(|e| panic!("Failed to load test data from {}: {e}", path.display()));
     serde_json::from_str(&content)
-        .unwrap_or_else(|e| panic!("Failed to parse test data from {path:?}: {e}"))
+        .unwrap_or_else(|e| panic!("Failed to parse test data from {}: {e}", path.display()))
 }
 
 fn has_auth_headers(headers: &HeaderMap) -> bool {
@@ -943,7 +944,7 @@ async fn test_spot_domain_request_trades() {
 
     // First load instruments to populate cache
     let instruments = client.request_instruments(None).await.unwrap();
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
 
     // Create a valid instrument ID from cached instruments (normalized to BTC)
     let instrument_id = InstrumentId::from("BTC/USDT.KRAKEN");
@@ -984,7 +985,7 @@ async fn test_spot_domain_request_bars() {
 
     // First load instruments to populate cache
     let instruments = client.request_instruments(None).await.unwrap();
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
 
     // Create a BarType for 1-minute bars (normalized to BTC)
     let bar_type = BarType::from("BTC/USDT.KRAKEN-1-MINUTE-LAST-INTERNAL");
@@ -1767,7 +1768,7 @@ async fn test_spot_raw_rate_limit_error() {
     let mut last_error = None;
     for _ in 0..10 {
         match client.get_open_orders(None, None).await {
-            Ok(_) => continue,
+            Ok(_) => {}
             Err(e) => {
                 last_error = Some(e);
                 break;
@@ -1820,4 +1821,84 @@ async fn test_spot_raw_api_error_response() {
         error.to_string().contains("credentials") || error.to_string().contains("Missing"),
         "Expected credentials error, was: {error}"
     );
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_futures_domain_request_trades() {
+    let state = Arc::new(TestServerState::default());
+    let app = create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    wait_for_server(addr, "/0/public/Time").await;
+
+    let client = KrakenFuturesHttpClient::new(
+        KrakenEnvironment::Mainnet,
+        Some(base_url),
+        Some(10),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let instruments = client.request_instruments().await.unwrap();
+    client.cache_instruments(&instruments);
+
+    // PF_ETHUSD is in mock instruments; trades may be partially parsed
+    // due to mock execution data having BTC-level prices
+    let instrument_id = InstrumentId::from("PF_ETHUSD.KRAKEN");
+
+    let result = client.request_trades(instrument_id, None, None, None).await;
+    assert!(
+        result.is_ok(),
+        "Failed to request futures trades: {result:?}"
+    );
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_futures_domain_request_bars() {
+    let state = Arc::new(TestServerState::default());
+    let app = create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    wait_for_server(addr, "/0/public/Time").await;
+
+    let client = KrakenFuturesHttpClient::new(
+        KrakenEnvironment::Mainnet,
+        Some(base_url),
+        Some(10),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let instruments = client.request_instruments().await.unwrap();
+    client.cache_instruments(&instruments);
+
+    let bar_type = BarType::from("PI_XBTUSD.KRAKEN-1-HOUR-LAST-INTERNAL");
+
+    let result = client.request_bars(bar_type, None, None, None).await;
+    assert!(result.is_ok(), "Failed to request futures bars: {result:?}");
+
+    let bars = result.unwrap();
+    assert!(!bars.is_empty());
 }

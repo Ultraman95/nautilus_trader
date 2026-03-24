@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         DeribitWebSocketClient::new_public(is_testnet)?
     };
 
-    ws_client.cache_instruments(instruments);
+    ws_client.cache_instruments(&instruments);
     log::info!("Connecting to Deribit WebSocket...");
     ws_client.connect().await?;
     log::info!("Connected to Deribit WebSocket");
@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sigint = signal::ctrl_c();
     pin!(sigint);
 
-    let stream = ws_client.stream();
+    let stream = ws_client.stream()?;
     tokio::pin!(stream);
 
     log::info!("Listening for market data... Press Ctrl+C to exit");

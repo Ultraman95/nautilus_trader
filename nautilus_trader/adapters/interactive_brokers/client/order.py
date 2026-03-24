@@ -148,7 +148,10 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
 
             request.handle()
 
-        all_orders: list[IBOrder] | None = await self._await_request(request, 30)
+        all_orders: list[IBOrder] | None = await self._await_request(
+            request,
+            self._request_timeout_secs,
+        )
 
         if all_orders:
             orders: list[IBOrder] = [order for order in all_orders if order.account == account_id]
@@ -206,7 +209,10 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
             request.handle()
 
         # Wait for execution details to be collected
-        execution_details: list[dict] | None = await self._await_request(request, 30)
+        execution_details: list[dict] | None = await self._await_request(
+            request,
+            self._request_timeout_secs,
+        )
 
         if execution_details:
             # Filter by account if needed (in case filter didn't work perfectly)
@@ -347,6 +353,7 @@ class InteractiveBrokersClientOrderMixin(BaseMixin):
                     avg_fill_price=avg_fill_price,
                     filled=filled,
                     remaining=remaining,
+                    why_held=why_held,
                 )
 
     async def process_exec_details(

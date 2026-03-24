@@ -17,15 +17,12 @@
 
 use std::str::FromStr;
 
+use anyhow::Context;
 pub use nautilus_core::serialization::{
     deserialize_empty_string_as_none, deserialize_empty_ustr_as_none,
     deserialize_optional_string_to_u64, deserialize_string_to_u64,
 };
-use nautilus_core::{
-    UUID4,
-    datetime::{NANOSECONDS_IN_MILLISECOND, millis_to_nanos_unchecked},
-    nanos::UnixNanos,
-};
+use nautilus_core::{UUID4, datetime::NANOSECONDS_IN_MILLISECOND, nanos::UnixNanos};
 use nautilus_model::{
     data::{
         Bar, BarSpecification, BarType, Data, FundingRateUpdate, IndexPriceUpdate, MarkPriceUpdate,
@@ -41,8 +38,8 @@ use nautilus_model::{
         },
     },
     enums::{
-        AccountType, AggregationSource, AggressorSide, LiquiditySide, OptionKind, OrderSide,
-        OrderStatus, OrderType, PositionSide, TimeInForce,
+        AccountType, AggregationSource, AggressorSide, LiquiditySide, MarketStatusAction,
+        OptionKind, OrderSide, OrderStatus, OrderType, PositionSide, TimeInForce,
     },
     events::AccountState,
     identifiers::{
@@ -52,7 +49,7 @@ use nautilus_model::{
     reports::{FillReport, OrderStatusReport, PositionStatusReport},
     types::{AccountBalance, Currency, MarginBalance, Money, Price, Quantity},
 };
-use rust_decimal::{Decimal, prelude::ToPrimitive};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 use ustr::Ustr;
 
@@ -61,14 +58,14 @@ use crate::{
     common::{
         consts::OKX_VENUE,
         enums::{
-            OKXExecType, OKXInstrumentType, OKXOrderStatus, OKXOrderType, OKXPositionSide, OKXSide,
-            OKXTargetCurrency, OKXVipLevel,
+            OKXExecType, OKXInstrumentStatus, OKXInstrumentType, OKXOrderStatus, OKXOrderType,
+            OKXPositionSide, OKXSide, OKXTargetCurrency, OKXVipLevel,
         },
         models::OKXInstrument,
     },
     http::models::{
-        OKXAccount, OKXBalanceDetail, OKXCandlestick, OKXIndexTicker, OKXMarkPrice,
-        OKXOrderHistory, OKXPosition, OKXTrade, OKXTransactionDetail,
+        OKXAccount, OKXBalanceDetail, OKXCandlestick, OKXFundingRateHistory, OKXIndexTicker,
+        OKXMarkPrice, OKXOrderHistory, OKXPosition, OKXTrade, OKXTransactionDetail,
     },
     websocket::{enums::OKXWsChannel, messages::OKXFundingRateMsg},
 };
@@ -223,6 +220,30 @@ pub fn parse_base_quote_from_symbol(symbol: &str) -> anyhow::Result<(&str, &str)
     Ok((base, quote))
 }
 
+/// Extracts the instrument family from an OKX symbol string.
+///
+/// All OKX derivative symbols encode the family as the first two segments:
+/// `BTC-USD-250328-92000-C` -> `BTC-USD`, `BTC-USDT-SWAP` -> `BTC-USDT`.
+///
+/// # Errors
+///
+/// Returns an error if the symbol does not contain at least two dash-separated parts.
+pub fn extract_inst_family(symbol: &str) -> anyhow::Result<Ustr> {
+    let (base, quote) = parse_base_quote_from_symbol(symbol)?;
+    Ok(Ustr::from(&format!("{base}-{quote}")))
+}
+
+/// Maps an [`OKXInstrumentStatus`] to a Nautilus [`MarketStatusAction`].
+#[must_use]
+pub fn okx_status_to_market_action(status: OKXInstrumentStatus) -> MarketStatusAction {
+    match status {
+        OKXInstrumentStatus::Live => MarketStatusAction::Trading,
+        OKXInstrumentStatus::Suspend => MarketStatusAction::Suspend,
+        OKXInstrumentStatus::Preopen => MarketStatusAction::PreOpen,
+        OKXInstrumentStatus::Test => MarketStatusAction::NotAvailableForTrading,
+    }
+}
+
 /// Parses a Nautilus instrument ID from the given OKX `symbol` value.
 #[must_use]
 pub fn parse_instrument_id(symbol: Ustr) -> InstrumentId {
@@ -257,6 +278,10 @@ pub fn parse_rfc3339_timestamp(timestamp: &str) -> anyhow::Result<UnixNanos> {
     let nanos = dt.timestamp_nanos_opt().ok_or_else(|| {
         anyhow::anyhow!("Failed to extract nanoseconds from timestamp: {timestamp}")
     })?;
+
+    if nanos < 0 {
+        anyhow::bail!("Negative nanosecond timestamp from: {timestamp}");
+    }
     Ok(UnixNanos::from(nanos as u64))
 }
 
@@ -396,8 +421,8 @@ pub fn parse_index_price_update(
 ///
 /// # Errors
 ///
-/// Returns an error if the `funding_rate` or `next_funding_rate` fields fail
-/// to parse into Decimal values.
+/// Returns an error if the `funding_rate` field fails
+/// to parse into a Decimal value or `next_funding_time` fails to parse into a positive, in bounds interval.
 pub fn parse_funding_rate_msg(
     msg: &OKXFundingRateMsg,
     instrument_id: InstrumentId,
@@ -409,15 +434,53 @@ pub fn parse_funding_rate_msg(
         .parse::<Decimal>()
         .map_err(|e| anyhow::anyhow!("Invalid funding_rate value: {e}"))?;
 
-    let funding_time = Some(parse_millisecond_timestamp(msg.funding_time));
+    let funding_time = parse_millisecond_timestamp(msg.funding_time);
+    let next_funding_time = parse_millisecond_timestamp(msg.next_funding_time);
+    let funding_interval_nanos =
+        next_funding_time
+            .duration_since(&funding_time)
+            .ok_or(anyhow::anyhow!(
+                "Invalid funding_interval, cannot be negative"
+            ))?;
+    let funding_interval = u16::try_from(funding_interval_nanos / 60_000_000_000)
+        .context("funding_interval out of bounds")?;
     let ts_event = parse_millisecond_timestamp(msg.ts);
 
     Ok(FundingRateUpdate::new(
         instrument_id,
         funding_rate,
-        funding_time,
+        Some(funding_interval),
+        Some(funding_time),
         ts_event,
         ts_init,
+    ))
+}
+
+/// Parses a [`OKXFundingRateHistory`] into a [`FundingRateUpdate`].
+///
+/// # Errors
+///
+/// Returns an error if the `funding_rate` field fails
+/// to parse into a Decimal value or `interval_millis` fails to parse into a positive, in bounds interval.
+pub fn parse_funding_rate(
+    raw: &OKXFundingRateHistory,
+    instrument_id: InstrumentId,
+    interval_millis: Option<u64>,
+) -> anyhow::Result<FundingRateUpdate> {
+    let funding_rate =
+        Decimal::from_str(&raw.funding_rate).context("invalid funding_rate value")?;
+    let ts_event = UnixNanos::from(raw.funding_time * NANOSECONDS_IN_MILLISECOND);
+    let interval = interval_millis
+        .map(|ms| u16::try_from(ms / 60_000).context("interval milliseconds out of bounds"))
+        .transpose()?;
+
+    Ok(FundingRateUpdate::new(
+        instrument_id,
+        funding_rate,
+        interval,
+        None,
+        ts_event,
+        ts_event,
     ))
 }
 
@@ -643,6 +706,32 @@ pub fn parse_order_status_report(
         }
     }
 
+    if let Some(attach_algo_cl_ord_id) = order
+        .attach_algo_cl_ord_id
+        .as_ref()
+        .filter(|value| !value.as_str().is_empty())
+    {
+        let attach_client_id = ClientOrderId::new(attach_algo_cl_ord_id.as_str());
+        match &client_order_id {
+            Some(existing) if existing == &attach_client_id => {}
+            _ if linked_ids.contains(&attach_client_id) => {}
+            _ => linked_ids.push(attach_client_id),
+        }
+    }
+
+    for attach_algo in &order.attach_algo_ords {
+        if attach_algo.attach_algo_cl_ord_id.is_empty() {
+            continue;
+        }
+
+        let attach_client_id = ClientOrderId::new(attach_algo.attach_algo_cl_ord_id.as_str());
+        match &client_order_id {
+            Some(existing) if existing == &attach_client_id => {}
+            _ if linked_ids.contains(&attach_client_id) => {}
+            _ => linked_ids.push(attach_client_id),
+        }
+    }
+
     let venue_order_id = if order.ord_id.is_empty() {
         if let Some(algo_id) = order
             .algo_id
@@ -691,7 +780,7 @@ pub fn parse_order_status_report(
     if !order.avg_px.is_empty()
         && let Ok(decimal) = Decimal::from_str(&order.avg_px)
     {
-        report = report.with_avg_px(decimal.to_f64().unwrap_or(0.0))?;
+        report.avg_px = Some(decimal);
     }
 
     if order.ord_type == OKXOrderType::PostOnly {
@@ -806,7 +895,7 @@ pub fn parse_spot_margin_position_from_balance(
 /// Returns an error if any numeric fields cannot be parsed into their target types.
 #[allow(clippy::too_many_lines)]
 pub fn parse_position_status_report(
-    position: OKXPosition,
+    position: &OKXPosition,
     account_id: AccountId,
     instrument_id: InstrumentId,
     size_precision: u8,
@@ -855,7 +944,7 @@ pub fn parse_position_status_report(
                 );
             }
 
-            let quantity_dec = pos_dec.abs() / avg_px_dec;
+            let quantity_dec = (pos_dec.abs() / avg_px_dec).round_dp(size_precision as u32);
             (PositionSide::Short, quantity_dec)
         } else {
             anyhow::bail!(
@@ -942,7 +1031,7 @@ pub fn parse_position_status_report(
 ///
 /// Returns an error if the OKX transaction detail cannot be parsed.
 pub fn parse_fill_report(
-    detail: OKXTransactionDetail,
+    detail: &OKXTransactionDetail,
     account_id: AccountId,
     instrument_id: InstrumentId,
     price_precision: u8,
@@ -1354,17 +1443,35 @@ fn parse_common_instrument_data(
         anyhow::bail!("`lot_sz` is empty for {}", definition.inst_id);
     }
 
-    let size_increment = Quantity::from(&definition.lot_sz);
-    let lot_size = Some(Quantity::from(&definition.lot_sz));
+    let size_increment = Quantity::from_str(&definition.lot_sz).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse `lot_sz` '{}' for {}: {e}",
+            definition.lot_sz,
+            definition.inst_id,
+        )
+    })?;
+    let lot_size = Some(size_increment);
     let max_quantity = if definition.max_mkt_sz.is_empty() {
         None
     } else {
-        Some(Quantity::from(&definition.max_mkt_sz))
+        Some(Quantity::from_str(&definition.max_mkt_sz).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse `max_mkt_sz` '{}' for {}: {e}",
+                definition.max_mkt_sz,
+                definition.inst_id,
+            )
+        })?)
     };
     let min_quantity = if definition.min_sz.is_empty() {
         None
     } else {
-        Some(Quantity::from(&definition.min_sz))
+        Some(Quantity::from_str(&definition.min_sz).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse `min_sz` '{}' for {}: {e}",
+                definition.min_sz,
+                definition.inst_id,
+            )
+        })?)
     };
     let max_notional: Option<Money> = None;
     let min_notional: Option<Money> = None;
@@ -1389,7 +1496,7 @@ fn parse_common_instrument_data(
 /// Generic instrument parsing function that delegates to type-specific parsers.
 fn parse_instrument_with_parser<P: InstrumentParser>(
     definition: &OKXInstrument,
-    parser: P,
+    parser: &P,
     margin_init: Option<Decimal>,
     margin_maint: Option<Decimal>,
     maker_fee: Option<Decimal>,
@@ -1451,6 +1558,7 @@ impl InstrumentParser for SpotInstrumentParser {
             margin_fees.margin_maint,
             margin_fees.maker_fee,
             margin_fees.taker_fee,
+            None,
             ts_init,
             ts_init,
         );
@@ -1474,7 +1582,7 @@ pub fn parse_spot_instrument(
 ) -> anyhow::Result<InstrumentAny> {
     parse_instrument_with_parser(
         definition,
-        SpotInstrumentParser,
+        &SpotInstrumentParser,
         margin_init,
         margin_maint,
         maker_fee,
@@ -1552,11 +1660,41 @@ pub fn parse_swap_instrument(
             definition.inst_id
         )
     })?;
-    let size_increment = Quantity::from(&definition.lot_sz);
+
+    if definition.lot_sz.is_empty() {
+        anyhow::bail!("`lot_sz` is empty for {}", definition.inst_id);
+    }
+    let size_increment = Quantity::from_str(&definition.lot_sz).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse `lot_sz` '{}' for {}: {e}",
+            definition.lot_sz,
+            definition.inst_id
+        )
+    })?;
     let multiplier = parse_multiplier_product(definition)?;
-    let lot_size = Some(Quantity::from(&definition.lot_sz));
-    let max_quantity = Some(Quantity::from(&definition.max_mkt_sz));
-    let min_quantity = Some(Quantity::from(&definition.min_sz));
+    let lot_size = Some(size_increment);
+    let max_quantity = if definition.max_mkt_sz.is_empty() {
+        None
+    } else {
+        Some(Quantity::from_str(&definition.max_mkt_sz).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse `max_mkt_sz` '{}' for {}: {e}",
+                definition.max_mkt_sz,
+                definition.inst_id
+            )
+        })?)
+    };
+    let min_quantity = if definition.min_sz.is_empty() {
+        None
+    } else {
+        Some(Quantity::from_str(&definition.min_sz).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse `min_sz` '{}' for {}: {e}",
+                definition.min_sz,
+                definition.inst_id
+            )
+        })?)
+    };
     let max_notional: Option<Money> = None;
     let min_notional: Option<Money> = None;
     let max_price = None; // TBD
@@ -1585,6 +1723,7 @@ pub fn parse_swap_instrument(
         margin_maint,
         maker_fee,
         taker_fee,
+        None,
         ts_init, // No ts_event for response
         ts_init,
     );
@@ -1640,19 +1779,55 @@ pub fn parse_futures_instrument(
     let expiry_time = definition
         .exp_time
         .ok_or_else(|| anyhow::anyhow!("`exp_time` is required for {}", definition.inst_id))?;
-    let activation_ns = UnixNanos::from(millis_to_nanos_unchecked(listing_time as f64));
-    let expiration_ns = UnixNanos::from(millis_to_nanos_unchecked(expiry_time as f64));
+    let activation_ns = parse_millisecond_timestamp(listing_time);
+    let expiration_ns = parse_millisecond_timestamp(expiry_time);
 
     if definition.tick_sz.is_empty() {
         anyhow::bail!("`tick_sz` is empty for {}", definition.inst_id);
     }
 
-    let price_increment = Price::from(definition.tick_sz.clone());
-    let size_increment = Quantity::from(&definition.lot_sz);
+    let price_increment = Price::from_str(&definition.tick_sz).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse `tick_sz` '{}' for {}: {e}",
+            definition.tick_sz,
+            definition.inst_id
+        )
+    })?;
+
+    if definition.lot_sz.is_empty() {
+        anyhow::bail!("`lot_sz` is empty for {}", definition.inst_id);
+    }
+    let size_increment = Quantity::from_str(&definition.lot_sz).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse `lot_sz` '{}' for {}: {e}",
+            definition.lot_sz,
+            definition.inst_id
+        )
+    })?;
     let multiplier = parse_multiplier_product(definition)?;
-    let lot_size = Some(Quantity::from(&definition.lot_sz));
-    let max_quantity = Some(Quantity::from(&definition.max_mkt_sz));
-    let min_quantity = Some(Quantity::from(&definition.min_sz));
+    let lot_size = Some(size_increment);
+    let max_quantity = if definition.max_mkt_sz.is_empty() {
+        None
+    } else {
+        Some(Quantity::from_str(&definition.max_mkt_sz).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse `max_mkt_sz` '{}' for {}: {e}",
+                definition.max_mkt_sz,
+                definition.inst_id
+            )
+        })?)
+    };
+    let min_quantity = if definition.min_sz.is_empty() {
+        None
+    } else {
+        Some(Quantity::from_str(&definition.min_sz).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse `min_sz` '{}' for {}: {e}",
+                definition.min_sz,
+                definition.inst_id
+            )
+        })?)
+    };
     let max_notional: Option<Money> = None;
     let min_notional: Option<Money> = None;
     let max_price = None; // TBD
@@ -1683,6 +1858,7 @@ pub fn parse_futures_instrument(
         margin_maint,
         maker_fee,
         taker_fee,
+        None,
         ts_init, // No ts_event for response
         ts_init,
     );
@@ -1718,7 +1894,13 @@ pub fn parse_option_instrument(
     let raw_symbol = Symbol::from_ustr_unchecked(definition.inst_id);
     let underlying = Currency::get_or_create_crypto_with_context(underlying_str, Some(&context));
     let option_kind: OptionKind = definition.opt_type.into();
-    let strike_price = Price::from(&definition.stk);
+    let strike_price = Price::from_str(&definition.stk).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse `stk` '{}' for {}: {e}",
+            definition.stk,
+            definition.inst_id
+        )
+    })?;
     let quote_currency = Currency::get_or_create_crypto_with_context(quote_ccy_str, Some(&context));
     let settlement_currency =
         Currency::get_or_create_crypto_with_context(definition.settle_ccy, Some(&context));
@@ -1735,19 +1917,55 @@ pub fn parse_option_instrument(
     let expiry_time = definition
         .exp_time
         .ok_or_else(|| anyhow::anyhow!("`exp_time` is required for {}", definition.inst_id))?;
-    let activation_ns = UnixNanos::from(millis_to_nanos_unchecked(listing_time as f64));
-    let expiration_ns = UnixNanos::from(millis_to_nanos_unchecked(expiry_time as f64));
+    let activation_ns = parse_millisecond_timestamp(listing_time);
+    let expiration_ns = parse_millisecond_timestamp(expiry_time);
 
     if definition.tick_sz.is_empty() {
         anyhow::bail!("`tick_sz` is empty for {}", definition.inst_id);
     }
 
-    let price_increment = Price::from(definition.tick_sz.clone());
-    let size_increment = Quantity::from(&definition.lot_sz);
+    let price_increment = Price::from_str(&definition.tick_sz).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse `tick_sz` '{}' for {}: {e}",
+            definition.tick_sz,
+            definition.inst_id
+        )
+    })?;
+
+    if definition.lot_sz.is_empty() {
+        anyhow::bail!("`lot_sz` is empty for {}", definition.inst_id);
+    }
+    let size_increment = Quantity::from_str(&definition.lot_sz).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse `lot_sz` '{}' for {}: {e}",
+            definition.lot_sz,
+            definition.inst_id
+        )
+    })?;
     let multiplier = parse_multiplier_product(definition)?;
-    let lot_size = Quantity::from(&definition.lot_sz);
-    let max_quantity = Some(Quantity::from(&definition.max_mkt_sz));
-    let min_quantity = Some(Quantity::from(&definition.min_sz));
+    let lot_size = size_increment;
+    let max_quantity = if definition.max_mkt_sz.is_empty() {
+        None
+    } else {
+        Some(Quantity::from_str(&definition.max_mkt_sz).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse `max_mkt_sz` '{}' for {}: {e}",
+                definition.max_mkt_sz,
+                definition.inst_id
+            )
+        })?)
+    };
+    let min_quantity = if definition.min_sz.is_empty() {
+        None
+    } else {
+        Some(Quantity::from_str(&definition.min_sz).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse `min_sz` '{}' for {}: {e}",
+                definition.min_sz,
+                definition.inst_id
+            )
+        })?)
+    };
     let max_notional = None;
     let min_notional = None;
     let max_price = None;
@@ -1780,6 +1998,7 @@ pub fn parse_option_instrument(
         margin_maint,
         maker_fee,
         taker_fee,
+        None,
         ts_init,
         ts_init,
     );
@@ -1903,7 +2122,7 @@ pub fn parse_account_state(
     let account_type = AccountType::Margin;
     let is_reported = true;
     let event_id = UUID4::new();
-    let ts_event = UnixNanos::from(millis_to_nanos_unchecked(okx_account.u_time as f64));
+    let ts_event = parse_millisecond_timestamp(okx_account.u_time);
 
     Ok(AccountState::new(
         account_id,
@@ -1916,6 +2135,11 @@ pub fn parse_account_state(
         ts_init,
         None,
     ))
+}
+
+/// Converts an optional `UnixNanos` to an optional `DateTime<Utc>`.
+pub fn nanos_to_datetime(value: Option<UnixNanos>) -> Option<chrono::DateTime<chrono::Utc>> {
+    value.map(|nanos| nanos.to_datetime_utc())
 }
 
 #[cfg(test)]
@@ -2969,7 +3193,7 @@ mod tests {
         let account_id = AccountId::new("OKX-001");
         let instrument_id = InstrumentId::from("BTC-USDT.OKX");
         let position_report = parse_position_status_report(
-            okx_position,
+            &okx_position,
             account_id,
             instrument_id,
             8,
@@ -3217,7 +3441,7 @@ mod tests {
         let account_id = AccountId::new("OKX-001");
         let instrument_id = InstrumentId::from("BTC-USDT.OKX");
         let fill_report = parse_fill_report(
-            transaction_detail,
+            &transaction_detail,
             account_id,
             instrument_id,
             2,
@@ -3388,7 +3612,7 @@ mod tests {
         let account_id = AccountId::new("OKX-001");
         let instrument_id = InstrumentId::from("BTC-USDT-SWAP.OKX");
         let report = parse_position_status_report(
-            position,
+            &position,
             account_id,
             instrument_id,
             8,
@@ -3456,7 +3680,7 @@ mod tests {
         let account_id = AccountId::new("OKX-001");
         let instrument_id = InstrumentId::from("BTC-USDT-SWAP.OKX");
         let report = parse_position_status_report(
-            position,
+            &position,
             account_id,
             instrument_id,
             8,
@@ -3524,7 +3748,7 @@ mod tests {
         let account_id = AccountId::new("OKX-001");
         let instrument_id = InstrumentId::from("ETH-USDT-SWAP.OKX");
         let report = parse_position_status_report(
-            position,
+            &position,
             account_id,
             instrument_id,
             8,
@@ -3592,7 +3816,7 @@ mod tests {
         let account_id = AccountId::new("OKX-001");
         let instrument_id = InstrumentId::from("BTC-USDT-SWAP.OKX");
         let report = parse_position_status_report(
-            position,
+            &position,
             account_id,
             instrument_id,
             8,
@@ -3664,7 +3888,7 @@ mod tests {
         let account_id = AccountId::new("OKX-001");
         let instrument_id = InstrumentId::from("BTC-USDT-SWAP.OKX");
         let report = parse_position_status_report(
-            position,
+            &position,
             account_id,
             instrument_id,
             8,
@@ -3736,7 +3960,7 @@ mod tests {
         let account_id = AccountId::new("OKX-001");
         let instrument_id = InstrumentId::from("ETH-USDT.OKX");
         let report = parse_position_status_report(
-            position,
+            &position,
             account_id,
             instrument_id,
             4,
@@ -3804,7 +4028,7 @@ mod tests {
         let account_id = AccountId::new("OKX-001");
         let instrument_id = InstrumentId::from("ETH-USDT.OKX");
         let report = parse_position_status_report(
-            position,
+            &position,
             account_id,
             instrument_id,
             4,
@@ -3818,6 +4042,81 @@ mod tests {
         // Position is 244.56 USDT / 4092 USDT/ETH = 0.0597... ETH
         assert_eq!(report.quantity.to_string(), "0.0598");
         assert_eq!(report.venue_position_id, None); // Net mode
+    }
+
+    #[rstest]
+    fn test_parse_position_status_report_margin_short_rounds_to_size_precision() {
+        // 100.00 USDT / 3333.33 USDT/ETH = 0.030000030000... ETH
+        // Without round_dp this exceeds size_precision=4 and fails
+        let position = OKXPosition {
+            inst_id: Ustr::from("ETH-USDT"),
+            inst_type: OKXInstrumentType::Margin,
+            mgn_mode: OKXMarginMode::Cross,
+            pos_id: Some(Ustr::from("margin-short-2")),
+            pos_side: OKXPositionSide::Net,
+            pos: "100.00".to_string(),
+            base_bal: "0".to_string(),
+            ccy: "USDT".to_string(),
+            fee: "0".to_string(),
+            lever: "3".to_string(),
+            last: "3333.33".to_string(),
+            mark_px: "3333.33".to_string(),
+            liq_px: "3500".to_string(),
+            mmr: "0.1".to_string(),
+            interest: "0".to_string(),
+            trade_id: Ustr::from("trade-round"),
+            notional_usd: "100.00".to_string(),
+            avg_px: "3333.33".to_string(),
+            upl: "0".to_string(),
+            upl_ratio: "0".to_string(),
+            u_time: 1622559930237,
+            margin: "50".to_string(),
+            mgn_ratio: "0.5".to_string(),
+            adl: "0".to_string(),
+            c_time: "1622559930237".to_string(),
+            realized_pnl: "0".to_string(),
+            upl_last_px: "0".to_string(),
+            upl_ratio_last_px: "0".to_string(),
+            avail_pos: "100.00".to_string(),
+            be_px: "3333.33".to_string(),
+            funding_fee: "0".to_string(),
+            idx_px: "3333.33".to_string(),
+            liq_penalty: "0".to_string(),
+            opt_val: "0".to_string(),
+            pending_close_ord_liab_val: "0".to_string(),
+            pnl: "0".to_string(),
+            pos_ccy: "USDT".to_string(),
+            quote_bal: "100.00".to_string(),
+            quote_borrowed: "0".to_string(),
+            quote_interest: "0".to_string(),
+            spot_in_use_amt: "0".to_string(),
+            spot_in_use_ccy: String::new(),
+            usd_px: "3333.33".to_string(),
+        };
+
+        let report = parse_position_status_report(
+            &position,
+            AccountId::new("OKX-001"),
+            InstrumentId::from("ETH-USDT.OKX"),
+            4, // size_precision=4
+            UnixNanos::default(),
+        )
+        .unwrap();
+
+        assert_eq!(report.position_side, PositionSide::Short.as_specified());
+        assert_eq!(report.quantity.to_string(), "0.0300");
+    }
+
+    #[rstest]
+    fn test_parse_rfc3339_timestamp_rejects_pre_epoch() {
+        let result = parse_rfc3339_timestamp("1960-01-01T00:00:00Z");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Negative nanosecond timestamp")
+        );
     }
 
     #[rstest]
@@ -3872,7 +4171,7 @@ mod tests {
         let account_id = AccountId::new("OKX-001");
         let instrument_id = InstrumentId::from("ETH-USDT.OKX");
         let report = parse_position_status_report(
-            position,
+            &position,
             account_id,
             instrument_id,
             4,
@@ -4578,5 +4877,20 @@ mod tests {
         #[case] expected: OrderType,
     ) {
         assert_eq!(determine_order_type(okx_ord_type, price), expected);
+    }
+
+    #[rstest]
+    #[case::option("BTC-USD-250328-92000-C", "BTC-USD")]
+    #[case::swap("BTC-USDT-SWAP", "BTC-USDT")]
+    #[case::futures("ETH-USD-250328", "ETH-USD")]
+    #[case::spot("BTC-USDT", "BTC-USDT")]
+    fn test_extract_inst_family(#[case] symbol: &str, #[case] expected: &str) {
+        let family = extract_inst_family(symbol).unwrap();
+        assert_eq!(family.as_str(), expected);
+    }
+
+    #[rstest]
+    fn test_extract_inst_family_single_segment_fails() {
+        assert!(extract_inst_family("BTC").is_err());
     }
 }

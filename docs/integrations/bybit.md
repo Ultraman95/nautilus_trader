@@ -141,7 +141,7 @@ If both `demo` and `testnet` are set to `True`, demo takes priority.
 
 Bybit offers a flexible combination of trigger types, enabling a broader range of Nautilus orders.
 All the order types listed below can be used as *either* entries or exits, except for trailing stops
-(which utilize a position-related API).
+(which use a position-related API).
 
 ### Order types
 
@@ -405,6 +405,19 @@ Consider the following points when using trailing stops on Bybit:
 - You cannot query trailing stop orders that are not already open (the `venue_order_id` is unknown until then).
 - You can manually adjust the trigger price in the GUI, which will update the Nautilus order.
 
+## Funding rates
+
+The adapter receives funding rate data from the
+[Linear Ticker](https://bybit-exchange.github.io/docs/v5/websocket/public/ticker#linear-inverse-perpetual-response)
+WebSocket stream. Bybit provides the `fundingIntervalHour` field in ticker updates,
+which the adapter uses to populate the `interval` field on `FundingRateUpdate`.
+
+The adapter caches the last known `fundingIntervalHour` per symbol so that partial
+ticker updates (which may omit the field) still carry the correct interval.
+
+For historical funding rate requests, the adapter computes the interval from consecutive
+funding timestamps.
+
 ## Rate limiting
 
 Every HTTP call consumes the global token bucket as well as any keyed quota(s). When usage exceeds a bucket, requests are queued automatically, so manual throttling is rarely required.
@@ -561,6 +574,7 @@ The product types for each client must be specified in the configurations.
 | `use_http_batch_api`             | `False` | Use Bybit's HTTP batch trading API (deprecated). |
 | `use_spot_position_reports`      | `False` | Report Spot wallet balances as positions when `True`. |
 | `auto_repay_spot_borrows`        | `True`  | Automatically repay Spot margin borrows after BUY orders fully fill (Spot only). |
+| `repay_queue_interval_secs`      | `1.0`   | Interval (seconds) between processing repayment queues for spot borrows. |
 | `ignore_uncached_instrument_executions` | `False` | Ignore execution messages for instruments not yet cached. |
 | `max_retries`                    | `None` | Maximum retry attempts for order submission/cancel/modify calls. |
 | `retry_delay_initial_ms`         | `None` | Initial delay (milliseconds) between retries. |
@@ -588,7 +602,7 @@ config = TradingNodeConfig(
             "api_key": "YOUR_BYBIT_API_KEY",
             "api_secret": "YOUR_BYBIT_API_SECRET",
             "base_url_http": None,  # Override with custom endpoint
-            "product_types": [BybitProductType.LINEAR]
+            "product_types": [BybitProductType.LINEAR],
             "testnet": False,
         },
     },
@@ -597,7 +611,7 @@ config = TradingNodeConfig(
             "api_key": "YOUR_BYBIT_API_KEY",
             "api_secret": "YOUR_BYBIT_API_SECRET",
             "base_url_http": None,  # Override with custom endpoint
-            "product_types": [BybitProductType.LINEAR]
+            "product_types": [BybitProductType.LINEAR],
             "testnet": False,
         },
     },

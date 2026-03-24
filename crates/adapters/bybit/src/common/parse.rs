@@ -22,7 +22,11 @@ pub use nautilus_core::serialization::{
     deserialize_decimal_or_zero, deserialize_optional_decimal_or_zero,
     deserialize_optional_decimal_str, deserialize_string_to_u8,
 };
-use nautilus_core::{UUID4, datetime::NANOSECONDS_IN_MILLISECOND, nanos::UnixNanos};
+use nautilus_core::{
+    UUID4,
+    datetime::{NANOSECONDS_IN_MILLISECOND, nanos_to_millis as nanos_to_millis_u64},
+    nanos::UnixNanos,
+};
 use nautilus_model::{
     data::{
         Bar, BarType, BookOrder, FundingRateUpdate, OrderBookDelta, OrderBookDeltas, TradeTick,
@@ -46,6 +50,7 @@ use ustr::Ustr;
 
 use crate::{
     common::{
+        consts::{BYBIT_BASE_COIN, BYBIT_QUOTE_COIN},
         enums::{
             BybitContractType, BybitKlineInterval, BybitOptionType, BybitOrderSide,
             BybitOrderStatus, BybitOrderType, BybitPositionSide, BybitProductType,
@@ -75,13 +80,7 @@ pub fn extract_raw_symbol(symbol: &str) -> &str {
 #[must_use]
 pub fn make_bybit_symbol<S: AsRef<str>>(raw_symbol: S, product_type: BybitProductType) -> Ustr {
     let raw = raw_symbol.as_ref();
-    let suffix = match product_type {
-        BybitProductType::Spot => "-SPOT",
-        BybitProductType::Linear => "-LINEAR",
-        BybitProductType::Inverse => "-INVERSE",
-        BybitProductType::Option => "-OPTION",
-    };
-    Ustr::from(&format!("{raw}{suffix}"))
+    Ustr::from(&format!("{raw}{}", product_type.suffix()))
 }
 
 /// Converts a Bybit kline interval string to a Nautilus bar aggregation and step.
@@ -220,6 +219,7 @@ pub fn parse_spot_instrument(
         Some(default_margin()),
         Some(maker_fee),
         Some(taker_fee),
+        None,
         ts_event,
         ts_init,
     );
@@ -309,6 +309,7 @@ pub fn parse_linear_instrument(
                 Some(default_margin()),
                 Some(maker_fee),
                 Some(taker_fee),
+                None,
                 ts_event,
                 ts_init,
             );
@@ -342,6 +343,7 @@ pub fn parse_linear_instrument(
                 Some(default_margin()),
                 Some(maker_fee),
                 Some(taker_fee),
+                None,
                 ts_event,
                 ts_init,
             );
@@ -435,6 +437,7 @@ pub fn parse_inverse_instrument(
                 Some(default_margin()),
                 Some(maker_fee),
                 Some(taker_fee),
+                None,
                 ts_event,
                 ts_init,
             );
@@ -468,6 +471,7 @@ pub fn parse_inverse_instrument(
                 Some(default_margin()),
                 Some(maker_fee),
                 Some(taker_fee),
+                None,
                 ts_event,
                 ts_init,
             );
@@ -552,6 +556,7 @@ pub fn parse_option_instrument(
         Some(Decimal::ZERO),
         Some(Decimal::ZERO),
         Some(Decimal::ZERO),
+        None,
         ts_event,
         ts_init,
     );
@@ -591,13 +596,18 @@ pub fn parse_trade_tick(
 pub fn parse_funding_rate(
     funding: &BybitFunding,
     instrument: &InstrumentAny,
+    interval_millis: Option<i64>,
 ) -> anyhow::Result<FundingRateUpdate> {
     let rate = parse_decimal(&funding.funding_rate, "funding.rate")?;
     let ts_event = parse_millis_timestamp(&funding.funding_rate_timestamp, "funding.timestamp")?;
+    let interval = interval_millis
+        .map(|ms| u16::try_from(ms / 60_000).context("interval milliseconds out of bounds"))
+        .transpose()?;
 
     Ok(FundingRateUpdate::new(
         instrument.id(),
         rate,
+        interval,
         None, // next_funding_ns not provided with historical funding rates
         ts_event,
         ts_event,
@@ -625,6 +635,7 @@ pub fn parse_orderbook(
     let mut deltas = Vec::with_capacity(total_levels + 1);
 
     let mut clear = OrderBookDelta::clear(instrument_id, sequence, ts_event, ts_init);
+
     if total_levels == 0 {
         clear.flags |= RecordFlag::F_LAST as u8;
     }
@@ -637,6 +648,7 @@ pub fn parse_orderbook(
 
         processed += 1;
         let mut flags = RecordFlag::F_MBP as u8;
+
         if processed == total_levels {
             flags |= RecordFlag::F_LAST as u8;
         }
@@ -702,6 +714,7 @@ pub fn parse_kline_bar(
     let volume = parse_quantity_with_precision(&kline.volume, size_precision, "kline.volume")?;
 
     let mut ts_event = parse_millis_timestamp(&kline.start, "kline.start")?;
+
     if timestamp_on_close {
         let interval_ns = bar_type
             .spec()
@@ -1215,6 +1228,90 @@ pub fn parse_order_status_report(
     }
 
     Ok(report)
+}
+
+/// Returns the `marketUnit` parameter for spot market orders.
+#[must_use]
+pub fn spot_market_unit(
+    product_type: BybitProductType,
+    order_type: BybitOrderType,
+    is_quote_quantity: bool,
+) -> Option<String> {
+    if product_type == BybitProductType::Spot && order_type == BybitOrderType::Market {
+        if is_quote_quantity {
+            Some(BYBIT_QUOTE_COIN.to_string())
+        } else {
+            Some(BYBIT_BASE_COIN.to_string())
+        }
+    } else {
+        None
+    }
+}
+
+/// Returns the `isLeverage` parameter (spot-only).
+#[must_use]
+pub fn spot_leverage(product_type: BybitProductType, is_leverage: bool) -> Option<i32> {
+    if product_type == BybitProductType::Spot {
+        Some(i32::from(is_leverage))
+    } else {
+        None
+    }
+}
+
+/// Returns the trigger direction for stop and MIT orders.
+#[must_use]
+pub fn trigger_direction(
+    order_type: OrderType,
+    order_side: OrderSide,
+    is_stop_order: bool,
+) -> Option<BybitTriggerDirection> {
+    if !is_stop_order {
+        return None;
+    }
+    match (order_type, order_side) {
+        (OrderType::StopMarket | OrderType::StopLimit, OrderSide::Buy) => {
+            Some(BybitTriggerDirection::RisesTo)
+        }
+        (OrderType::StopMarket | OrderType::StopLimit, OrderSide::Sell) => {
+            Some(BybitTriggerDirection::FallsTo)
+        }
+        (OrderType::MarketIfTouched | OrderType::LimitIfTouched, OrderSide::Buy) => {
+            Some(BybitTriggerDirection::FallsTo)
+        }
+        (OrderType::MarketIfTouched | OrderType::LimitIfTouched, OrderSide::Sell) => {
+            Some(BybitTriggerDirection::RisesTo)
+        }
+        _ => None,
+    }
+}
+
+/// Maps Nautilus time-in-force to Bybit's TIF.
+///
+/// Returns `Err(tif)` with the unsupported value for caller-specific error wrapping.
+pub fn map_time_in_force(
+    order_type: BybitOrderType,
+    time_in_force: Option<TimeInForce>,
+    post_only: Option<bool>,
+) -> Result<Option<BybitTimeInForce>, TimeInForce> {
+    if order_type == BybitOrderType::Market {
+        return Ok(None);
+    }
+
+    if post_only == Some(true) {
+        return Ok(Some(BybitTimeInForce::PostOnly));
+    }
+    match time_in_force {
+        Some(TimeInForce::Gtc) => Ok(Some(BybitTimeInForce::Gtc)),
+        Some(TimeInForce::Ioc) => Ok(Some(BybitTimeInForce::Ioc)),
+        Some(TimeInForce::Fok) => Ok(Some(BybitTimeInForce::Fok)),
+        Some(tif) => Err(tif),
+        None => Ok(None),
+    }
+}
+
+/// Converts an optional `UnixNanos` timestamp to optional milliseconds.
+pub fn nanos_to_millis(value: Option<UnixNanos>) -> Option<i64> {
+    value.map(|nanos| nanos_to_millis_u64(nanos.as_u64()) as i64)
 }
 
 #[cfg(test)]

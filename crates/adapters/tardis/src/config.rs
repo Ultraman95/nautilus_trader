@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::machine::types::ReplayNormalizedRequestOptions;
+use super::machine::types::{ReplayNormalizedRequestOptions, StreamNormalizedRequestOptions};
 
 /// Determines the output format for Tardis `book_snapshot_*` messages.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -28,7 +28,7 @@ pub enum BookSnapshotOutput {
     Depth10,
 }
 
-/// Provides a configuration for a Tarid Machine -> Nautilus data -> Parquet replay run.
+/// Provides a configuration for a Tardis Machine -> Nautilus data -> Parquet replay run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TardisReplayConfig {
     /// The Tardis Machine websocket url.
@@ -49,4 +49,94 @@ pub struct TardisReplayConfig {
     /// - `deltas`: Convert to `OrderBookDeltas` and write to `order_book_deltas/` (default).
     /// - `depth10`: Convert to `OrderBookDepth10` and write to `order_book_depths/`.
     pub book_snapshot_output: Option<BookSnapshotOutput>,
+}
+
+/// Configuration for the Tardis data client.
+#[derive(Clone, Debug)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.tardis", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.tardis")
+)]
+pub struct TardisDataClientConfig {
+    /// Tardis API key for HTTP instrument fetching.
+    /// Falls back to `TARDIS_API_KEY` env var if not set.
+    pub api_key: Option<String>,
+    /// Tardis Machine Server WebSocket URL.
+    /// Falls back to `TARDIS_MACHINE_WS_URL` env var if not set.
+    pub tardis_ws_url: Option<String>,
+    /// Whether to normalize symbols to Nautilus conventions.
+    pub normalize_symbols: bool,
+    /// Output format for `book_snapshot_*` messages.
+    pub book_snapshot_output: BookSnapshotOutput,
+    /// Replay options defining exchanges, symbols, date ranges, and data types.
+    /// When non-empty the client connects to `ws-replay-normalized`.
+    pub options: Vec<ReplayNormalizedRequestOptions>,
+    /// Live stream options defining exchanges, symbols, and data types.
+    /// When non-empty (and `options` is empty) the client connects to
+    /// `ws-stream-normalized` with automatic reconnection.
+    pub stream_options: Vec<StreamNormalizedRequestOptions>,
+}
+
+impl Default for TardisDataClientConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            tardis_ws_url: None,
+            normalize_symbols: true,
+            book_snapshot_output: BookSnapshotOutput::default(),
+            options: Vec::new(),
+            stream_options: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    fn test_default_config_values() {
+        let config = TardisDataClientConfig::default();
+        assert!(config.api_key.is_none());
+        assert!(config.tardis_ws_url.is_none());
+        assert!(config.normalize_symbols);
+        assert!(matches!(
+            config.book_snapshot_output,
+            BookSnapshotOutput::Deltas
+        ));
+        assert!(config.options.is_empty());
+        assert!(config.stream_options.is_empty());
+    }
+
+    #[rstest]
+    fn test_book_snapshot_output_default_is_deltas() {
+        assert!(matches!(
+            BookSnapshotOutput::default(),
+            BookSnapshotOutput::Deltas
+        ));
+    }
+
+    #[rstest]
+    fn test_book_snapshot_output_serde_roundtrip_deltas() {
+        let json = serde_json::to_string(&BookSnapshotOutput::Deltas).unwrap();
+        assert_eq!(json, "\"deltas\"");
+
+        let deserialized: BookSnapshotOutput = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, BookSnapshotOutput::Deltas));
+    }
+
+    #[rstest]
+    fn test_book_snapshot_output_serde_roundtrip_depth10() {
+        let json = serde_json::to_string(&BookSnapshotOutput::Depth10).unwrap();
+        assert_eq!(json, "\"depth10\"");
+
+        let deserialized: BookSnapshotOutput = serde_json::from_str(&json).unwrap();
+        assert!(matches!(deserialized, BookSnapshotOutput::Depth10));
+    }
 }

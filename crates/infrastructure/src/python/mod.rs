@@ -15,6 +15,11 @@
 
 //! Python bindings from [PyO3](https://pyo3.rs).
 
+#![allow(
+    clippy::missing_errors_doc,
+    reason = "errors documented on underlying Rust methods"
+)]
+
 #[cfg(feature = "redis")]
 pub mod redis;
 
@@ -29,6 +34,7 @@ use pyo3::{prelude::*, pymodule};
 ///
 /// Returns a `PyErr` if the module initialization fails, e.g., when adding classes to the module.
 #[pymodule]
+#[allow(unused_variables)]
 pub fn infrastructure(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "redis")]
     m.add_class::<crate::redis::cache::RedisCacheDatabase>()?;

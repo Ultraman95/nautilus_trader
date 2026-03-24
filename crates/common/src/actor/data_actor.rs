@@ -27,20 +27,21 @@ use std::{
 use ahash::{AHashMap, AHashSet};
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
-use nautilus_core::{UUID4, UnixNanos, correctness::check_predicate_true};
+use nautilus_core::{Params, UUID4, UnixNanos, correctness::check_predicate_true};
 #[cfg(feature = "defi")]
 use nautilus_model::defi::{
     Block, Blockchain, Pool, PoolLiquidityUpdate, PoolSwap, data::PoolFeeCollect, data::PoolFlash,
 };
 use nautilus_model::{
     data::{
-        Bar, BarType, DataType, FundingRateUpdate, IndexPriceUpdate, InstrumentStatus,
+        Bar, BarType, CustomData, DataType, FundingRateUpdate, IndexPriceUpdate, InstrumentStatus,
         MarkPriceUpdate, OrderBookDeltas, OrderBookDepth10, QuoteTick, TradeTick,
         close::InstrumentClose,
+        option_chain::{OptionChainSlice, OptionGreeks, StrikeRange},
     },
     enums::BookType,
     events::order::{any::OrderEventAny, canceled::OrderCanceled, filled::OrderFilled},
-    identifiers::{ActorId, ClientId, ComponentId, InstrumentId, TraderId, Venue},
+    identifiers::{ActorId, ClientId, ComponentId, InstrumentId, OptionSeriesId, TraderId, Venue},
     instruments::InstrumentAny,
     orderbook::OrderBook,
 };
@@ -72,11 +73,13 @@ use crate::{
             SubscribeBookDeltas, SubscribeBookSnapshots, SubscribeCommand, SubscribeCustomData,
             SubscribeFundingRates, SubscribeIndexPrices, SubscribeInstrument,
             SubscribeInstrumentClose, SubscribeInstrumentStatus, SubscribeInstruments,
-            SubscribeMarkPrices, SubscribeQuotes, SubscribeTrades, TradesResponse, UnsubscribeBars,
-            UnsubscribeBookDeltas, UnsubscribeBookSnapshots, UnsubscribeCommand,
-            UnsubscribeCustomData, UnsubscribeFundingRates, UnsubscribeIndexPrices,
-            UnsubscribeInstrument, UnsubscribeInstrumentClose, UnsubscribeInstrumentStatus,
-            UnsubscribeInstruments, UnsubscribeMarkPrices, UnsubscribeQuotes, UnsubscribeTrades,
+            SubscribeMarkPrices, SubscribeOptionChain, SubscribeOptionGreeks, SubscribeQuotes,
+            SubscribeTrades, TradesResponse, UnsubscribeBars, UnsubscribeBookDeltas,
+            UnsubscribeBookSnapshots, UnsubscribeCommand, UnsubscribeCustomData,
+            UnsubscribeFundingRates, UnsubscribeIndexPrices, UnsubscribeInstrument,
+            UnsubscribeInstrumentClose, UnsubscribeInstrumentStatus, UnsubscribeInstruments,
+            UnsubscribeMarkPrices, UnsubscribeOptionChain, UnsubscribeOptionGreeks,
+            UnsubscribeQuotes, UnsubscribeTrades,
         },
         system::ShutdownSystem,
     },
@@ -86,8 +89,9 @@ use crate::{
             MessagingSwitchboard, get_bars_topic, get_book_deltas_topic, get_book_snapshots_topic,
             get_custom_topic, get_funding_rate_topic, get_index_price_topic,
             get_instrument_close_topic, get_instrument_status_topic, get_instrument_topic,
-            get_instruments_topic, get_mark_price_topic, get_order_cancels_topic,
-            get_order_fills_topic, get_quotes_topic, get_trades_topic,
+            get_instruments_topic, get_mark_price_topic, get_option_chain_topic,
+            get_option_greeks_topic, get_order_cancels_topic, get_order_fills_topic,
+            get_quotes_topic, get_trades_topic,
         },
     },
     signal::Signal,
@@ -98,7 +102,15 @@ use crate::{
 #[derive(Debug, Clone)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.common", subclass)
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.common",
+        subclass,
+        from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.common")
 )]
 pub struct DataActorConfig {
     /// The custom identifier for the Actor.
@@ -123,7 +135,11 @@ impl Default for DataActorConfig {
 #[derive(Debug, Clone)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.common")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.common", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.common")
 )]
 pub struct ImportableActorConfig {
     /// The fully qualified name of the Actor class.
@@ -257,7 +273,7 @@ pub trait DataActor:
     ///
     /// Returns an error if handling the data fails.
     #[allow(unused_variables)]
-    fn on_data(&mut self, data: &dyn Any) -> anyhow::Result<()> {
+    fn on_data(&mut self, data: &CustomData) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -358,6 +374,26 @@ pub trait DataActor:
     /// Returns an error if handling the funding rate update fails.
     #[allow(unused_variables)]
     fn on_funding_rate(&mut self, funding_rate: &FundingRateUpdate) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Actions to be performed when receiving exchange-provided option greeks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if handling the option greeks fails.
+    #[allow(unused_variables)]
+    fn on_option_greeks(&mut self, greeks: &OptionGreeks) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Actions to be performed when receiving an option chain slice snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if handling the option chain slice fails.
+    #[allow(unused_variables)]
+    fn on_option_chain(&mut self, slice: &OptionChainSlice) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -547,13 +583,18 @@ pub trait DataActor:
     fn handle_time_event(&mut self, event: &TimeEvent) {
         log_received(&event);
 
+        if self.not_running() {
+            log_not_running(&event);
+            return;
+        }
+
         if let Err(e) = DataActor::on_time_event(self, event) {
             log_error(&e);
         }
     }
 
     /// Handles a received custom data point.
-    fn handle_data(&mut self, data: &dyn Any) {
+    fn handle_data(&mut self, data: &CustomData) {
         log_received(&data);
 
         if self.not_running() {
@@ -619,7 +660,7 @@ pub trait DataActor:
 
         if let Err(e) = self.on_book(book) {
             log_error(&e);
-        };
+        }
     }
 
     /// Handles a received quote.
@@ -702,6 +743,34 @@ pub trait DataActor:
         }
 
         if let Err(e) = self.on_funding_rate(funding_rate) {
+            log_error(&e);
+        }
+    }
+
+    /// Handles a received option greeks update.
+    fn handle_option_greeks(&mut self, greeks: &OptionGreeks) {
+        log_received(&greeks);
+
+        if self.not_running() {
+            log_not_running(&greeks);
+            return;
+        }
+
+        if let Err(e) = self.on_option_greeks(greeks) {
+            log_error(&e);
+        }
+    }
+
+    /// Handles a received option chain slice snapshot.
+    fn handle_option_chain(&mut self, slice: &OptionChainSlice) {
+        log_received(&slice);
+
+        if self.not_running() {
+            log_not_running(&slice);
+            return;
+        }
+
+        if let Err(e) = self.on_option_chain(slice) {
             log_error(&e);
         }
     }
@@ -954,12 +1023,12 @@ pub trait DataActor:
         &mut self,
         data_type: DataType,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
         let actor_id = self.actor_id().inner();
-        let handler = ShareableMessageHandler::from_any(move |data: &dyn Any| {
+        let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
             get_actor_unchecked::<Self>(&actor_id).handle_data(data);
         });
 
@@ -971,7 +1040,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -994,7 +1063,7 @@ pub trait DataActor:
         &mut self,
         venue: Venue,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1017,7 +1086,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1043,7 +1112,7 @@ pub trait DataActor:
         depth: Option<NonZeroUsize>,
         client_id: Option<ClientId>,
         managed: bool,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1075,7 +1144,7 @@ pub trait DataActor:
         depth: Option<NonZeroUsize>,
         interval_ms: NonZeroUsize,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1104,7 +1173,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1123,7 +1192,7 @@ pub trait DataActor:
         &mut self,
         bar_type: BarType,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1142,7 +1211,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1168,7 +1237,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1194,7 +1263,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1215,12 +1284,42 @@ pub trait DataActor:
         );
     }
 
+    /// Subscribe to streaming [`OptionGreeks`] data for the `instrument_id`.
+    fn subscribe_option_greeks(
+        &mut self,
+        instrument_id: InstrumentId,
+        client_id: Option<ClientId>,
+        params: Option<Params>,
+    ) where
+        Self: 'static + Debug + Sized,
+    {
+        let actor_id = self.actor_id().inner();
+        let topic = get_option_greeks_topic(instrument_id);
+
+        let handler = TypedHandler::from(move |option_greeks: &OptionGreeks| {
+            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                actor.handle_option_greeks(option_greeks);
+            } else {
+                log::error!("Actor {actor_id} not found for option greeks handling");
+            }
+        });
+
+        DataActorCore::subscribe_option_greeks(
+            self,
+            topic,
+            handler,
+            instrument_id,
+            client_id,
+            params,
+        );
+    }
+
     /// Subscribe to streaming [`InstrumentStatus`] data for the `instrument_id`.
     fn subscribe_instrument_status(
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1246,7 +1345,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1264,6 +1363,41 @@ pub trait DataActor:
             instrument_id,
             client_id,
             params,
+        );
+    }
+
+    /// Subscribe to streaming [`OptionChainSlice`] snapshots for the option `series_id`.
+    ///
+    /// The ATM price is always derived from the exchange-provided forward price
+    /// embedded in each option greeks/ticker update.
+    fn subscribe_option_chain(
+        &mut self,
+        series_id: OptionSeriesId,
+        strike_range: StrikeRange,
+        snapshot_interval_ms: Option<u64>,
+        client_id: Option<ClientId>,
+    ) where
+        Self: 'static + Debug + Sized,
+    {
+        let actor_id = self.actor_id().inner();
+        let topic = get_option_chain_topic(series_id);
+
+        let handler = TypedHandler::from(move |slice: &OptionChainSlice| {
+            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                actor.handle_option_chain(slice);
+            } else {
+                log::error!("Actor {actor_id} not found for option chain handling");
+            }
+        });
+
+        DataActorCore::subscribe_option_chain(
+            self,
+            topic,
+            handler,
+            series_id,
+            strike_range,
+            snapshot_interval_ms,
+            client_id,
         );
     }
 
@@ -1307,7 +1441,7 @@ pub trait DataActor:
         &mut self,
         chain: Blockchain,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1327,7 +1461,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1347,7 +1481,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1367,7 +1501,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1394,7 +1528,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1421,7 +1555,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1447,7 +1581,7 @@ pub trait DataActor:
         &mut self,
         data_type: DataType,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1459,7 +1593,7 @@ pub trait DataActor:
         &mut self,
         venue: Venue,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1471,7 +1605,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1483,7 +1617,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1496,7 +1630,7 @@ pub trait DataActor:
         instrument_id: InstrumentId,
         interval_ms: NonZeroUsize,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1514,7 +1648,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1526,7 +1660,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1538,7 +1672,7 @@ pub trait DataActor:
         &mut self,
         bar_type: BarType,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1550,7 +1684,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1562,7 +1696,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1574,11 +1708,23 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
         DataActorCore::unsubscribe_funding_rates(self, instrument_id, client_id, params);
+    }
+
+    /// Unsubscribe from streaming [`OptionGreeks`] data for the `instrument_id`.
+    fn unsubscribe_option_greeks(
+        &mut self,
+        instrument_id: InstrumentId,
+        client_id: Option<ClientId>,
+        params: Option<Params>,
+    ) where
+        Self: 'static + Debug + Sized,
+    {
+        DataActorCore::unsubscribe_option_greeks(self, instrument_id, client_id, params);
     }
 
     /// Unsubscribe from streaming [`InstrumentStatus`] data for the `instrument_id`.
@@ -1586,7 +1732,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1598,11 +1744,19 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
         DataActorCore::unsubscribe_instrument_close(self, instrument_id, client_id, params);
+    }
+
+    /// Unsubscribe from streaming [`OptionChainSlice`] snapshots for the option `series_id`.
+    fn unsubscribe_option_chain(&mut self, series_id: OptionSeriesId, client_id: Option<ClientId>)
+    where
+        Self: 'static + Debug + Sized,
+    {
+        DataActorCore::unsubscribe_option_chain(self, series_id, client_id);
     }
 
     /// Unsubscribe from [`OrderFilled`] events for the `instrument_id`.
@@ -1627,7 +1781,7 @@ pub trait DataActor:
         &mut self,
         chain: Blockchain,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1640,7 +1794,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1653,7 +1807,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1666,7 +1820,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1679,7 +1833,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1692,7 +1846,7 @@ pub trait DataActor:
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) where
         Self: 'static + Debug + Sized,
     {
@@ -1711,7 +1865,7 @@ pub trait DataActor:
         start: Option<DateTime<Utc>>,
         end: Option<DateTime<Utc>>,
         limit: Option<NonZeroUsize>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) -> anyhow::Result<UUID4>
     where
         Self: 'static + Debug + Sized,
@@ -1737,7 +1891,7 @@ pub trait DataActor:
         start: Option<DateTime<Utc>>,
         end: Option<DateTime<Utc>>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) -> anyhow::Result<UUID4>
     where
         Self: 'static + Debug + Sized,
@@ -1769,7 +1923,7 @@ pub trait DataActor:
         start: Option<DateTime<Utc>>,
         end: Option<DateTime<Utc>>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) -> anyhow::Result<UUID4>
     where
         Self: 'static + Debug + Sized,
@@ -1792,7 +1946,7 @@ pub trait DataActor:
         instrument_id: InstrumentId,
         depth: Option<NonZeroUsize>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) -> anyhow::Result<UUID4>
     where
         Self: 'static + Debug + Sized,
@@ -1817,7 +1971,7 @@ pub trait DataActor:
         end: Option<DateTime<Utc>>,
         limit: Option<NonZeroUsize>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) -> anyhow::Result<UUID4>
     where
         Self: 'static + Debug + Sized,
@@ -1851,7 +2005,7 @@ pub trait DataActor:
         end: Option<DateTime<Utc>>,
         limit: Option<NonZeroUsize>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) -> anyhow::Result<UUID4>
     where
         Self: 'static + Debug + Sized,
@@ -1885,7 +2039,7 @@ pub trait DataActor:
         end: Option<DateTime<Utc>>,
         limit: Option<NonZeroUsize>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) -> anyhow::Result<UUID4>
     where
         Self: 'static + Debug + Sized,
@@ -1919,7 +2073,7 @@ pub trait DataActor:
         end: Option<DateTime<Utc>>,
         limit: Option<NonZeroUsize>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) -> anyhow::Result<UUID4>
     where
         Self: 'static + Debug + Sized,
@@ -2050,6 +2204,8 @@ pub struct DataActorCore {
     mark_price_handlers: AHashMap<MStr<Topic>, TypedHandler<MarkPriceUpdate>>,
     index_price_handlers: AHashMap<MStr<Topic>, TypedHandler<IndexPriceUpdate>>,
     funding_rate_handlers: AHashMap<MStr<Topic>, TypedHandler<FundingRateUpdate>>,
+    option_greeks_handlers: AHashMap<MStr<Topic>, TypedHandler<OptionGreeks>>,
+    option_chain_handlers: AHashMap<MStr<Topic>, TypedHandler<OptionChainSlice>>,
     order_event_handlers: AHashMap<MStr<Topic>, TypedHandler<OrderEventAny>>,
     #[cfg(feature = "defi")]
     block_handlers: AHashMap<MStr<Topic>, TypedHandler<Block>>,
@@ -2107,7 +2263,7 @@ impl DataActorCore {
     /// Logs a warning if the actor is not currently subscribed to the topic.
     pub(crate) fn remove_subscription_any(&mut self, topic: MStr<Topic>) {
         if let Some(handler) = self.topic_handlers.remove(&topic) {
-            msgbus::unsubscribe_any(topic.into(), handler);
+            msgbus::unsubscribe_any(topic.into(), &handler);
         } else {
             log::warn!(
                 "Actor {} attempted to unsubscribe from topic '{topic}' when not subscribed",
@@ -2270,7 +2426,7 @@ impl DataActorCore {
     #[allow(dead_code)]
     pub(crate) fn remove_instrument_subscription(&mut self, topic: MStr<Topic>) {
         if let Some(handler) = self.topic_handlers.remove(&topic) {
-            msgbus::unsubscribe_any(topic.into(), handler);
+            msgbus::unsubscribe_any(topic.into(), &handler);
         }
     }
 
@@ -2293,7 +2449,7 @@ impl DataActorCore {
     #[allow(dead_code)]
     pub(crate) fn remove_instrument_close_subscription(&mut self, topic: MStr<Topic>) {
         if let Some(handler) = self.topic_handlers.remove(&topic) {
-            msgbus::unsubscribe_any(topic.into(), handler);
+            msgbus::unsubscribe_any(topic.into(), &handler);
         }
     }
 
@@ -2386,6 +2542,51 @@ impl DataActorCore {
     pub(crate) fn remove_funding_rate_subscription(&mut self, topic: MStr<Topic>) {
         if let Some(handler) = self.funding_rate_handlers.remove(&topic) {
             msgbus::unsubscribe_funding_rates(topic.into(), &handler);
+        }
+    }
+
+    pub(crate) fn add_option_greeks_subscription(
+        &mut self,
+        topic: MStr<Topic>,
+        handler: TypedHandler<OptionGreeks>,
+    ) {
+        if self.option_greeks_handlers.contains_key(&topic) {
+            log::warn!(
+                "Actor {} attempted duplicate option greeks subscription to '{topic}'",
+                self.actor_id
+            );
+            return;
+        }
+        self.option_greeks_handlers.insert(topic, handler.clone());
+        msgbus::subscribe_option_greeks(topic.into(), handler, None);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn remove_option_greeks_subscription(&mut self, topic: MStr<Topic>) {
+        if let Some(handler) = self.option_greeks_handlers.remove(&topic) {
+            msgbus::unsubscribe_option_greeks(topic.into(), &handler);
+        }
+    }
+
+    pub(crate) fn add_option_chain_subscription(
+        &mut self,
+        topic: MStr<Topic>,
+        handler: TypedHandler<OptionChainSlice>,
+    ) {
+        if self.option_chain_handlers.contains_key(&topic) {
+            log::warn!(
+                "Actor {} attempted duplicate option chain subscription to '{topic}'",
+                self.actor_id
+            );
+            return;
+        }
+        self.option_chain_handlers.insert(topic, handler.clone());
+        msgbus::subscribe_option_chain(topic.into(), handler, None);
+    }
+
+    pub(crate) fn remove_option_chain_subscription(&mut self, topic: MStr<Topic>) {
+        if let Some(handler) = self.option_chain_handlers.remove(&topic) {
+            msgbus::unsubscribe_option_chain(topic.into(), &handler);
         }
     }
 
@@ -2562,6 +2763,8 @@ impl DataActorCore {
             mark_price_handlers: AHashMap::new(),
             index_price_handlers: AHashMap::new(),
             funding_rate_handlers: AHashMap::new(),
+            option_greeks_handlers: AHashMap::new(),
+            option_chain_handlers: AHashMap::new(),
             order_event_handlers: AHashMap::new(),
             #[cfg(feature = "defi")]
             block_handlers: AHashMap::new(),
@@ -2764,7 +2967,7 @@ impl DataActorCore {
     }
 
     #[allow(dead_code)]
-    fn send_data_req(&self, request: RequestCommand) {
+    fn send_data_req(&self, request: &RequestCommand) {
         if self.config.log_commands {
             log::info!("{REQ}{SEND} {request:?}");
         }
@@ -2783,7 +2986,7 @@ impl DataActorCore {
     pub fn shutdown_system(&self, reason: Option<String>) {
         self.check_registered();
 
-        // SAFETY: Checked registered before unwrapping trader ID
+        // Checked registered before unwrapping trader ID
         let command = ShutdownSystem::new(
             self.trader_id().unwrap(),
             self.actor_id.inner(),
@@ -2808,7 +3011,7 @@ impl DataActorCore {
         handler: ShareableMessageHandler,
         data_type: DataType,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         assert!(
             self.is_properly_registered(),
@@ -2847,7 +3050,7 @@ impl DataActorCore {
         handler: TypedHandler<QuoteTick>,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -2873,7 +3076,7 @@ impl DataActorCore {
         handler: ShareableMessageHandler,
         venue: Venue,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -2898,7 +3101,7 @@ impl DataActorCore {
         handler: ShareableMessageHandler,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -2928,7 +3131,7 @@ impl DataActorCore {
         depth: Option<NonZeroUsize>,
         client_id: Option<ClientId>,
         managed: bool,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -2961,7 +3164,7 @@ impl DataActorCore {
         depth: Option<NonZeroUsize>,
         interval_ms: NonZeroUsize,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -2990,7 +3193,7 @@ impl DataActorCore {
         handler: TypedHandler<TradeTick>,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3016,7 +3219,7 @@ impl DataActorCore {
         handler: TypedHandler<Bar>,
         bar_type: BarType,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3042,7 +3245,7 @@ impl DataActorCore {
         handler: TypedHandler<MarkPriceUpdate>,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3068,7 +3271,7 @@ impl DataActorCore {
         handler: TypedHandler<IndexPriceUpdate>,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3094,13 +3297,39 @@ impl DataActorCore {
         handler: TypedHandler<FundingRateUpdate>,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
         self.add_funding_rate_subscription(topic, handler);
 
         let command = SubscribeCommand::FundingRates(SubscribeFundingRates {
+            instrument_id,
+            client_id,
+            venue: Some(instrument_id.venue),
+            command_id: UUID4::new(),
+            ts_init: self.timestamp_ns(),
+            correlation_id: None,
+            params,
+        });
+
+        self.send_data_cmd(DataCommand::Subscribe(command));
+    }
+
+    /// Helper method for registering option greeks subscriptions from the trait.
+    pub fn subscribe_option_greeks(
+        &mut self,
+        topic: MStr<Topic>,
+        handler: TypedHandler<OptionGreeks>,
+        instrument_id: InstrumentId,
+        client_id: Option<ClientId>,
+        params: Option<Params>,
+    ) {
+        self.check_registered();
+
+        self.add_option_greeks_subscription(topic, handler);
+
+        let command = SubscribeCommand::OptionGreeks(SubscribeOptionGreeks {
             instrument_id,
             client_id,
             venue: Some(instrument_id.venue),
@@ -3120,7 +3349,7 @@ impl DataActorCore {
         handler: ShareableMessageHandler,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3146,7 +3375,7 @@ impl DataActorCore {
         handler: ShareableMessageHandler,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3161,6 +3390,34 @@ impl DataActorCore {
             correlation_id: None,
             params,
         });
+
+        self.send_data_cmd(DataCommand::Subscribe(command));
+    }
+
+    /// Helper method for subscribing to option chain snapshots from the trait.
+    #[allow(clippy::too_many_arguments)]
+    pub fn subscribe_option_chain(
+        &mut self,
+        topic: MStr<Topic>,
+        handler: TypedHandler<OptionChainSlice>,
+        series_id: OptionSeriesId,
+        strike_range: StrikeRange,
+        snapshot_interval_ms: Option<u64>,
+        client_id: Option<ClientId>,
+    ) {
+        self.check_registered();
+
+        self.add_option_chain_subscription(topic, handler);
+
+        let command = SubscribeCommand::OptionChain(SubscribeOptionChain::new(
+            series_id,
+            strike_range,
+            snapshot_interval_ms,
+            UUID4::new(),
+            self.timestamp_ns(),
+            client_id,
+            Some(series_id.venue),
+        ));
 
         self.send_data_cmd(DataCommand::Subscribe(command));
     }
@@ -3190,7 +3447,7 @@ impl DataActorCore {
         &mut self,
         data_type: DataType,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3219,7 +3476,7 @@ impl DataActorCore {
         &mut self,
         venue: Venue,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3243,7 +3500,7 @@ impl DataActorCore {
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3268,7 +3525,7 @@ impl DataActorCore {
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3294,7 +3551,7 @@ impl DataActorCore {
         instrument_id: InstrumentId,
         interval_ms: NonZeroUsize,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3319,7 +3576,7 @@ impl DataActorCore {
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3344,7 +3601,7 @@ impl DataActorCore {
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3369,7 +3626,7 @@ impl DataActorCore {
         &mut self,
         bar_type: BarType,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3394,7 +3651,7 @@ impl DataActorCore {
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3419,7 +3676,7 @@ impl DataActorCore {
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3444,7 +3701,7 @@ impl DataActorCore {
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3464,12 +3721,37 @@ impl DataActorCore {
         self.send_data_cmd(DataCommand::Unsubscribe(command));
     }
 
+    /// Helper method for unsubscribing from option greeks.
+    pub fn unsubscribe_option_greeks(
+        &mut self,
+        instrument_id: InstrumentId,
+        client_id: Option<ClientId>,
+        params: Option<Params>,
+    ) {
+        self.check_registered();
+
+        let topic = get_option_greeks_topic(instrument_id);
+        self.remove_option_greeks_subscription(topic);
+
+        let command = UnsubscribeCommand::OptionGreeks(UnsubscribeOptionGreeks {
+            instrument_id,
+            client_id,
+            venue: Some(instrument_id.venue),
+            command_id: UUID4::new(),
+            ts_init: self.timestamp_ns(),
+            correlation_id: None,
+            params,
+        });
+
+        self.send_data_cmd(DataCommand::Unsubscribe(command));
+    }
+
     /// Helper method for unsubscribing from instrument status.
     pub fn unsubscribe_instrument_status(
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3494,7 +3776,7 @@ impl DataActorCore {
         &mut self,
         instrument_id: InstrumentId,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
     ) {
         self.check_registered();
 
@@ -3510,6 +3792,28 @@ impl DataActorCore {
             correlation_id: None,
             params,
         });
+
+        self.send_data_cmd(DataCommand::Unsubscribe(command));
+    }
+
+    /// Helper method for unsubscribing from option chain snapshots.
+    pub fn unsubscribe_option_chain(
+        &mut self,
+        series_id: OptionSeriesId,
+        client_id: Option<ClientId>,
+    ) {
+        self.check_registered();
+
+        let topic = get_option_chain_topic(series_id);
+        self.remove_option_chain_subscription(topic);
+
+        let command = UnsubscribeCommand::OptionChain(UnsubscribeOptionChain::new(
+            series_id,
+            UUID4::new(),
+            self.timestamp_ns(),
+            client_id,
+            Some(series_id.venue),
+        ));
 
         self.send_data_cmd(DataCommand::Unsubscribe(command));
     }
@@ -3543,7 +3847,7 @@ impl DataActorCore {
         start: Option<DateTime<Utc>>,
         end: Option<DateTime<Utc>>,
         limit: Option<NonZeroUsize>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
         handler: ShareableMessageHandler,
     ) -> anyhow::Result<UUID4> {
         self.check_registered();
@@ -3583,7 +3887,7 @@ impl DataActorCore {
         start: Option<DateTime<Utc>>,
         end: Option<DateTime<Utc>>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
         handler: ShareableMessageHandler,
     ) -> anyhow::Result<UUID4> {
         self.check_registered();
@@ -3622,7 +3926,7 @@ impl DataActorCore {
         start: Option<DateTime<Utc>>,
         end: Option<DateTime<Utc>>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
         handler: ShareableMessageHandler,
     ) -> anyhow::Result<UUID4> {
         self.check_registered();
@@ -3660,7 +3964,7 @@ impl DataActorCore {
         instrument_id: InstrumentId,
         depth: Option<NonZeroUsize>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
         handler: ShareableMessageHandler,
     ) -> anyhow::Result<UUID4> {
         self.check_registered();
@@ -3697,7 +4001,7 @@ impl DataActorCore {
         end: Option<DateTime<Utc>>,
         limit: Option<NonZeroUsize>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
         handler: ShareableMessageHandler,
     ) -> anyhow::Result<UUID4> {
         self.check_registered();
@@ -3739,7 +4043,7 @@ impl DataActorCore {
         end: Option<DateTime<Utc>>,
         limit: Option<NonZeroUsize>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
         handler: ShareableMessageHandler,
     ) -> anyhow::Result<UUID4> {
         self.check_registered();
@@ -3781,7 +4085,7 @@ impl DataActorCore {
         end: Option<DateTime<Utc>>,
         limit: Option<NonZeroUsize>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
         handler: ShareableMessageHandler,
     ) -> anyhow::Result<UUID4> {
         self.check_registered();
@@ -3823,7 +4127,7 @@ impl DataActorCore {
         end: Option<DateTime<Utc>>,
         limit: Option<NonZeroUsize>,
         client_id: Option<ClientId>,
-        params: Option<IndexMap<String, String>>,
+        params: Option<Params>,
         handler: ShareableMessageHandler,
     ) -> anyhow::Result<UUID4> {
         self.check_registered();
@@ -3904,6 +4208,7 @@ fn check_timestamps(
     if let Some(start) = start {
         check_predicate_true(start <= now, "start was > now")?;
     }
+
     if let Some(end) = end {
         check_predicate_true(end <= now, "end was > now")?;
     }

@@ -39,6 +39,7 @@ python = [
   "nautilus-execution/python",
   "nautilus-model/python",
   "pyo3",
+  "pyo3-stub-gen",
 ]
 
 [package.metadata.docs.rs]
@@ -60,11 +61,13 @@ indexmap = { workspace = true }
 log = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 strum = { workspace = true }
 ustr = { workspace = true }
 
 nautilus-indicators = { workspace = true, optional = true }
 pyo3 = { workspace = true, optional = true }
+pyo3-stub-gen = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

@@ -48,13 +48,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (symbols, subscribe_bars, subscribe_mark_prices, subscribe_index_prices) =
         match product_type {
             KrakenProductType::Spot => {
-                // Spot uses "BTC/USD" style symbols (XBT is Bitcoin on Kraken)
-                let symbols = vec!["XBT/USD", "ETH/USD"];
+                // Spot symbols are normalized to BTC (from Kraken's XBT)
+                let symbols = vec!["BTC/USD"];
+                // let symbols = vec!["BTC/USD", "ETH/USD"];
                 (symbols, true, false, false)
             }
             KrakenProductType::Futures => {
                 // Futures perpetual symbols use PF_ prefix (e.g., PF_XBTUSD, PF_ETHUSD)
-                let symbols = vec!["PF_XBTUSD", "PF_ETHUSD"];
+                let symbols = vec!["PF_XBTUSD"];
+                // let symbols = vec!["PF_XBTUSD", "PF_ETHUSD"];
                 (symbols, false, true, true)
             }
         };
@@ -100,6 +102,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_subscribe_bars(subscribe_bars)
         .with_subscribe_mark_prices(subscribe_mark_prices)
         .with_subscribe_index_prices(subscribe_index_prices)
+        .with_request_trades(true)
+        .with_request_bars(subscribe_bars)
+        // .with_book_interval_ms(NonZeroUsize::new(10).unwrap())
+        // .with_subscribe_book_at_interval(true)
         .with_log_data(true);
 
     let tester = DataTester::new(tester_config);

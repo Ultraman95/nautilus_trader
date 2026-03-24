@@ -14,11 +14,6 @@
 
 //! WebSocket message types for Bybit public and private channels.
 
-use nautilus_model::{
-    data::{Data, FundingRateUpdate, IndexPriceUpdate, MarkPriceUpdate, OrderBookDeltas},
-    events::{AccountState, OrderCancelRejected, OrderModifyRejected, OrderRejected},
-    reports::{FillReport, OrderStatusReport, PositionStatusReport},
-};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -44,6 +39,8 @@ use crate::{
 pub struct BybitSubscription {
     pub op: BybitWsOperation,
     pub args: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub req_id: Option<String>,
 }
 
 /// Bybit WebSocket authentication message.
@@ -53,15 +50,49 @@ pub struct BybitAuthRequest {
     pub args: Vec<serde_json::Value>,
 }
 
-/// High level message emitted by the Bybit WebSocket client.
+/// Wire-level frame deserialized from a Bybit WebSocket message.
+///
+/// Represents the raw protocol layer before the handler converts data
+/// variants into the public [`BybitWsMessage`] API.
 #[derive(Debug, Clone)]
-pub enum BybitWsMessage {
-    /// Generic response (subscribe/auth acknowledgement).
-    Response(BybitWsResponse),
+pub enum BybitWsFrame {
     /// Authentication acknowledgement.
     Auth(BybitWsAuthResponse),
     /// Subscription acknowledgement.
     Subscription(BybitWsSubscriptionMsg),
+    /// Order operation response (create/amend/cancel) from trade WebSocket.
+    OrderResponse(BybitWsOrderResponse),
+    /// Error response from the venue.
+    ErrorResponse(BybitWsResponse),
+    /// Orderbook snapshot or delta.
+    Orderbook(BybitWsOrderbookDepthMsg),
+    /// Trade updates.
+    Trade(BybitWsTradeMsg),
+    /// Kline updates.
+    Kline(BybitWsKlineMsg),
+    /// Linear/inverse ticker update.
+    TickerLinear(BybitWsTickerLinearMsg),
+    /// Option ticker update.
+    TickerOption(BybitWsTickerOptionMsg),
+    /// Order updates from private channel.
+    AccountOrder(BybitWsAccountOrderMsg),
+    /// Execution/fill updates from private channel.
+    AccountExecution(BybitWsAccountExecutionMsg),
+    /// Wallet/balance updates from private channel.
+    AccountWallet(BybitWsAccountWalletMsg),
+    /// Position updates from private channel.
+    AccountPosition(BybitWsAccountPositionMsg),
+    /// Payload that does not match any known frame type.
+    Unknown(Value),
+    /// Notification that the underlying connection reconnected.
+    Reconnected,
+}
+
+/// High-level message emitted by the Bybit WebSocket client.
+#[derive(Debug, Clone)]
+pub enum BybitWsMessage {
+    /// Authentication acknowledgement.
+    Auth(BybitWsAuthResponse),
     /// Order operation response (create/amend/cancel) from trade WebSocket.
     OrderResponse(BybitWsOrderResponse),
     /// Orderbook snapshot or delta.
@@ -84,56 +115,18 @@ pub enum BybitWsMessage {
     AccountPosition(BybitWsAccountPositionMsg),
     /// Error received from the venue or client lifecycle.
     Error(BybitWebSocketError),
-    /// Raw message payload that does not yet have a typed representation.
-    Raw(Value),
     /// Notification that the underlying connection reconnected.
     Reconnected,
-    /// Explicit pong event (text-based heartbeat acknowledgement).
-    Pong,
-}
-
-/// Nautilus domain message emitted after parsing Bybit WebSocket events.
-///
-/// This enum contains fully-parsed Nautilus domain objects ready for consumption
-/// by the Python layer without additional processing.
-#[derive(Debug, Clone)]
-pub enum NautilusWsMessage {
-    /// Market data (trades, quotes, bars).
-    Data(Vec<Data>),
-    /// Order book deltas.
-    Deltas(OrderBookDeltas),
-    /// Mark price updates from ticker stream.
-    MarkPrices(Vec<MarkPriceUpdate>),
-    /// Index price updates from ticker stream.
-    IndexPrices(Vec<IndexPriceUpdate>),
-    /// Funding rate updates from ticker stream.
-    FundingRates(Vec<FundingRateUpdate>),
-    /// Order status reports from account stream or operation responses.
-    OrderStatusReports(Vec<OrderStatusReport>),
-    /// Fill reports from executions.
-    FillReports(Vec<FillReport>),
-    /// Position status report.
-    PositionStatusReport(PositionStatusReport),
-    /// Account state from wallet updates.
-    AccountState(AccountState),
-    /// Order rejected event (from failed order submission).
-    OrderRejected(OrderRejected),
-    /// Order cancel rejected event (from failed cancel operation).
-    OrderCancelRejected(OrderCancelRejected),
-    /// Order modify rejected event (from failed amend operation).
-    OrderModifyRejected(OrderModifyRejected),
-    /// Error from venue or client.
-    Error(BybitWebSocketError),
-    /// WebSocket reconnected notification.
-    Reconnected,
-    /// Authentication successful notification.
-    Authenticated,
 }
 
 /// Represents an error event surfaced by the WebSocket client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
+#[cfg_attr(feature = "python", pyo3::pyclass(from_py_object))]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")
+)]
 pub struct BybitWebSocketError {
     /// Error/return code reported by Bybit.
     pub code: i64,
@@ -173,9 +166,11 @@ impl BybitWebSocketError {
             if let Some(op) = &response.op {
                 parts.push(format!("op={op}"));
             }
+
             if let Some(topic) = &response.topic {
                 parts.push(format!("topic={topic}"));
             }
+
             if let Some(success) = response.success {
                 parts.push(format!("success={success}"));
             }
@@ -621,6 +616,8 @@ pub struct BybitWsTickerLinear {
     pub ask1_price: Option<String>,
     #[serde(default)]
     pub ask1_size: Option<String>,
+    #[serde(default)]
+    pub funding_interval_hour: Option<String>,
 }
 
 /// Envelope for linear ticker updates.

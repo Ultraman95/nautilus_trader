@@ -28,7 +28,7 @@ pub const OKX: &str = "OKX";
 pub static OKX_VENUE: LazyLock<Venue> = LazyLock::new(|| Venue::new(Ustr::from(OKX)));
 
 /// See <https://www.okx.com/docs-v5/en/#overview-broker-program> for further details.
-pub const OKX_NAUTILUS_BROKER_ID: &str = "a535cbe8d0c8BCDE";
+pub const OKX_NAUTILUS_BROKER_ID: &str = "5328c82e5542BCDE";
 
 // Use the canonical host with www to avoid cross-domain redirects which may
 // strip authentication headers in some HTTP clients and middleboxes.
@@ -70,6 +70,7 @@ pub const OKX_SUPPORTED_ORDER_TYPES: &[OrderType] = &[
     OrderType::StopLimit,       // Supported via algo order API
     OrderType::MarketIfTouched, // Supported via algo order API
     OrderType::LimitIfTouched,  // Supported via algo order API
+    OrderType::TrailingStopMarket, // Supported via algo order API (move_order_stop)
 ];
 
 /// Conditional order types that require the OKX algo order API.
@@ -78,7 +79,12 @@ pub const OKX_CONDITIONAL_ORDER_TYPES: &[OrderType] = &[
     OrderType::StopLimit,
     OrderType::MarketIfTouched,
     OrderType::LimitIfTouched,
+    OrderType::TrailingStopMarket,
 ];
+
+/// Advance algo order types that require `cancel-advance-algos` for cancellation.
+/// These cannot be cancelled via the standard `cancel-algos` endpoint.
+pub const OKX_ADVANCE_ALGO_ORDER_TYPES: &[OrderType] = &[OrderType::TrailingStopMarket];
 
 /// OKX error codes that should trigger retries.
 ///
@@ -127,3 +133,17 @@ pub const OKX_TARGET_CCY_BASE: &str = "base_ccy";
 
 /// Target currency literal for quote currency.
 pub const OKX_TARGET_CCY_QUOTE: &str = "quote_ccy";
+
+/// Clamps a requested book depth to the nearest OKX-supported value.
+///
+/// OKX WebSocket channels support depths of 50 and 400. Depth 0 means
+/// auto-select based on VIP level. Any other value rounds up to the nearest
+/// supported depth so the subscription succeeds and the data engine can
+/// truncate to the originally requested depth.
+pub fn resolve_book_depth(raw_depth: usize) -> usize {
+    match raw_depth {
+        0 | 400 => raw_depth,
+        1..=50 => 50,
+        _ => 400,
+    }
+}

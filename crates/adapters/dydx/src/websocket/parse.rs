@@ -38,7 +38,7 @@ use rust_decimal::Decimal;
 use super::{DydxWsError, DydxWsResult};
 use crate::{
     common::{
-        enums::{DydxOrderStatus, DydxTickerType},
+        enums::{DydxOrderStatus, DydxPositionSide, DydxTickerType},
         instrument_cache::InstrumentCache,
     },
     execution::{encoder::ClientOrderIdEncoder, types::OrderContext},
@@ -104,7 +104,7 @@ pub fn parse_ws_order_report(
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(crate::grpc::DEFAULT_RUST_CLIENT_METADATA);
 
-    log::info!(
+    log::debug!(
         "[WS_ORDER_RECV] dYdX client_id='{}' meta={:#x} (parsed u32={:?}) | status={:?} | clob_pair={} | side={:?} | size={} | filled={}",
         ws_order.client_id,
         dydx_client_metadata,
@@ -117,24 +117,25 @@ pub fn parse_ws_order_report(
     );
 
     // Look up the original Nautilus client_order_id from the order context first,
-    // then fall back to encoder.decode() if not found in context
+    // then fall back to encoder.decode_if_known() if not found in context
     if let Some(client_id) = dydx_client_id {
         if let Some(ctx) = order_contexts.get(&client_id) {
-            log::info!(
+            log::debug!(
                 "[WS_ORDER_RECV] DECODE via order_contexts: dYdX u32={} -> Nautilus '{}'",
                 client_id,
                 ctx.client_order_id
             );
             report.client_order_id = Some(ctx.client_order_id);
-        } else if let Some(client_order_id) = encoder.decode(client_id, dydx_client_metadata) {
-            // Fallback: use encoder's bidirectional decode with both client_id and client_metadata
-            log::info!(
+        } else if let Some(client_order_id) =
+            encoder.decode_if_known(client_id, dydx_client_metadata)
+        {
+            log::debug!(
                 "[WS_ORDER_RECV] DECODE via encoder fallback: dYdX u32={client_id} meta={dydx_client_metadata:#x} -> Nautilus '{client_order_id}'"
             );
             report.client_order_id = Some(client_order_id);
         } else {
-            log::warn!(
-                "[WS_ORDER_RECV] DECODE FAILED: dYdX u32={client_id} meta={dydx_client_metadata:#x} not found in order_contexts or encoder!"
+            log::debug!(
+                "[WS_ORDER_RECV] Unknown order: dYdX u32={client_id} meta={dydx_client_metadata:#x} (external or previous session)"
             );
         }
     } else {
@@ -309,11 +310,13 @@ pub fn parse_ws_fill_report(
             let (client_id, client_metadata) = *entry.value();
             if let Some(ctx) = order_contexts.get(&client_id) {
                 report.client_order_id = Some(ctx.client_order_id);
-            } else if let Some(client_order_id) = encoder.decode(client_id, client_metadata) {
+            } else if let Some(client_order_id) =
+                encoder.decode_if_known(client_id, client_metadata)
+            {
                 report.client_order_id = Some(client_order_id);
             } else {
-                log::warn!(
-                    "[WS_FILL_RECV] DECODE FAILED: order_id={order_id} -> client_id={client_id} meta={client_metadata:#x} not decodable",
+                log::debug!(
+                    "[WS_FILL_RECV] Unknown order: order_id={order_id} -> client_id={client_id} meta={client_metadata:#x} (external or previous session)",
                 );
             }
         } else {
@@ -477,11 +480,10 @@ fn convert_ws_position_to_http(
         .context("Failed to parse closed_at")?
         .map(|dt| dt.with_timezone(&Utc));
 
-    // Determine side from size sign (HTTP format uses OrderSide, not PositionSide)
     let side = if size.is_sign_positive() {
-        OrderSide::Buy
+        DydxPositionSide::Long
     } else {
-        OrderSide::Sell
+        DydxPositionSide::Short
     };
 
     Ok(PerpetualPosition {
@@ -808,6 +810,7 @@ pub fn parse_candle_bar(
         ))
     })?;
     let mut ts_event = UnixNanos::from(started_at_nanos as u64);
+
     if timestamp_on_close {
         let interval_ns = bar_type
             .spec()
@@ -946,6 +949,7 @@ mod tests {
             Some(rust_decimal_macros::dec!(0.03)),
             Some(rust_decimal_macros::dec!(0.0002)),
             Some(rust_decimal_macros::dec!(0.0005)),
+            None, // info: Option<Params>
             UnixNanos::default(),
             UnixNanos::default(),
         ))
@@ -1239,7 +1243,7 @@ mod tests {
         let http_position = result.unwrap();
         assert_eq!(http_position.market, "BTC-USD");
         assert_eq!(http_position.status, DydxPositionStatus::Open);
-        assert_eq!(http_position.side, OrderSide::Buy); // Positive size = Buy
+        assert_eq!(http_position.side, DydxPositionSide::Long); // Positive size = Long
         assert_eq!(http_position.size, rust_decimal_macros::dec!(1.5));
         assert_eq!(http_position.max_size, rust_decimal_macros::dec!(2.0));
         assert_eq!(
@@ -1816,10 +1820,55 @@ mod tests {
         // 2024-01-01T00:00:00.000Z = 1_704_067_200_000_000_000 ns
         let started_at_ns = 1_704_067_200_000_000_000u64;
         let one_min_ns = 60_000_000_000u64;
+
         if timestamp_on_close {
             assert_eq!(bar.ts_event.as_u64(), started_at_ns + one_min_ns);
         } else {
             assert_eq!(bar.ts_event.as_u64(), started_at_ns);
         }
+    }
+
+    #[rstest]
+    fn test_deserialize_market_trading_update_with_status() {
+        let json = load_json_fixture("ws_markets_status_update.json");
+        let contents: super::super::messages::DydxMarketsContents =
+            serde_json::from_value(json["contents"].clone())
+                .expect("Failed to deserialize markets contents");
+
+        let trading = contents.trading.expect("Expected trading data");
+        assert_eq!(trading.len(), 2);
+
+        let btc = trading.get("BTC-USD").expect("Expected BTC-USD");
+        assert_eq!(btc.status, Some(DydxMarketStatus::Paused));
+        assert_eq!(btc.next_funding_rate, Some("0.0001".to_string()));
+
+        let eth = trading.get("ETH-USD").expect("Expected ETH-USD");
+        assert_eq!(eth.status, Some(DydxMarketStatus::Active));
+    }
+
+    #[rstest]
+    #[case("ACTIVE", DydxMarketStatus::Active)]
+    #[case("PAUSED", DydxMarketStatus::Paused)]
+    #[case("CANCEL_ONLY", DydxMarketStatus::CancelOnly)]
+    #[case("POST_ONLY", DydxMarketStatus::PostOnly)]
+    #[case("INITIALIZING", DydxMarketStatus::Initializing)]
+    #[case("FINAL_SETTLEMENT", DydxMarketStatus::FinalSettlement)]
+    fn test_deserialize_market_status_variants(
+        #[case] status_str: &str,
+        #[case] expected: DydxMarketStatus,
+    ) {
+        let json_str = format!(r#"{{"status": "{status_str}"}}"#);
+        let update: super::super::messages::DydxMarketTradingUpdate =
+            serde_json::from_str(&json_str).expect("Failed to deserialize");
+        assert_eq!(update.status, Some(expected));
+    }
+
+    #[rstest]
+    fn test_deserialize_market_trading_update_without_status() {
+        let json_str = r#"{"nextFundingRate": "0.0001"}"#;
+        let update: super::super::messages::DydxMarketTradingUpdate =
+            serde_json::from_str(json_str).expect("Failed to deserialize");
+        assert_eq!(update.status, None);
+        assert_eq!(update.next_funding_rate, Some("0.0001".to_string()));
     }
 }

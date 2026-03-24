@@ -302,10 +302,18 @@ pub struct GetOrderHistoryByCurrencyParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     pub kind: Option<DeribitProductType>,
-    /// Number of requested items, default - 20, maximum - 10000
+    /// Number of requested items, default - 20, maximum - 1000
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     pub count: Option<u32>,
+    /// Offset for pagination
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub offset: Option<u32>,
+    /// Include orders older than 3 days
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub include_old: Option<bool>,
     /// Include unfilled orders
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
@@ -320,6 +328,8 @@ impl GetOrderHistoryByCurrencyParams {
             currency,
             kind: None,
             count: None,
+            offset: None,
+            include_old: None,
             include_unfilled: None,
         }
     }
@@ -395,6 +405,10 @@ pub struct GetUserTradesByCurrencyAndTimeParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default)]
     pub count: Option<u32>,
+    /// Direction of results sorting: "asc", "desc", or "default"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub sorting: Option<String>,
 }
 
 impl GetUserTradesByCurrencyAndTimeParams {
@@ -407,6 +421,7 @@ impl GetUserTradesByCurrencyAndTimeParams {
             end_timestamp,
             kind: None,
             count: None,
+            sorting: None,
         }
     }
 
@@ -415,6 +430,36 @@ impl GetUserTradesByCurrencyAndTimeParams {
     pub fn builder() -> GetUserTradesByCurrencyAndTimeParamsBuilder {
         GetUserTradesByCurrencyAndTimeParamsBuilder::default()
     }
+}
+
+/// Query parameters for `/public/get_book_summary_by_currency` endpoint.
+#[derive(Clone, Debug, Deserialize, Serialize, Builder)]
+#[builder(setter(into, strip_option))]
+pub struct GetBookSummaryByCurrencyParams {
+    /// Currency filter (e.g., "BTC", "ETH")
+    pub currency: String,
+    /// Optional product type filter (e.g., "option", "future")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default)]
+    pub kind: Option<String>,
+}
+
+impl GetBookSummaryByCurrencyParams {
+    /// Creates parameters for options book summaries for a given currency.
+    #[must_use]
+    pub fn options(currency: impl Into<String>) -> Self {
+        Self {
+            currency: currency.into(),
+            kind: Some("option".to_string()),
+        }
+    }
+}
+
+/// Query parameters for `/public/ticker` endpoint.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GetTickerParams {
+    /// Instrument name (e.g., "BTC-28FEB26-65000-C")
+    pub instrument_name: String,
 }
 
 /// Query parameters for `/private/get_positions` endpoint.

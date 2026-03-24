@@ -36,7 +36,7 @@ use axum::{
 };
 use futures_util::{StreamExt, pin_mut};
 use nautilus_common::testing::wait_until_async;
-use nautilus_core::UnixNanos;
+use nautilus_core::{AtomicSet, UnixNanos};
 use nautilus_deribit::websocket::{
     auth::DERIBIT_DATA_SESSION_NAME, client::DeribitWebSocketClient, enums::DeribitUpdateInterval,
     messages::NautilusWsMessage,
@@ -87,6 +87,7 @@ fn create_btc_perpetual() -> InstrumentAny {
         None, // margin_maint
         None, // maker_fee
         None, // taker_fee
+        None,
         UnixNanos::default(),
         UnixNanos::default(),
     ))
@@ -120,6 +121,7 @@ struct TestServerState {
     is_authenticated: Arc<AtomicBool>,
     fail_next_auth: Arc<AtomicBool>,
     auth_expires_in: Arc<tokio::sync::Mutex<u64>>,
+    suppress_private_subscribe_ack: Arc<AtomicBool>,
 }
 
 impl TestServerState {
@@ -351,6 +353,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<TestServerState>) {
                                     }
                                 });
                                 state.test_request_count.fetch_add(1, Ordering::Relaxed);
+
                                 if socket
                                     .send(Message::Text(test_request.to_string().into()))
                                     .await
@@ -376,6 +379,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<TestServerState>) {
                                 },
                                 "testnet": true
                             });
+
                             if socket
                                 .send(Message::Text(error_response.to_string().into()))
                                 .await
@@ -466,9 +470,93 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<TestServerState>) {
                             break;
                         }
                     }
-                    _ => {
-                        // Unknown method - could send error
+                    Some("private/subscribe") => {
+                        // Suppress ACK to simulate a lost/rejected subscription
+                        if state.suppress_private_subscribe_ack.load(Ordering::Relaxed) {
+                            continue;
+                        }
+
+                        if let Some(params) = payload.get("params")
+                            && let Some(channels) =
+                                params.get("channels").and_then(|c| c.as_array())
+                        {
+                            let mut subscribed_channels = Vec::new();
+                            let fail_list = state.fail_next_subscriptions.lock().await.clone();
+
+                            for channel in channels {
+                                if let Some(channel_str) = channel.as_str() {
+                                    let should_fail = fail_list.contains(&channel_str.to_string());
+
+                                    state
+                                        .subscription_events
+                                        .lock()
+                                        .await
+                                        .push((channel_str.to_string(), !should_fail));
+
+                                    if !should_fail {
+                                        subscribed_channels.push(channel_str.to_string());
+                                        state
+                                            .subscriptions
+                                            .lock()
+                                            .await
+                                            .push(channel_str.to_string());
+                                    }
+                                }
+                            }
+
+                            let response = json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": subscribed_channels,
+                                "testnet": true,
+                                "usIn": 1699999999000000_u64,
+                                "usOut": 1699999999001000_u64,
+                                "usDiff": 1000
+                            });
+
+                            if socket
+                                .send(Message::Text(response.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                     }
+                    Some("private/unsubscribe") => {
+                        if let Some(params) = payload.get("params")
+                            && let Some(channels) =
+                                params.get("channels").and_then(|c| c.as_array())
+                        {
+                            let mut unsubscribed = Vec::new();
+                            for channel in channels {
+                                if let Some(channel_str) = channel.as_str() {
+                                    state
+                                        .unsubscriptions
+                                        .lock()
+                                        .await
+                                        .push(channel_str.to_string());
+                                    unsubscribed.push(channel_str.to_string());
+                                }
+                            }
+
+                            let response = json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": unsubscribed,
+                                "testnet": true
+                            });
+
+                            if socket
+                                .send(Message::Text(response.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             Message::Ping(data) => {
@@ -534,7 +622,7 @@ async fn test_websocket_connection() {
     let instruments = load_test_instruments();
 
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
 
     wait_until_async(
@@ -624,7 +712,7 @@ async fn test_trades_subscription_flow() {
     let instruments = load_test_instruments();
 
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -654,7 +742,7 @@ async fn test_trades_subscription_flow() {
     .await;
 
     // Receive trade data from stream
-    let stream = client.stream();
+    let stream = client.stream().unwrap();
     pin_mut!(stream);
     let message = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
@@ -680,7 +768,7 @@ async fn test_book_subscription_snapshot() {
     let instruments = load_test_instruments();
 
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -710,7 +798,7 @@ async fn test_book_subscription_snapshot() {
     .await;
 
     // Receive book data from stream (should receive snapshot first)
-    let stream = client.stream();
+    let stream = client.stream().unwrap();
     pin_mut!(stream);
     let message = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
@@ -736,14 +824,20 @@ async fn test_ticker_subscription_flow() {
     let instruments = load_test_instruments();
 
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
+
+    // Set mark price subs so handler emits MarkPriceUpdate from ticker
+    let instrument_id = InstrumentId::from("BTC-PERPETUAL.DERIBIT");
+    let mark_price_subs = Arc::new(AtomicSet::new());
+    mark_price_subs.insert(instrument_id);
+    client.set_mark_price_subs(mark_price_subs);
+
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
         .await
         .expect("client inactive");
 
-    let instrument_id = InstrumentId::from("BTC-PERPETUAL.DERIBIT");
     client
         .subscribe_ticker(instrument_id, None)
         .await
@@ -766,7 +860,7 @@ async fn test_ticker_subscription_flow() {
     .await;
 
     // Receive ticker data from stream
-    let stream = client.stream();
+    let stream = client.stream().unwrap();
     pin_mut!(stream);
     let message = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
@@ -792,7 +886,7 @@ async fn test_quote_subscription_flow() {
     let instruments = load_test_instruments();
 
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -822,7 +916,7 @@ async fn test_quote_subscription_flow() {
     .await;
 
     // Receive quote data from stream
-    let stream = client.stream();
+    let stream = client.stream().unwrap();
     pin_mut!(stream);
     let message = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
@@ -848,7 +942,7 @@ async fn test_chart_subscription_flow() {
     let instruments = load_test_instruments();
 
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -878,7 +972,7 @@ async fn test_chart_subscription_flow() {
     .await;
 
     // Receive bar data from stream
-    let stream = client.stream();
+    let stream = client.stream().unwrap();
     pin_mut!(stream);
     let message = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
@@ -904,7 +998,7 @@ async fn test_multiple_subscriptions() {
     let instruments = load_test_instruments();
 
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -953,7 +1047,7 @@ async fn test_unsubscribe() {
     let instruments = load_test_instruments();
 
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -1014,7 +1108,7 @@ async fn test_heartbeat_enable() {
     let instruments = load_test_instruments();
 
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -1048,7 +1142,7 @@ async fn test_heartbeat_test_request_response() {
     let instruments = load_test_instruments();
 
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -1114,7 +1208,7 @@ async fn test_subscription_failure_handling() {
     let instruments = load_test_instruments();
 
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -1157,7 +1251,7 @@ async fn test_reconnection_after_disconnect() {
     let instruments = load_test_instruments();
 
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -1215,7 +1309,7 @@ async fn test_instrument_cache_usage() {
     let mut client = create_test_client(&ws_url);
 
     // Cache instruments before connect
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
 
     client.connect().await.expect("connect failed");
     client
@@ -1230,7 +1324,7 @@ async fn test_instrument_cache_usage() {
         .expect("subscribe failed");
 
     // Receive and verify trade data is properly parsed using cached instrument
-    let stream = client.stream();
+    let stream = client.stream().unwrap();
     pin_mut!(stream);
     let message = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
@@ -1273,7 +1367,7 @@ async fn test_cache_instrument_single() {
         .expect("subscribe failed");
 
     // Verify trades can be parsed with cached instrument
-    let stream = client.stream();
+    let stream = client.stream().unwrap();
     pin_mut!(stream);
     let message = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
@@ -1310,7 +1404,7 @@ async fn test_authentication_success() {
     let instruments = load_test_instruments();
 
     let mut client = create_authenticated_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -1342,7 +1436,7 @@ async fn test_authentication_session_scope() {
     let instruments = load_test_instruments();
 
     let mut client = create_authenticated_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -1379,7 +1473,7 @@ async fn test_authentication_without_credentials_fails() {
 
     // Create client explicitly without credentials (bypasses env var resolution)
     let mut client = create_test_client_without_credentials(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -1405,7 +1499,7 @@ async fn test_raw_subscription_requires_authentication() {
     let instruments = load_test_instruments();
 
     let mut client = create_authenticated_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -1436,7 +1530,7 @@ async fn test_raw_subscription_after_authentication() {
     let instruments = load_test_instruments();
 
     let mut client = create_authenticated_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -1487,7 +1581,7 @@ async fn test_100ms_subscription_without_authentication() {
 
     // Create client without credentials (public only)
     let mut client = create_test_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -1532,7 +1626,7 @@ async fn test_reconnection_with_reauthentication() {
     let instruments = load_test_instruments();
 
     let mut client = create_authenticated_client(&ws_url);
-    client.cache_instruments(instruments);
+    client.cache_instruments(&instruments);
     client.connect().await.expect("connect failed");
     client
         .wait_until_active(5.0)
@@ -1583,6 +1677,139 @@ async fn test_reconnection_with_reauthentication() {
     assert!(
         scopes.iter().all(|s| s.starts_with("session:")),
         "all scopes should be session-based"
+    );
+
+    client.close().await.expect("close failed");
+}
+
+#[tokio::test]
+async fn test_user_subscription_confirmed_after_auth() {
+    let state = Arc::new(TestServerState::default());
+    let addr = start_ws_server(state.clone()).await;
+    let ws_url = format!("ws://{addr}/ws/api/v2");
+
+    let mut client = create_authenticated_client(&ws_url);
+    client.connect().await.expect("connect failed");
+    client
+        .wait_until_active(5.0)
+        .await
+        .expect("client inactive");
+
+    client
+        .authenticate_session("nautilus-test")
+        .await
+        .expect("auth failed");
+
+    client
+        .subscribe_user_orders()
+        .await
+        .expect("subscribe failed");
+    client
+        .subscribe_user_trades()
+        .await
+        .expect("subscribe failed");
+    client
+        .subscribe_user_portfolio()
+        .await
+        .expect("subscribe failed");
+
+    client
+        .wait_for_subscriptions_confirmed(5.0)
+        .await
+        .expect("subscriptions should be confirmed");
+
+    // Verify all three user channels were subscribed on the server
+    let subs = state.subscriptions.lock().await;
+    assert!(subs.contains(&"user.orders.any.any.raw".to_string()));
+    assert!(subs.contains(&"user.trades.any.any.raw".to_string()));
+    assert!(subs.contains(&"user.portfolio.any".to_string()));
+
+    client.close().await.expect("close failed");
+}
+
+#[tokio::test]
+async fn test_user_subscription_failure_leaves_state_clean_for_retry() {
+    let state = Arc::new(TestServerState::default());
+
+    // Suppress all private/subscribe ACKs so subscriptions stay pending
+    state
+        .suppress_private_subscribe_ack
+        .store(true, Ordering::Relaxed);
+
+    let addr = start_ws_server(state.clone()).await;
+    let ws_url = format!("ws://{addr}/ws/api/v2");
+
+    let mut client = create_authenticated_client(&ws_url);
+    client.connect().await.expect("connect failed");
+    client
+        .wait_until_active(5.0)
+        .await
+        .expect("client inactive");
+
+    client
+        .authenticate_session("nautilus-test")
+        .await
+        .expect("auth failed");
+
+    client
+        .subscribe_user_orders()
+        .await
+        .expect("subscribe failed");
+    client
+        .subscribe_user_trades()
+        .await
+        .expect("subscribe failed");
+    client
+        .subscribe_user_portfolio()
+        .await
+        .expect("subscribe failed");
+
+    // Confirmation should time out because server never ACKs
+    let result = client.wait_for_subscriptions_confirmed(1.0).await;
+    assert!(result.is_err(), "should timeout with pending subscriptions");
+
+    // Roll back subscriptions (mirrors what execution.rs connect() does)
+    let _ = client.unsubscribe_user_orders().await;
+    let _ = client.unsubscribe_user_trades().await;
+    let _ = client.unsubscribe_user_portfolio().await;
+
+    // Re-enable ACKs so retry succeeds
+    state
+        .suppress_private_subscribe_ack
+        .store(false, Ordering::Relaxed);
+
+    // Retry: re-subscribe should re-send requests (not skip as "already subscribed")
+    client
+        .subscribe_user_orders()
+        .await
+        .expect("retry subscribe failed");
+    client
+        .subscribe_user_trades()
+        .await
+        .expect("retry subscribe failed");
+    client
+        .subscribe_user_portfolio()
+        .await
+        .expect("retry subscribe failed");
+
+    client
+        .wait_for_subscriptions_confirmed(5.0)
+        .await
+        .expect("retry subscriptions should be confirmed");
+
+    // Verify all three channels confirmed on retry
+    let subs = state.subscriptions.lock().await;
+    assert!(
+        subs.contains(&"user.orders.any.any.raw".to_string()),
+        "user.orders should be subscribed on retry"
+    );
+    assert!(
+        subs.contains(&"user.trades.any.any.raw".to_string()),
+        "user.trades should be subscribed on retry"
+    );
+    assert!(
+        subs.contains(&"user.portfolio.any".to_string()),
+        "user.portfolio should be subscribed on retry"
     );
 
     client.close().await.expect("close failed");

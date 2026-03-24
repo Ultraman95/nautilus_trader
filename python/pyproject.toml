@@ -24,11 +24,11 @@ license = { text = "LGPL-3.0-or-later" }
 readme = "../README.md"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-  "numpy>=1.26.4",
+  "numpy>=2.4.3",
   "pandas>=2.3.3,<3.0.0",
-  "pyarrow>=22.0.0",
-  "python-dotenv>=1.2.1",
-  "pytz>=2025.2.0",
+  "pyarrow>=23.0.1",
+  "python-dotenv>=1.2.2",
+  "pytz>=2026.1",
 ]
 
 [project.urls]
@@ -37,11 +37,8 @@ repository = "https://github.com/nautechsystems/nautilus_trader"
 docs = "https://nautilustrader.io/docs"
 
 [build-system]
-requires = ["maturin>=1.11.5", "patchelf"]
+requires = ["maturin>=1.12.6", "patchelf"]
 build-backend = "maturin"
-
-[tool.maturin.scripts]
-pre-build = "python generate_stubs.py"
 
 [tool.maturin]
 manifest-path = "../crates/pyo3/Cargo.toml"
@@ -49,6 +46,7 @@ module-name = "nautilus_trader._libnautilus"
 python-source = "."
 features = [
   "extension-module",
+  "arrow",
   "high-precision",
   "redis",
   "postgres",
@@ -62,24 +60,30 @@ include = ["**/*.pyi"]
 
 [dependency-groups]
 dev = [
-  "maturin>=1.11.5",
-  "mypy>=1.18.2,<2.0.0",
-  "pre-commit>=4.3.0,<5.0.0",
-  "ruff==0.12.12", # Pinned to 0.12.12 for import sorting stability
+  "maturin>=1.12.6",
+  "mypy>=1.19.1,<2.0.0",
+  "pre-commit>=4.5.1,<5.0.0",
+  "ruff>=0.15.7",
 ]
 test = [
-  "pytest>=7.4.4,<8.0.0",
-  "pytest-asyncio==0.21.1",
-  "pytest-benchmark==5.0.1", # Pinned to 5.0.1 due pytest 8.x requirement
-  "pytest-cov==6.3.0", # Pinned to 6.3.0 due pytest 8.x requirement
-  "pytest-mock>=3.15.1,<4.0.0",
-  "pytest-xdist[psutil]>=3.8.0,<4.0.0",
+  "pytest>=9.0.2",
+  "pytest-asyncio>=1.3.0",
+  "pytest-benchmark>=5.2.3",
+  "pytest-cov>=7.1.0",
+  "pytest-mock>=3.15.1",
+  "pytest-xdist[psutil]>=3.8.0",
 ]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-exclude = ["stubs/**", "../build", "../dist", "../target"]
+exclude = [
+  "stubs/**",
+  "nautilus_trader/_libnautilus.pyi",
+  "../build",
+  "../dist",
+  "../target",
+]
 
 [tool.ruff.lint]
 select = [
@@ -98,7 +102,7 @@ select = [
   # "PT",
   "PYI",
   "Q",
-  # "I",  # Disabled - using isort instead
+  "I",
   "RSE",
   "TID",
   # "SIM",
@@ -117,8 +121,8 @@ ignore = [
   "D102", # Missing docstring in public method  **fix**
   "D103", # Missing docstring in public function  **fix**
   "D104", # Missing docstring in public package  **fix**
-  "D107",
   "D105",
+  "D107",
   "D200", # One-line docstring should fit on one line with quotes (optional style)
   "D203", # 1 blank line required before class docstring (optional style)
   "D205", # 1 blank line required between summary line and description (optional style)
@@ -127,7 +131,7 @@ ignore = [
   "D413", # Missing blank line after last section ('Parameters')
   "D415", # First line should end with a period, question mark, or exclamation point (not always a first line)
   "D416", # Section name should end with a colon ('Warnings:', not 'Warnings') (incorrect?)
-  "E501", # Line too long - ignored and linted separately
+  "E501", # Line too long (linted separately)
   "E741", # Ambiguous variable name (single char)
   "PYI021", # Docstrings should not be included in stubs (OK as this is the natural place for them)
   "RUF012", # Mutable class attributes should be annotated with `typing.ClassVar`
@@ -149,6 +153,11 @@ fixable = ["ALL"]
 unfixable = ["E4", "E501", "UP006", "UP035"]
 # Allow unused variables when underscore-prefixed.
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.per-file-ignores]
+"nautilus_trader/**/*.pyi" = [
+  "PYI011",
+] # Generated stubs use explicit default values from #[pyo3(signature)]
 
 [tool.ruff.lint.isort]
 force-single-line = true

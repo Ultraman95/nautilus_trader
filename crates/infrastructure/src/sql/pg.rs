@@ -21,6 +21,7 @@ fn validate_sql_identifier(value: &str, label: &str) -> anyhow::Result<()> {
     if value.is_empty() {
         anyhow::bail!("{label} must not be empty");
     }
+
     if !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         anyhow::bail!(
             "{label} contains invalid characters (only alphanumeric and underscore allowed): {value}"
@@ -37,7 +38,10 @@ fn escape_sql_string(value: &str) -> String {
 #[builder(default)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.infrastructure")
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.infrastructure",
+        from_py_object
+    )
 )]
 #[cfg_attr(
     feature = "python",

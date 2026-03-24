@@ -253,6 +253,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<TestServerState>) {
                             state.ping_count.fetch_add(1, Ordering::Relaxed);
                             // HyperLiquid expects a pong response
                             let pong_response = json!({"channel": "pong"});
+
                             if socket
                                 .send(Message::Text(pong_response.to_string().into()))
                                 .await
@@ -267,6 +268,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<TestServerState>) {
             }
             Message::Ping(payload) => {
                 state.ping_count.fetch_add(1, Ordering::Relaxed);
+
                 if socket.send(Message::Pong(payload)).await.is_err() {
                     break;
                 }
@@ -349,6 +351,7 @@ fn cache_test_instruments(client: &mut HyperliquidWebSocketClient) {
             3, // size_precision
             Price::from("0.01"),
             Quantity::from("0.001"),
+            None,
             None,
             None,
             None,

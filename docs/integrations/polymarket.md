@@ -4,12 +4,12 @@ Founded in 2020, Polymarket is the world’s largest decentralized prediction ma
 enabling traders to speculate on the outcomes of world events by buying and selling binary option contracts using cryptocurrency.
 
 NautilusTrader provides a venue integration for data and execution via Polymarket's Central Limit Order Book (CLOB) API.
-The integration leverages the [official Python CLOB client library](https://github.com/Polymarket/py-clob-client)
-to facilitate interaction with the Polymarket platform.
+The integration uses the [official Python CLOB client library](https://github.com/Polymarket/py-clob-client)
+to interact with the Polymarket platform.
 
 NautilusTrader supports multiple Polymarket signature types for order signing, providing flexibility for different wallet configurations.
 This integration ensures that traders can execute orders securely and efficiently across various wallet types,
-while NautilusTrader abstracts the complexity of signing and preparing orders for seamless execution.
+while NautilusTrader abstracts the complexity of signing and preparing orders for execution.
 
 ## Installation
 
@@ -38,7 +38,7 @@ All assets traded on Polymarket are quoted and settled in **USDC.e (PoS)**, [see
 
 ## Polymarket documentation
 
-Polymarket offers comprehensive resources for different audiences:
+Polymarket offers resources for different audiences:
 
 - [Polymarket Learn](https://learn.polymarket.com/): Educational content and guides for users to understand the platform and how to engage with it.
 - [Polymarket CLOB API](https://docs.polymarket.com/#introduction): Technical documentation for developers interacting with the Polymarket CLOB API.
@@ -222,24 +222,13 @@ Polymarket interprets order quantities differently depending on the order type *
 
 As a result, a market buy order submitted with a base-denominated quantity will execute far more size than intended.
 
-:::warning
-When submitting market BUY orders, set `quote_quantity=True` (or pre-compute the quote-denominated amount)
-and configure the execution engine with `convert_quote_qty_to_base=False` so the quote amount reaches the adapter unchanged.
-The Polymarket execution client denies base-denominated market buys to prevent unintended fills.
-
-**NautilusTrader now forwards market orders to Polymarket's native market-order endpoint, so the
-quote amount you specify for a BUY is executed directly (no more synthetic max-price limits).**
-:::
+When submitting market BUY orders, set `quote_quantity=True` on the order. The adapter converts
+the quote amount (USDC.e) to base units (shares) using the crossing price from the order book
+before submitting to the CLOB. The Polymarket execution client denies base-denominated market
+buys to prevent unintended fills.
 
 ```python
-from nautilus_trader.execution.config import ExecEngineConfig
-from nautilus_trader.execution.engine import ExecutionEngine
-
-# Temporary: disable automatic conversion until the behaviour is fully removed in a future release
-config = ExecEngineConfig(convert_quote_qty_to_base=False)
-engine = ExecutionEngine(msgbus=msgbus, cache=cache, clock=clock, config=config)
-
-# Correct: Market BUY with quote quantity (spend $10 USDC)
+# Market BUY with quote quantity (spend $10 USDC)
 order = strategy.order_factory.market(
     instrument_id=instrument_id,
     order_side=OrderSide.BUY,
@@ -419,12 +408,12 @@ When you attempt to subscribe to 501 or more instruments on a single WebSocket c
 
 NautilusTrader automatically manages WebSocket connections to handle this limitation:
 
-- When the subscription count exceeds 500 instruments, the adapter automatically creates additional WebSocket connections.
-- Each connection maintains up to 500 instrument subscriptions.
+- The adapter defaults to **200 instrument subscriptions per connection** (configurable via `ws_max_subscriptions_per_connection`).
+- When the subscription count exceeds this limit, additional WebSocket connections are created automatically.
 - This ensures you receive complete order book data (including initial snapshots) for all subscribed instruments.
 
 :::tip
-If you need to subscribe to a large number of instruments (e.g., 5000+), the adapter will automatically distribute these subscriptions across multiple WebSocket connections, with each connection handling up to 500 instruments.
+If you need to subscribe to a large number of instruments (e.g., 5000+), the adapter will automatically distribute these subscriptions across multiple WebSocket connections. You can tune the per-connection limit up to 500 via `ws_max_subscriptions_per_connection`.
 :::
 
 ## Rate limiting
@@ -439,11 +428,11 @@ HTTP 429 responses and requests are throttled rather than immediately rejected.
 | Public endpoints     | 100 req/min per IP | Unauthenticated market data requests.       |
 | Authenticated reads  | 300 req/min per key| Authenticated data queries.                 |
 | Trading endpoints    | 60 orders/min      | Order placement and cancellation.           |
-| Order endpoint       | 3000 req/10 min    | Rolling or fixed window (unconfirmed).      |
+| Order endpoint       | 3,000 req/10 min   | Rolling or fixed window (unconfirmed).      |
 
 ### WebSocket limits
 
-- **Subscriptions per connection**: 500 instruments maximum (handled automatically by the adapter).
+- **Subscriptions per connection**: 500 instruments maximum (adapter defaults to 200, configurable via `ws_max_subscriptions_per_connection`).
 - **Connections**: 20 subscriptions per connection for some endpoints.
 
 :::warning
@@ -495,6 +484,8 @@ The following limitations are currently known:
 | `update_instruments_interval_mins` | `60`         | Interval (minutes) between instrument catalogue refreshes. |
 | `compute_effective_deltas`         | `False`      | Compute effective order book deltas for bandwidth savings. |
 | `drop_quotes_missing_side`         | `True`       | Drop quotes with missing bid/ask prices instead of substituting boundary values. |
+| `instrument_config`                | `None`       | Optional `PolymarketInstrumentProviderConfig` for instrument loading. |
+| `ws_max_subscriptions_per_connection` | `200`     | Maximum instrument subscriptions per WebSocket connection (Polymarket limit is 500). |
 
 ### Execution client configuration options
 
@@ -515,6 +506,9 @@ The following limitations are currently known:
 | `ack_timeout_secs`                   | `5.0`        | Timeout (seconds) to wait for order/trade acknowledgment from cache. |
 | `generate_order_history_from_trades` | `False`      | Generate synthetic order history from trade reports when `True` (experimental). |
 | `log_raw_ws_messages`                | `False`      | Log raw WebSocket payloads at INFO level when `True`. |
+| `instrument_config`                  | `None`       | Optional `PolymarketInstrumentProviderConfig` for instrument loading. |
+| `ws_max_subscriptions_per_connection` | `200`       | Maximum instrument subscriptions per WebSocket connection (Polymarket limit is 500). |
+| `use_data_api`                       | `False`      | Use the Data API instead of CLOB API for fetching user positions (experimental). |
 
 ### Instrument provider configuration options
 
@@ -671,86 +665,40 @@ event_markets = await loader.get_event_markets("highest-temperature-in-nyc-on-ja
 For quick exploration without creating a loader, use the static `query_*` methods
 (see [Method naming conventions](#method-naming-conventions) above).
 
-### Fetching order book history
+### Fetching trade history
 
-The `load_orderbook_snapshots()` convenience method fetches and parses order book data in one step:
-
-```python
-import pandas as pd
-
-# Define time range
-end = pd.Timestamp.now(tz="UTC")
-start = end - pd.Timedelta(hours=24)
-
-# Fetch and parse order book snapshots (automatic pagination handling)
-deltas = await loader.load_orderbook_snapshots(
-    start=start,
-    end=end,
-)
-```
-
-Alternatively, you can fetch and parse separately using the lower-level methods:
-
-```python
-# Convert timestamps to milliseconds for the API
-start_time_ms = int(start.timestamp() * 1000)
-end_time_ms = int(end.timestamp() * 1000)
-token_id = loader.token_id
-
-orderbook_snapshots = await loader.fetch_orderbook_history(
-    token_id=token_id,
-    start_time_ms=start_time_ms,
-    end_time_ms=end_time_ms,
-)
-
-# Parse to NautilusTrader OrderBookDeltas
-deltas = loader.parse_orderbook_snapshots(orderbook_snapshots)
-```
-
-### Fetching price history
-
-The `load_trades()` convenience method fetches and parses trade data in one step:
+The `load_trades()` convenience method fetches and parses historical trades in one step:
 
 ```python
 import pandas as pd
 
-# Define time range
+# Load all available trades
+trades = await loader.load_trades()
+
+# Or filter by time range (client-side filtering)
 end = pd.Timestamp.now(tz="UTC")
 start = end - pd.Timedelta(hours=24)
 
-# Fetch and parse trade ticks (1-minute fidelity)
 trades = await loader.load_trades(
     start=start,
     end=end,
-    fidelity=1,  # 1 = 1 minute resolution
 )
 ```
 
 Alternatively, you can fetch and parse separately using the lower-level methods:
 
 ```python
-# Convert timestamps to milliseconds for the API
-start_time_ms = int(start.timestamp() * 1000)
-end_time_ms = int(end.timestamp() * 1000)
-token_id = loader.token_id
+condition_id = loader.condition_id
 
-# Fetch raw price history
-price_history = await loader.fetch_price_history(
-    token_id=token_id,
-    start_time_ms=start_time_ms,
-    end_time_ms=end_time_ms,
-    fidelity=1,  # 1 = 1 minute resolution
-)
+# Fetch raw trades from the Polymarket Data API
+raw_trades = await loader.fetch_trades(condition_id=condition_id)
 
 # Parse to NautilusTrader TradeTicks
-trades = loader.parse_price_history(price_history)
+trades = loader.parse_trades(raw_trades)
 ```
 
-:::warning
-The `parse_price_history()` method creates synthetic `TradeTick` objects from price points,
-as the price history endpoint doesn't include actual trade sizes. Trade sizes are set to `1.0`
-and the aggressor side is inferred from price movements.
-:::
+Trade data is sourced from the [Polymarket Data API](https://data-api.polymarket.com/trades),
+which provides real execution data including price, size, side, and on-chain transaction hash.
 
 ### Complete backtest example
 
@@ -760,17 +708,15 @@ A complete working example is available at `examples/backtest/polymarket_simple_
 import asyncio
 from decimal import Decimal
 
-import pandas as pd
-
 from nautilus_trader.adapters.polymarket import POLYMARKET_VENUE
 from nautilus_trader.adapters.polymarket import PolymarketDataLoader
 from nautilus_trader.backtest.config import BacktestEngineConfig
 from nautilus_trader.backtest.engine import BacktestEngine
-from nautilus_trader.examples.strategies.orderbook_imbalance import OrderBookImbalance
-from nautilus_trader.examples.strategies.orderbook_imbalance import OrderBookImbalanceConfig
+from nautilus_trader.examples.strategies.ema_cross_long_only import EMACrossLongOnly
+from nautilus_trader.examples.strategies.ema_cross_long_only import EMACrossLongOnlyConfig
 from nautilus_trader.model.currencies import USDC_POS
+from nautilus_trader.model.data import BarType
 from nautilus_trader.model.enums import AccountType
-from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.identifiers import TraderId
 from nautilus_trader.model.objects import Money
@@ -780,19 +726,8 @@ async def run_backtest():
     loader = await PolymarketDataLoader.from_market_slug("gta-vi-released-before-june-2026")
     instrument = loader.instrument
 
-    # Fetch historical data (last 24 hours)
-    end = pd.Timestamp.now(tz="UTC")
-    start = end - pd.Timedelta(hours=24)
-
-    deltas = await loader.load_orderbook_snapshots(
-        start=start,
-        end=end,
-    )
-
-    trades = await loader.load_trades(
-        start=start,
-        end=end,
-    )
+    # Load historical trades from the Polymarket Data API
+    trades = await loader.load_trades()
 
     # Configure and run backtest
     config = BacktestEngineConfig(trader_id=TraderId("BACKTESTER-001"))
@@ -804,19 +739,19 @@ async def run_backtest():
         account_type=AccountType.CASH,
         base_currency=USDC_POS,
         starting_balances=[Money(10_000, USDC_POS)],
-        book_type=BookType.L2_MBP,
     )
 
     engine.add_instrument(instrument)
-    engine.add_data(deltas)
     engine.add_data(trades)
 
-    strategy_config = OrderBookImbalanceConfig(
+    bar_type = BarType.from_str(f"{instrument.id}-100-TICK-LAST-INTERNAL")
+    strategy_config = EMACrossLongOnlyConfig(
         instrument_id=instrument.id,
-        max_trade_size=Decimal("20"),
+        bar_type=bar_type,
+        trade_size=Decimal("20"),
     )
 
-    strategy = OrderBookImbalance(config=strategy_config)
+    strategy = EMACrossLongOnly(config=strategy_config)
     engine.add_strategy(strategy=strategy)
     engine.run()
 

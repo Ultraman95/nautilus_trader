@@ -26,9 +26,9 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use dashmap::DashMap;
 use nautilus_core::{
-    UUID4, consts::NAUTILUS_USER_AGENT, nanos::UnixNanos, time::get_atomic_clock_realtime,
+    AtomicMap, AtomicTime, UUID4, consts::NAUTILUS_USER_AGENT, nanos::UnixNanos,
+    time::get_atomic_clock_realtime,
 };
 use nautilus_model::{
     data::{Bar, BookOrder, FundingRateUpdate, TradeTick},
@@ -79,14 +79,14 @@ use crate::common::{
     consts::{AX_HTTP_URL, AX_ORDERS_URL},
     credential::Credential,
     enums::{AxCandleWidth, AxInstrumentState},
-    parse::client_order_id_to_cid,
+    parse::{cid_to_client_order_id, client_order_id_to_cid},
 };
 
 /// Default Ax REST API rate limit.
 ///
 /// Conservative default of 10 requests per second.
 pub static AX_REST_QUOTA: LazyLock<Quota> = LazyLock::new(|| {
-    Quota::per_second(NonZeroU32::new(10).expect("Should be a valid non-zero u32"))
+    Quota::per_second(NonZeroU32::new(10).expect("non-zero")).expect("valid constant")
 });
 
 const AX_GLOBAL_RATE_KEY: &str = "architect:global";
@@ -276,7 +276,7 @@ impl AxRawHttpClient {
     ///
     /// Panics if the internal lock is poisoned (indicates a panic in another thread).
     pub fn set_session_token(&self, token: String) {
-        // SAFETY: Lock poisoning indicates a panic in another thread, which is fatal
+        // Lock poisoning indicates a panic in another thread, which is fatal
         *self.session_token.write().expect("Lock poisoned") = Some(token);
     }
 
@@ -299,7 +299,7 @@ impl AxRawHttpClient {
     }
 
     fn auth_headers(&self) -> Result<HashMap<String, String>, AxHttpError> {
-        // SAFETY: Lock poisoning indicates a panic in another thread, which is fatal
+        // Lock poisoning indicates a panic in another thread, which is fatal
         let guard = self.session_token.read().expect("Lock poisoned");
         let session_token = guard.as_ref().ok_or(AxHttpError::MissingSessionToken)?;
 
@@ -595,9 +595,8 @@ impl AxRawHttpClient {
             return Some((cred.api_key().to_string(), cred.api_secret().to_string()));
         }
 
-        let api_key = std::env::var("AX_API_KEY").ok()?;
-        let api_secret = std::env::var("AX_API_SECRET").ok()?;
-        Some((api_key, api_secret))
+        let cred = Credential::resolve(None, None)?;
+        Some((cred.api_key().to_string(), cred.api_secret().to_string()))
     }
 
     /// Places a new order.
@@ -1045,11 +1044,19 @@ impl AxRawHttpClient {
 #[derive(Debug)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.architect")
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.architect",
+        from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.architect_ax")
 )]
 pub struct AxHttpClient {
     pub(crate) inner: Arc<AxRawHttpClient>,
-    pub(crate) instruments_cache: Arc<DashMap<Ustr, InstrumentAny>>,
+    pub(crate) instruments_cache: Arc<AtomicMap<Ustr, InstrumentAny>>,
+    clock: &'static AtomicTime,
     cache_initialized: Arc<AtomicBool>,
 }
 
@@ -1059,6 +1066,7 @@ impl Clone for AxHttpClient {
             inner: self.inner.clone(),
             instruments_cache: self.instruments_cache.clone(),
             cache_initialized: self.cache_initialized.clone(),
+            clock: self.clock,
         }
     }
 }
@@ -1096,8 +1104,9 @@ impl AxHttpClient {
                 retry_delay_max_ms,
                 proxy_url,
             )?),
-            instruments_cache: Arc::new(DashMap::new()),
+            instruments_cache: Arc::new(AtomicMap::new()),
             cache_initialized: Arc::new(AtomicBool::new(false)),
+            clock: get_atomic_clock_realtime(),
         })
     }
 
@@ -1130,8 +1139,9 @@ impl AxHttpClient {
                 retry_delay_max_ms,
                 proxy_url,
             )?),
-            instruments_cache: Arc::new(DashMap::new()),
+            instruments_cache: Arc::new(AtomicMap::new()),
             cache_initialized: Arc::new(AtomicBool::new(false)),
+            clock: get_atomic_clock_realtime(),
         })
     }
 
@@ -1166,7 +1176,7 @@ impl AxHttpClient {
 
     /// Generates a timestamp for initialization.
     fn generate_ts_init(&self) -> UnixNanos {
-        get_atomic_clock_realtime().get_time_ns()
+        self.clock.get_time_ns()
     }
 
     /// Checks if the client is initialized.
@@ -1181,19 +1191,21 @@ impl AxHttpClient {
     #[must_use]
     pub fn get_cached_symbols(&self) -> Vec<String> {
         self.instruments_cache
-            .iter()
-            .map(|entry| entry.key().to_string())
+            .load()
+            .keys()
+            .map(|k| k.to_string())
             .collect()
     }
 
     /// Caches multiple instruments.
     ///
     /// Any existing instruments with the same symbols will be replaced.
-    pub fn cache_instruments(&self, instruments: Vec<InstrumentAny>) {
-        for inst in instruments {
-            self.instruments_cache
-                .insert(inst.raw_symbol().inner(), inst);
-        }
+    pub fn cache_instruments(&self, instruments: &[InstrumentAny]) {
+        self.instruments_cache.rcu(|m| {
+            for inst in instruments {
+                m.insert(inst.raw_symbol().inner(), inst.clone());
+            }
+        });
         self.cache_initialized.store(true, Ordering::Release);
     }
 
@@ -1251,9 +1263,7 @@ impl AxHttpClient {
 
     /// Gets an instrument from the cache by symbol.
     pub fn get_instrument(&self, symbol: &Ustr) -> Option<InstrumentAny> {
-        self.instruments_cache
-            .get(symbol)
-            .map(|entry| entry.value().clone())
+        self.instruments_cache.get_cloned(symbol)
     }
 
     /// Requests all instruments from Ax.
@@ -1420,6 +1430,7 @@ impl AxHttpClient {
                     if start.is_some_and(|s| tick.ts_event < s) {
                         continue;
                     }
+
                     if end.is_some_and(|e| tick.ts_event > e) {
                         continue;
                     }
@@ -1506,7 +1517,8 @@ impl AxHttpClient {
             .funding_rates
             .iter()
             .map(|r| parse_funding_rate(r, instrument_id, ts_init))
-            .collect();
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map_err(|e| AxHttpError::from(e.to_string()))?;
 
         Ok(funding_rates)
     }
@@ -1592,13 +1604,12 @@ impl AxHttpClient {
         let filled_qty = Quantity::new(filled as f64, size_precision);
         let ts_init = self.generate_ts_init();
 
-        let resolved_coid = client_order_id
-            .unwrap_or_else(|| ClientOrderId::new(format!("CID-{}", detail.clord_id.unwrap_or(0))));
+        let resolved_coid = client_order_id.or_else(|| detail.clord_id.map(cid_to_client_order_id));
 
         Ok(OrderStatusReport::new(
             account_id,
             instrument_id,
-            Some(resolved_coid),
+            resolved_coid,
             voi,
             order_side,
             order_type,

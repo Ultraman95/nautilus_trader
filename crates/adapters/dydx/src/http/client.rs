@@ -14,7 +14,7 @@
 // -------------------------------------------------------------------------------------------------
 
 //! Provides an ergonomic wrapper around the **dYdX v4 Indexer REST API** –
-//! <https://docs.dydx.exchange/api_integration-indexer/indexer_api>.
+//! <https://docs.dydx.xyz/api_integration-indexer/indexer_api>.
 //!
 //! This module exports two complementary HTTP clients following the standardized
 //! two-layer architecture pattern established in OKX, Bybit, and BitMEX adapters:
@@ -44,11 +44,11 @@
 //!
 //! # Official Documentation
 //!
-//! | Endpoint                             | Reference                                              |
-//! |--------------------------------------|--------------------------------------------------------|
-//! | Market data                          | <https://docs.dydx.exchange/api_integration-indexer/indexer_api#markets> |
-//! | Account data                         | <https://docs.dydx.exchange/api_integration-indexer/indexer_api#accounts> |
-//! | Utility endpoints                    | <https://docs.dydx.exchange/api_integration-indexer/indexer_api#utility> |
+//! | Endpoint          | Reference                                                                 |
+//! |-------------------|---------------------------------------------------------------------------|
+//! | Market data       | <https://docs.dydx.xyz/api_integration-indexer/indexer_api#markets>  |
+//! | Account data      | <https://docs.dydx.xyz/api_integration-indexer/indexer_api#accounts> |
+//! | Utility endpoints | <https://docs.dydx.xyz/api_integration-indexer/indexer_api#utility>  |
 
 use std::{
     collections::HashMap,
@@ -58,13 +58,20 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use nautilus_core::{consts::NAUTILUS_USER_AGENT, time::get_atomic_clock_realtime};
+use nautilus_core::{
+    UnixNanos,
+    consts::NAUTILUS_USER_AGENT,
+    time::{AtomicTime, get_atomic_clock_realtime},
+};
 use nautilus_model::{
-    data::{Bar, BarType, BookOrder, OrderBookDelta, OrderBookDeltas, TradeTick},
+    data::{
+        Bar, BarType, BookOrder, FundingRateUpdate, OrderBookDelta, OrderBookDeltas, TradeTick,
+    },
     enums::{
         AggregationSource, BarAggregation, BookAction, OrderSide as NautilusOrderSide, PriceType,
         RecordFlag,
     },
+    events::AccountState,
     identifiers::{AccountId, InstrumentId},
     instruments::{Instrument, InstrumentAny},
     reports::{FillReport, OrderStatusReport, PositionStatusReport},
@@ -87,7 +94,7 @@ use crate::{
         instrument_cache::InstrumentCache,
         parse::extract_raw_symbol,
     },
-    http::parse::parse_instrument_any,
+    http::parse::{parse_account_state_from_http, parse_instrument_any},
 };
 
 /// Maximum number of candles returned per dYdX API request.
@@ -117,8 +124,9 @@ fn bar_type_to_resolution(bar_type: &BarType) -> anyhow::Result<DydxCandleResolu
 /// The dYdX Indexer API rate limits are generous for read-only operations:
 /// - General: 100 requests per 10 seconds per IP
 /// - We use a conservative 10 requests per second as the default quota.
-pub static DYDX_REST_QUOTA: LazyLock<Quota> =
-    LazyLock::new(|| Quota::per_second(NonZeroU32::new(10).unwrap()));
+pub static DYDX_REST_QUOTA: LazyLock<Quota> = LazyLock::new(|| {
+    Quota::per_second(NonZeroU32::new(10).expect("non-zero")).expect("valid constant")
+});
 
 /// Represents a dYdX HTTP response wrapper.
 ///
@@ -164,12 +172,12 @@ impl Debug for DydxRawHttpClient {
 }
 
 impl DydxRawHttpClient {
-    /// Cancel all pending HTTP requests.
+    /// Cancels all pending HTTP requests.
     pub fn cancel_all_requests(&self) {
         self.cancellation_token.cancel();
     }
 
-    /// Get the cancellation token for this client.
+    /// Returns the cancellation token for this client.
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation_token
     }
@@ -221,19 +229,19 @@ impl DydxRawHttpClient {
         })
     }
 
-    /// Check if this client is configured for testnet.
+    /// Returns `true` if this client is configured for testnet.
     #[must_use]
     pub const fn is_testnet(&self) -> bool {
         self.is_testnet
     }
 
-    /// Get the base URL being used by this client.
+    /// Returns the base URL used by this client.
     #[must_use]
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
 
-    /// Send a request to a dYdX Indexer API endpoint.
+    /// Sends a request to a dYdX Indexer API endpoint.
     ///
     /// **Note**: dYdX Indexer API does not require authentication headers.
     ///
@@ -300,7 +308,7 @@ impl DydxRawHttpClient {
             if msg == "canceled" {
                 DydxHttpError::Canceled("Adapter disconnecting or shutting down".to_string())
             } else if msg.contains("Timed out") {
-                // Timeouts are transient — map to HttpClientError so they are retried
+                // Timeouts are transient -- map to HttpClientError so they are retried
                 DydxHttpError::HttpClientError(msg)
             } else {
                 DydxHttpError::ValidationError(msg)
@@ -324,7 +332,7 @@ impl DydxRawHttpClient {
         })
     }
 
-    /// Send a POST request to a dYdX Indexer API endpoint.
+    /// Sends a POST request to a dYdX Indexer API endpoint.
     ///
     /// Note: Most dYdX Indexer endpoints are GET-based. POST is rarely used.
     ///
@@ -389,7 +397,7 @@ impl DydxRawHttpClient {
             if msg == "canceled" {
                 DydxHttpError::Canceled("Adapter disconnecting or shutting down".to_string())
             } else if msg.contains("Timed out") {
-                // Timeouts are transient — map to HttpClientError so they are retried
+                // Timeouts are transient -- map to HttpClientError so they are retried
                 DydxHttpError::HttpClientError(msg)
             } else {
                 DydxHttpError::ValidationError(msg)
@@ -439,62 +447,6 @@ impl DydxRawHttpClient {
             .await
     }
 
-    /// Fetch all instruments and parse them into Nautilus `InstrumentAny` types.
-    ///
-    /// This method fetches all perpetual markets from dYdX and converts them
-    /// into Nautilus instrument definitions using the `parse_instrument_any` function.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The HTTP request fails.
-    /// - The response cannot be parsed.
-    /// - Any instrument parsing fails.
-    ///
-    pub async fn fetch_instruments(
-        &self,
-        maker_fee: Option<Decimal>,
-        taker_fee: Option<Decimal>,
-    ) -> Result<Vec<InstrumentAny>, DydxHttpError> {
-        let markets_response = self.get_markets().await?;
-        let ts_init = get_atomic_clock_realtime().get_time_ns();
-
-        let mut instruments = Vec::new();
-        let mut skipped_inactive = 0;
-
-        for (ticker, market) in markets_response.markets {
-            if !super::parse::is_market_active(&market.status) {
-                log::debug!(
-                    "Skipping inactive market {ticker} (status: {:?})",
-                    market.status
-                );
-                skipped_inactive += 1;
-                continue;
-            }
-
-            match super::parse::parse_instrument_any(&market, maker_fee, taker_fee, ts_init) {
-                Ok(instrument) => {
-                    instruments.push(instrument);
-                }
-                Err(e) => {
-                    log::error!("Failed to parse instrument {ticker}: {e}");
-                }
-            }
-        }
-
-        if skipped_inactive > 0 {
-            log::info!(
-                "Parsed {} instruments, skipped {} inactive",
-                instruments.len(),
-                skipped_inactive
-            );
-        } else {
-            log::info!("Parsed {} instruments", instruments.len());
-        }
-
-        Ok(instruments)
-    }
-
     /// Fetch orderbook for a specific market.
     ///
     /// # Errors
@@ -521,9 +473,11 @@ impl DydxRawHttpClient {
     ) -> Result<super::models::TradesResponse, DydxHttpError> {
         let endpoint = format!("/v4/trades/perpetualMarket/{ticker}");
         let mut query_parts = Vec::new();
+
         if let Some(l) = limit {
             query_parts.push(format!("limit={l}"));
         }
+
         if let Some(height) = starting_before_or_at_height {
             query_parts.push(format!("createdBeforeOrAtHeight={height}"));
         }
@@ -551,13 +505,16 @@ impl DydxRawHttpClient {
     ) -> Result<super::models::CandlesResponse, DydxHttpError> {
         let endpoint = format!("/v4/candles/perpetualMarkets/{ticker}");
         let mut query_parts = vec![format!("resolution={resolution}")];
+
         if let Some(l) = limit {
             query_parts.push(format!("limit={l}"));
         }
+
         if let Some(from) = from_iso {
             let from_str = from.to_rfc3339();
             query_parts.push(format!("fromISO={}", urlencoding::encode(&from_str)));
         }
+
         if let Some(to) = to_iso {
             let to_str = to.to_rfc3339();
             query_parts.push(format!("toISO={}", urlencoding::encode(&to_str)));
@@ -598,9 +555,12 @@ impl DydxRawHttpClient {
             format!("address={address}"),
             format!("subaccountNumber={subaccount_number}"),
         ];
+
         if let Some(m) = market {
             query_parts.push(format!("market={m}"));
+            query_parts.push("marketType=PERPETUAL".to_string());
         }
+
         if let Some(l) = limit {
             query_parts.push(format!("limit={l}"));
         }
@@ -625,9 +585,12 @@ impl DydxRawHttpClient {
             format!("address={address}"),
             format!("subaccountNumber={subaccount_number}"),
         ];
+
         if let Some(m) = market {
             query_parts.push(format!("market={m}"));
+            query_parts.push("marketType=PERPETUAL".to_string());
         }
+
         if let Some(l) = limit {
             query_parts.push(format!("limit={l}"));
         }
@@ -651,6 +614,7 @@ impl DydxRawHttpClient {
             format!("address={address}"),
             format!("subaccountNumber={subaccount_number}"),
         ];
+
         if let Some(l) = limit {
             query_parts.push(format!("limit={l}"));
         }
@@ -658,7 +622,47 @@ impl DydxRawHttpClient {
         self.send_request(Method::GET, endpoint, Some(&query)).await
     }
 
-    /// Get current server time.
+    /// Fetch historical funding rates for a market.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP request fails or response parsing fails.
+    pub async fn get_historical_funding(
+        &self,
+        ticker: &str,
+        limit: Option<u32>,
+        effective_before_or_at_height: Option<u64>,
+        effective_before_or_at: Option<DateTime<Utc>>,
+    ) -> Result<super::models::HistoricalFundingResponse, DydxHttpError> {
+        let endpoint = format!("/v4/historicalFunding/{ticker}");
+        let mut query_parts = Vec::new();
+
+        if let Some(l) = limit {
+            query_parts.push(format!("limit={l}"));
+        }
+
+        if let Some(height) = effective_before_or_at_height {
+            query_parts.push(format!("effectiveBeforeOrAtHeight={height}"));
+        }
+
+        if let Some(before) = effective_before_or_at {
+            let before_str = before.to_rfc3339();
+            query_parts.push(format!(
+                "effectiveBeforeOrAt={}",
+                urlencoding::encode(&before_str)
+            ));
+        }
+
+        let query = if query_parts.is_empty() {
+            None
+        } else {
+            Some(query_parts.join("&"))
+        };
+        self.send_request(Method::GET, &endpoint, query.as_deref())
+            .await
+    }
+
+    /// Returns the current server time.
     ///
     /// # Errors
     ///
@@ -667,7 +671,7 @@ impl DydxRawHttpClient {
         self.send_request(Method::GET, "/v4/time", None).await
     }
 
-    /// Get current blockchain height.
+    /// Returns the current blockchain height.
     ///
     /// # Errors
     ///
@@ -695,7 +699,11 @@ impl DydxRawHttpClient {
 #[derive(Debug)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.dydx")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.dydx", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.dydx")
 )]
 pub struct DydxHttpClient {
     /// Raw HTTP client wrapped in Arc for efficient cloning.
@@ -705,6 +713,7 @@ pub struct DydxHttpClient {
     /// This cache is shared across HTTP client, WebSocket client, and execution client.
     /// It provides O(1) lookups by symbol, market ticker, or clob_pair_id.
     pub(crate) instrument_cache: Arc<InstrumentCache>,
+    clock: &'static AtomicTime,
 }
 
 impl Clone for DydxHttpClient {
@@ -712,6 +721,7 @@ impl Clone for DydxHttpClient {
         Self {
             inner: self.inner.clone(),
             instrument_cache: Arc::clone(&self.instrument_cache),
+            clock: self.clock,
         }
     }
 }
@@ -782,6 +792,7 @@ impl DydxHttpClient {
                 retry_config,
             )?),
             instrument_cache,
+            clock: get_atomic_clock_realtime(),
         })
     }
 
@@ -801,7 +812,7 @@ impl DydxHttpClient {
         taker_fee: Option<Decimal>,
     ) -> anyhow::Result<Vec<InstrumentAny>> {
         let markets_response = self.inner.get_markets().await?;
-        let ts_init = get_atomic_clock_realtime().get_time_ns();
+        let ts_init = self.generate_ts_init();
 
         let mut instruments = Vec::new();
         let mut skipped_inactive = 0;
@@ -860,7 +871,7 @@ impl DydxHttpClient {
     pub async fn fetch_and_cache_instruments(&self) -> anyhow::Result<()> {
         // Fetch first - preserve existing cache on network failure
         let markets_response = self.inner.get_markets().await?;
-        let ts_init = get_atomic_clock_realtime().get_time_ns();
+        let ts_init = self.generate_ts_init();
 
         let mut parsed_instruments = Vec::new();
         let mut parsed_markets = Vec::new();
@@ -918,7 +929,7 @@ impl DydxHttpClient {
         ticker: &str,
     ) -> anyhow::Result<Option<InstrumentAny>> {
         let markets_response = self.inner.get_market(ticker).await?;
-        let ts_init = get_atomic_clock_realtime().get_time_ns();
+        let ts_init = self.generate_ts_init();
 
         // The API returns all markets if ticker not found, so check specifically
         if let Some(market) = markets_response.markets.get(ticker) {
@@ -1072,7 +1083,7 @@ impl DydxHttpClient {
         let ticker = extract_raw_symbol(instrument_id.symbol.as_str());
         let price_precision = instrument.price_precision();
         let size_precision = instrument.size_precision();
-        let ts_init = get_atomic_clock_realtime().get_time_ns();
+        let ts_init = self.generate_ts_init();
 
         let mut all_bars: Vec<Bar> = Vec::new();
 
@@ -1160,7 +1171,7 @@ impl DydxHttpClient {
         }
 
         // Filter incomplete bars (ts_event >= current time)
-        let current_time_ns = get_atomic_clock_realtime().get_time_ns();
+        let current_time_ns = self.generate_ts_init();
         all_bars.retain(|bar| bar.ts_event < current_time_ns);
 
         Ok(all_bars)
@@ -1205,7 +1216,7 @@ impl DydxHttpClient {
         let ticker = extract_raw_symbol(instrument_id.symbol.as_str());
         let price_precision = instrument.price_precision();
         let size_precision = instrument.size_precision();
-        let ts_init = get_atomic_clock_realtime().get_time_ns();
+        let ts_init = self.generate_ts_init();
 
         // When an end time is provided, estimate the block height at that time
         // so we can skip directly to the relevant window instead of paginating
@@ -1265,11 +1276,12 @@ impl DydxHttpClient {
             if let Some(s) = start
                 && oldest_trade.created_at < s
             {
-                // This page contains trades before start — filter and stop
+                // This page contains trades before start -- filter and stop
                 for trade in &response.trades {
                     if start.is_some_and(|s| trade.created_at < s) {
                         continue;
                     }
+
                     if end.is_some_and(|e| trade.created_at > e) {
                         continue;
                     }
@@ -1289,6 +1301,7 @@ impl DydxHttpClient {
                 if start.is_some_and(|s| trade.created_at < s) {
                     continue;
                 }
+
                 if end.is_some_and(|e| trade.created_at > e) {
                     continue;
                 }
@@ -1321,6 +1334,63 @@ impl DydxHttpClient {
         Ok(all_trades)
     }
 
+    /// Requests historical funding rates for an instrument.
+    ///
+    /// Fetches funding rate data from the dYdX Indexer API's
+    /// `/v4/historicalFunding/:ticker` endpoint and converts them to Nautilus
+    /// `FundingRateUpdate` objects.
+    ///
+    /// Results are returned in chronological order (oldest first).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP request fails or response cannot be parsed.
+    pub async fn request_funding_rates(
+        &self,
+        instrument_id: InstrumentId,
+        start: Option<DateTime<Utc>>,
+        end: Option<DateTime<Utc>>,
+        limit: Option<u32>,
+    ) -> anyhow::Result<Vec<FundingRateUpdate>> {
+        let ticker = extract_raw_symbol(instrument_id.symbol.as_str());
+        let ts_init = self.generate_ts_init();
+
+        let response = self
+            .inner
+            .get_historical_funding(ticker, limit, None, end)
+            .await?;
+
+        let mut rates = Vec::with_capacity(response.historical_funding.len());
+
+        for entry in &response.historical_funding {
+            // Filter by start time if specified
+            if start.is_some_and(|s| entry.effective_at < s) {
+                continue;
+            }
+
+            let ts_event =
+                UnixNanos::from(entry.effective_at.timestamp_nanos_opt().ok_or_else(|| {
+                    anyhow::anyhow!("Timestamp overflow for {}", entry.effective_at)
+                })? as u64);
+
+            rates.push(FundingRateUpdate::new(
+                instrument_id,
+                entry.rate,
+                Some(60),
+                None,
+                ts_event,
+                ts_init,
+            ));
+        }
+
+        // dYdX returns newest first; reverse to chronological order
+        rates.reverse();
+
+        log::info!("Fetched {} funding rates for {instrument_id}", rates.len(),);
+
+        Ok(rates)
+    }
+
     /// Requests an order book snapshot for a symbol.
     ///
     /// Fetches order book data from the dYdX Indexer API and converts it to Nautilus
@@ -1342,7 +1412,7 @@ impl DydxHttpClient {
         let ticker = extract_raw_symbol(instrument_id.symbol.as_str());
         let response = self.inner.get_orderbook(ticker).await?;
 
-        let ts_init = get_atomic_clock_realtime().get_time_ns();
+        let ts_init = self.generate_ts_init();
 
         let mut deltas = Vec::with_capacity(1 + response.bids.len() + response.asks.len());
 
@@ -1405,25 +1475,25 @@ impl DydxHttpClient {
         &self.inner
     }
 
-    /// Check if this client is configured for testnet.
+    /// Returns `true` if this client is configured for testnet.
     #[must_use]
     pub fn is_testnet(&self) -> bool {
         self.inner.is_testnet()
     }
 
-    /// Get the base URL being used by this client.
+    /// Returns the base URL used by this client.
     #[must_use]
     pub fn base_url(&self) -> &str {
         self.inner.base_url()
     }
 
-    /// Check if the instrument cache has been initialized.
+    /// Returns `true` if the instrument cache has been initialized.
     #[must_use]
     pub fn is_cache_initialized(&self) -> bool {
         self.instrument_cache.is_initialized()
     }
 
-    /// Get the number of instruments currently cached.
+    /// Returns the number of instruments currently cached.
     #[must_use]
     pub fn cached_instruments_count(&self) -> usize {
         self.instrument_cache.len()
@@ -1451,6 +1521,10 @@ impl DydxHttpClient {
         self.instrument_cache.all_instrument_ids()
     }
 
+    fn generate_ts_init(&self) -> UnixNanos {
+        self.clock.get_time_ns()
+    }
+
     /// Requests order status reports for a subaccount.
     ///
     /// Fetches orders from the dYdX Indexer API and converts them to Nautilus
@@ -1466,7 +1540,7 @@ impl DydxHttpClient {
         account_id: AccountId,
         instrument_id: Option<InstrumentId>,
     ) -> anyhow::Result<Vec<OrderStatusReport>> {
-        let ts_init = nautilus_core::time::get_atomic_clock_realtime().get_time_ns();
+        let ts_init = self.generate_ts_init();
 
         // Convert instrument_id to market filter
         let market = instrument_id.map(|id| {
@@ -1528,7 +1602,7 @@ impl DydxHttpClient {
         account_id: AccountId,
         instrument_id: Option<InstrumentId>,
     ) -> anyhow::Result<Vec<FillReport>> {
-        let ts_init = nautilus_core::time::get_atomic_clock_realtime().get_time_ns();
+        let ts_init = self.generate_ts_init();
 
         // Convert instrument_id to market filter
         let market = instrument_id.map(|id| {
@@ -1588,7 +1662,7 @@ impl DydxHttpClient {
         account_id: AccountId,
         instrument_id: Option<InstrumentId>,
     ) -> anyhow::Result<Vec<PositionStatusReport>> {
-        let ts_init = nautilus_core::time::get_atomic_clock_realtime().get_time_ns();
+        let ts_init = self.generate_ts_init();
 
         let subaccount_response = self
             .inner
@@ -1627,10 +1701,53 @@ impl DydxHttpClient {
 
         Ok(reports)
     }
+
+    /// Requests account state for a subaccount.
+    ///
+    /// Fetches the subaccount from the dYdX Indexer API and converts it to a Nautilus
+    /// `AccountState` with balances and margin calculations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP request fails or parsing fails.
+    pub async fn request_account_state(
+        &self,
+        address: &str,
+        subaccount_number: u32,
+        account_id: AccountId,
+    ) -> anyhow::Result<AccountState> {
+        let ts_init = self.generate_ts_init();
+        let subaccount_response = self
+            .inner
+            .get_subaccount(address, subaccount_number)
+            .await?;
+
+        // Build instruments map from cache
+        let instruments: HashMap<InstrumentId, InstrumentAny> = self
+            .instrument_cache
+            .all_instruments()
+            .into_iter()
+            .map(|inst| (inst.id(), inst))
+            .collect();
+
+        // Use current oracle prices from instrument cache (updated via WS)
+        let oracle_prices = self.instrument_cache.to_oracle_prices_map();
+
+        parse_account_state_from_http(
+            &subaccount_response.subaccount,
+            account_id,
+            &instruments,
+            &oracle_prices,
+            ts_init,
+            ts_init,
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use axum::{Router, routing::get};
+    use nautilus_model::identifiers::{Symbol, Venue};
     use rstest::rstest;
 
     use super::*;
@@ -1704,7 +1821,6 @@ mod tests {
 
     #[rstest]
     fn test_domain_client_get_instrument_not_found() {
-        use nautilus_model::identifiers::{Symbol, Venue};
         let client = DydxHttpClient::default();
         let instrument_id = InstrumentId::new(Symbol::new("ETH-USD-PERP"), Venue::new("DYDX"));
         let result = client.get_instrument(&instrument_id);
@@ -1713,7 +1829,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_http_timeout_respects_configuration_and_does_not_block() {
-        use axum::{Router, routing::get};
         use tokio::net::TcpListener;
 
         async fn slow_handler() -> &'static str {

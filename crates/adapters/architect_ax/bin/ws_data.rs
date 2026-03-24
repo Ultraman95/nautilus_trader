@@ -33,9 +33,9 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use nautilus_architect_ax::{
-    common::enums::AxEnvironment,
+    common::{credential::Credential, enums::AxEnvironment},
     http::{client::AxRawHttpClient, parse::parse_perp_instrument},
-    websocket::{NautilusDataWsMessage, data::AxMdWebSocketClient},
+    websocket::{AxDataWsMessage, data::AxMdWebSocketClient},
 };
 use nautilus_core::time::get_atomic_clock_realtime;
 use rust_decimal::Decimal;
@@ -44,9 +44,8 @@ use rust_decimal::Decimal;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     nautilus_common::logging::ensure_logging_initialized();
 
-    let api_key = std::env::var("AX_API_KEY").expect("AX_API_KEY environment variable required");
-    let api_secret =
-        std::env::var("AX_API_SECRET").expect("AX_API_SECRET environment variable required");
+    let credential = Credential::resolve(None, None)
+        .ok_or("AX_API_KEY and AX_API_SECRET environment variables required")?;
 
     let environment = if std::env::var("AX_IS_SANDBOX")
         .ok()
@@ -81,6 +80,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Connectivity OK - got {} instruments",
                 response.instruments.len()
             );
+
             if let Some(first) = response.instruments.first() {
                 log::debug!("First instrument: {:?}", first.symbol);
             }
@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let auth_response = http_client
-        .authenticate(&api_key, &api_secret, 3600)
+        .authenticate(credential.api_key(), credential.api_secret(), 3600)
         .await
         .map_err(|e| format!("Authentication failed: {e:?}"))?;
     log::info!("Authenticated successfully");
@@ -121,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .find(|inst| inst.symbol.as_str() == test_symbol)
         .ok_or_else(|| format!("Instrument {test_symbol} not found in /instruments response"))?;
 
-    let instrument = parse_perp_instrument(
+    let _instrument = parse_perp_instrument(
         maybe_instrument,
         Decimal::ZERO,
         Decimal::ZERO,
@@ -129,8 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ts_init,
     )
     .map_err(|e| format!("Failed to parse instrument {test_symbol}: {e}"))?;
-    client.cache_instrument(instrument);
-    log::info!("Cached instrument {test_symbol} for WebSocket parsing");
+    log::info!("Parsed instrument {test_symbol}");
 
     log::info!("Establishing WebSocket connection...");
     client.connect().await?;
@@ -154,25 +153,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             message_count += 1;
 
             match &msg {
-                NautilusDataWsMessage::Heartbeat => {
-                    log::debug!("Heartbeat");
+                AxDataWsMessage::MdMessage(md_msg) => {
+                    log::info!("MdMessage: {md_msg:?}");
                 }
-                NautilusDataWsMessage::Data(data) => {
-                    for item in data {
-                        log::info!("Data: {item:?}");
-                    }
-                }
-                NautilusDataWsMessage::Deltas(deltas) => {
-                    log::info!("Deltas: {}", deltas.instrument_id);
-                }
-                NautilusDataWsMessage::Bar(bar) => {
-                    log::info!("Bar: {}", bar.bar_type);
-                }
-                NautilusDataWsMessage::Error(err) => {
-                    log::error!("Error: {}", err.message);
-                }
-                NautilusDataWsMessage::Reconnected => {
+                AxDataWsMessage::Reconnected => {
                     log::warn!("Reconnected");
+                }
+                AxDataWsMessage::CandleUnsubscribed { symbol, width } => {
+                    log::info!("CandleUnsubscribed: symbol={symbol}, width={width:?}");
                 }
             }
 

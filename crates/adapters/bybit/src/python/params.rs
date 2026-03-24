@@ -25,7 +25,8 @@ use crate::{
 };
 
 /// Parameters for placing an order via WebSocket.
-#[pyclass]
+#[pyclass(from_py_object)]
+#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")]
 #[derive(Clone, Debug)]
 pub struct BybitWsPlaceOrderParams {
     #[pyo3(get, set)]
@@ -83,7 +84,9 @@ pub struct BybitWsPlaceOrderParams {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl BybitWsPlaceOrderParams {
+    /// Parameters for placing an order via WebSocket.
     #[new]
     #[allow(clippy::too_many_arguments)]
     fn py_new(
@@ -325,7 +328,8 @@ impl From<messages::BybitWsPlaceOrderParams> for BybitWsPlaceOrderParams {
 }
 
 /// Parameters for amending an order via WebSocket.
-#[pyclass]
+#[pyclass(from_py_object)]
+#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")]
 #[derive(Clone, Debug)]
 pub struct BybitWsAmendOrderParams {
     #[pyo3(get, set)]
@@ -353,7 +357,9 @@ pub struct BybitWsAmendOrderParams {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl BybitWsAmendOrderParams {
+    /// Parameters for amending an order via WebSocket.
     #[new]
     #[allow(clippy::too_many_arguments)]
     fn py_new(
@@ -455,7 +461,8 @@ impl From<messages::BybitWsAmendOrderParams> for BybitWsAmendOrderParams {
 }
 
 /// Parameters for canceling an order via WebSocket.
-#[pyclass]
+#[pyclass(from_py_object)]
+#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")]
 #[derive(Clone, Debug)]
 pub struct BybitWsCancelOrderParams {
     #[pyo3(get, set)]
@@ -469,7 +476,9 @@ pub struct BybitWsCancelOrderParams {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl BybitWsCancelOrderParams {
+    /// Parameters for canceling an order via WebSocket.
     #[new]
     fn py_new(
         category: BybitProductType,
@@ -511,7 +520,8 @@ impl From<messages::BybitWsCancelOrderParams> for BybitWsCancelOrderParams {
 }
 
 /// Parameters for fetching tickers via HTTP API.
-#[pyclass]
+#[pyclass(from_py_object)]
+#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.bybit")]
 #[derive(Clone, Debug)]
 pub struct BybitTickersParams {
     #[pyo3(get, set)]
@@ -525,7 +535,12 @@ pub struct BybitTickersParams {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl BybitTickersParams {
+    /// Query parameters for `GET /v5/market/tickers`.
+    ///
+    /// # References
+    /// - <https://bybit-exchange.github.io/docs/v5/market/tickers>
     #[new]
     #[pyo3(signature = (category, symbol=None, base_coin=None, exp_date=None))]
     fn py_new(

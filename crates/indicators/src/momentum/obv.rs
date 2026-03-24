@@ -28,6 +28,10 @@ const MAX_PERIOD: usize = 1_024;
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.indicators")
 )]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.indicators")
+)]
 pub struct OnBalanceVolume {
     pub period: usize,
     pub value: f64,
@@ -109,6 +113,7 @@ impl OnBalanceVolume {
 
         if !self.initialized {
             self.has_inputs = true;
+
             if (self.period == 0 && !self.obv.is_empty()) || self.obv.len() >= self.period {
                 self.initialized = true;
             }

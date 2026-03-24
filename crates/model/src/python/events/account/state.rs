@@ -32,7 +32,9 @@ use crate::{
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl AccountState {
+    /// Represents an event which includes information on the state of the account.
     #[allow(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (account_id, account_type, balances, margins, is_reported, event_id, ts_event, ts_init, base_currency=None))]
@@ -108,9 +110,6 @@ impl AccountState {
     ///
     /// Returns a `PyErr` if any required field is missing or type conversion fails.
     ///
-    /// # Panics
-    ///
-    /// Panics if any `unwrap` on parsed values fails (e.g., invalid formats or missing items).
     #[pyo3(name = "from_dict")]
     pub fn py_from_dict(values: &Bound<'_, PyDict>) -> PyResult<Self> {
         let account_id = get_required_string(values, "account_id")?;

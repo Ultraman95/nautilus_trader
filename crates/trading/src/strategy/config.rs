@@ -13,6 +13,8 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
+use std::collections::HashMap;
+
 use nautilus_core::serialization::{default_false, default_true};
 use nautilus_model::{
     enums::{OmsType, TimeInForce},
@@ -24,7 +26,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.trading")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.trading", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.trading")
 )]
 pub struct StrategyConfig {
     /// The unique ID for the strategy. Will become the strategy ID if not None.
@@ -94,6 +100,25 @@ const fn default_market_exit_max_attempts() -> u64 {
 
 const fn default_market_exit_time_in_force() -> TimeInForce {
     TimeInForce::Gtc
+}
+
+/// Configuration for creating strategies from importable paths.
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.trading", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.trading")
+)]
+pub struct ImportableStrategyConfig {
+    /// The fully qualified name of the Strategy class.
+    pub strategy_path: String,
+    /// The fully qualified name of the Strategy config class.
+    pub config_path: String,
+    /// The strategy configuration as a dictionary.
+    pub config: HashMap<String, serde_json::Value>,
 }
 
 impl Default for StrategyConfig {

@@ -38,9 +38,6 @@ pub struct ExecutionEngineConfig {
     /// If None then no additional snapshots will be taken.
     #[serde(default)]
     pub snapshot_positions_interval_secs: Option<f64>,
-    /// If quote-denominated order quantities should be converted to base units before submission.
-    #[serde(default = "default_true")]
-    pub convert_quote_qty_to_base: bool,
     /// If order fills exceeding order quantity are allowed (logs warning instead of raising).
     /// Useful when position reconciliation races with exchange fill events.
     #[serde(default)]
@@ -52,6 +49,27 @@ pub struct ExecutionEngineConfig {
     /// command messages from the bus and handle execution.
     #[serde(default)]
     pub external_clients: Option<Vec<ClientId>>,
+    /// The interval (minutes) between purging closed orders from the in-memory cache.
+    #[serde(default)]
+    pub purge_closed_orders_interval_mins: Option<u32>,
+    /// The time buffer (minutes) before closed orders can be purged.
+    #[serde(default)]
+    pub purge_closed_orders_buffer_mins: Option<u32>,
+    /// The interval (minutes) between purging closed positions from the in-memory cache.
+    #[serde(default)]
+    pub purge_closed_positions_interval_mins: Option<u32>,
+    /// The time buffer (minutes) before closed positions can be purged.
+    #[serde(default)]
+    pub purge_closed_positions_buffer_mins: Option<u32>,
+    /// The interval (minutes) between purging account events from the in-memory cache.
+    #[serde(default)]
+    pub purge_account_events_interval_mins: Option<u32>,
+    /// The time buffer (minutes) before account events can be purged.
+    #[serde(default)]
+    pub purge_account_events_lookback_mins: Option<u32>,
+    /// If purge operations should also delete from the backing database.
+    #[serde(default)]
+    pub purge_from_database: bool,
     /// If debug mode is active (will provide extra debug logging).
     #[serde(default)]
     pub debug: bool,
@@ -65,9 +83,15 @@ impl Default for ExecutionEngineConfig {
             snapshot_orders: false,
             snapshot_positions: false,
             snapshot_positions_interval_secs: None,
-            convert_quote_qty_to_base: true,
             allow_overfills: false,
             external_clients: None,
+            purge_closed_orders_interval_mins: None,
+            purge_closed_orders_buffer_mins: None,
+            purge_closed_positions_interval_mins: None,
+            purge_closed_positions_buffer_mins: None,
+            purge_account_events_interval_mins: None,
+            purge_account_events_lookback_mins: None,
+            purge_from_database: false,
             debug: false,
         }
     }

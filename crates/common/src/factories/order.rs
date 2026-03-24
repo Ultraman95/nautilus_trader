@@ -23,16 +23,17 @@ use nautilus_core::{
     correctness::{check_equal, check_slice_not_empty},
 };
 use nautilus_model::{
-    enums::{ContingencyType, OrderSide, TimeInForce, TriggerType},
+    enums::{ContingencyType, OrderSide, TimeInForce, TrailingOffsetType, TriggerType},
     identifiers::{
         ClientOrderId, ExecAlgorithmId, InstrumentId, OrderListId, StrategyId, TraderId,
     },
     orders::{
         LimitIfTouchedOrder, LimitOrder, MarketIfTouchedOrder, MarketOrder, Order, OrderAny,
-        OrderList, StopLimitOrder, StopMarketOrder,
+        OrderList, StopLimitOrder, StopMarketOrder, TrailingStopMarketOrder,
     },
     types::{Price, Quantity},
 };
+use rust_decimal::Decimal;
 use ustr::Ustr;
 
 use crate::{
@@ -447,6 +448,88 @@ impl OrderFactory {
         OrderAny::LimitIfTouched(order)
     }
 
+    /// Creates a new trailing-stop-market order.
+    ///
+    /// # Panics
+    ///
+    /// If neither `trigger_price` nor `activation_price` is provided.
+    #[allow(clippy::too_many_arguments)]
+    pub fn trailing_stop_market(
+        &mut self,
+        instrument_id: InstrumentId,
+        order_side: OrderSide,
+        quantity: Quantity,
+        trailing_offset: Decimal,
+        trailing_offset_type: Option<TrailingOffsetType>,
+        activation_price: Option<Price>,
+        trigger_price: Option<Price>,
+        trigger_type: Option<TriggerType>,
+        time_in_force: Option<TimeInForce>,
+        expire_time: Option<nautilus_core::UnixNanos>,
+        reduce_only: Option<bool>,
+        quote_quantity: Option<bool>,
+        display_qty: Option<Quantity>,
+        emulation_trigger: Option<TriggerType>,
+        trigger_instrument_id: Option<InstrumentId>,
+        exec_algorithm_id: Option<ExecAlgorithmId>,
+        exec_algorithm_params: Option<IndexMap<Ustr, Ustr>>,
+        tags: Option<Vec<Ustr>>,
+        client_order_id: Option<ClientOrderId>,
+    ) -> OrderAny {
+        let client_order_id = client_order_id.unwrap_or_else(|| self.generate_client_order_id());
+        let exec_spawn_id: Option<ClientOrderId> = if exec_algorithm_id.is_none() {
+            None
+        } else {
+            Some(client_order_id)
+        };
+
+        // Trailing stops need an initial trigger level: prefer explicit trigger_price,
+        // fall back to activation_price which serves as the initial trigger on OKX
+        let trigger_price = trigger_price
+            .or(activation_price)
+            .expect("TrailingStopMarket requires either trigger_price or activation_price");
+
+        let order = TrailingStopMarketOrder::new(
+            self.trader_id,
+            self.strategy_id,
+            instrument_id,
+            client_order_id,
+            order_side,
+            quantity,
+            trigger_price,
+            trigger_type.unwrap_or(TriggerType::Default),
+            trailing_offset,
+            trailing_offset_type.unwrap_or(TrailingOffsetType::Price),
+            time_in_force.unwrap_or(TimeInForce::Gtc),
+            expire_time,
+            reduce_only.unwrap_or(false),
+            quote_quantity.unwrap_or(false),
+            display_qty,
+            emulation_trigger,
+            trigger_instrument_id,
+            Some(ContingencyType::NoContingency),
+            None,
+            None,
+            None,
+            exec_algorithm_id,
+            exec_algorithm_params,
+            exec_spawn_id,
+            tags,
+            UUID4::new(),
+            self.clock.borrow().timestamp_ns(),
+        );
+
+        let mut order = OrderAny::TrailingStopMarket(order);
+
+        if let (Some(activation_price), OrderAny::TrailingStopMarket(tsm)) =
+            (activation_price, &mut order)
+        {
+            tsm.activation_price = Some(activation_price);
+        }
+
+        order
+    }
+
     /// Creates a new [`OrderList`] from the given orders, generating a fresh
     /// order list ID and propagating it back to each order.
     ///
@@ -506,6 +589,7 @@ impl OrderFactory {
         entry_trigger_price: Option<Price>,
         time_in_force: Option<TimeInForce>,
         expire_time: Option<nautilus_core::UnixNanos>,
+        sl_time_in_force: Option<TimeInForce>,
         post_only: Option<bool>,
         reduce_only: Option<bool>,
         quote_quantity: Option<bool>,
@@ -666,8 +750,8 @@ impl OrderFactory {
             quantity,
             sl_trigger_price,
             sl_trigger_type.unwrap_or(TriggerType::Default),
-            time_in_force.unwrap_or(TimeInForce::Gtc),
-            expire_time,
+            sl_time_in_force.unwrap_or(TimeInForce::Gtc),
+            None, // SL has no independent expire time
             true, // SL/TP should only reduce positions
             quote_quantity.unwrap_or(false),
             None, // display_qty
@@ -1141,6 +1225,7 @@ pub mod tests {
             None,                    // no entry trigger
             Some(TimeInForce::Gtc),
             None,
+            None, // sl_time_in_force
             Some(false),
             Some(false),
             Some(false),
@@ -1179,6 +1264,7 @@ pub mod tests {
             None,                          // no entry trigger
             Some(TimeInForce::Gtc),
             None,
+            None, // sl_time_in_force
             Some(false),
             Some(false),
             Some(false),
@@ -1208,6 +1294,7 @@ pub mod tests {
             Some(Price::from("51000.00")), // entry trigger (stop entry)
             Some(TimeInForce::Gtc),
             None,
+            None, // sl_time_in_force
             Some(false),
             Some(false),
             Some(false),
@@ -1237,6 +1324,7 @@ pub mod tests {
             None,
             Some(TimeInForce::Gtc),
             None,
+            None, // sl_time_in_force
             Some(false),
             Some(false),
             Some(false),
@@ -1272,6 +1360,7 @@ pub mod tests {
             None,                          // entry_trigger_price
             Some(TimeInForce::Gtc),
             None,
+            None, // sl_time_in_force
             Some(false),
             Some(false),
             Some(false),

@@ -17,13 +17,11 @@
 //!
 //! Run with: `cargo run --example binance-spot-exec-tester --package nautilus-binance`
 //!
-//! Requires environment variables:
-//! - BINANCE_API_KEY: Your Binance API key
-//! - BINANCE_API_SECRET: Your Binance API secret
-//!
-//! Optional environment variables (for SBE data streams):
-//! - BINANCE_ED25519_API_KEY
-//! - BINANCE_ED25519_API_SECRET
+//! Requires environment variables based on the configured environment
+//! (Ed25519 keys are auto-detected):
+//! - Mainnet: `BINANCE_API_KEY` / `BINANCE_API_SECRET`
+//! - Testnet: `BINANCE_TESTNET_API_KEY` / `BINANCE_TESTNET_API_SECRET`
+//! - Demo: `BINANCE_DEMO_API_KEY` / `BINANCE_DEMO_API_SECRET`
 
 use nautilus_binance::{
     common::enums::{BinanceEnvironment, BinanceProductType},
@@ -62,10 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         account_id,
         product_types: vec![BinanceProductType::Spot],
         environment: BinanceEnvironment::Mainnet,
-        api_key: None,    // Will use 'BINANCE_API_KEY' env var
-        api_secret: None, // Will use 'BINANCE_API_SECRET' env var
-        base_url_http: None,
-        base_url_ws: None,
+        ..Default::default()
     };
 
     let data_factory = BinanceDataClientFactory::new();
@@ -80,18 +75,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_delay_post_stop_secs(5)
         .build()?;
 
+    let order_qty = Quantity::from("0.0001"); // Small quantity for testing
     let mut tester_config = ExecTesterConfig::new(
         StrategyId::from("EXEC_TESTER-001"),
         instrument_id,
         client_id,
-        Quantity::from("0.0001"), // Small quantity for testing
+        order_qty,
     )
     .with_log_data(false)
     .with_enable_limit_sells(false)
-    .with_close_positions_on_stop(false);
-
-    // Use UUIDs for unique client order IDs across restarts
-    tester_config.base.use_uuid_client_order_ids = true;
+    .with_open_position_on_start(order_qty.as_decimal())
+    .with_cancel_orders_on_stop(true)
+    .with_close_positions_on_stop(true);
 
     tester_config.base.external_order_claims = Some(vec![instrument_id]);
     tester_config.use_post_only = true;

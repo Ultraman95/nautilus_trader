@@ -13,6 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
+pub mod cache;
 pub mod client;
 pub mod message;
 pub mod parse;
@@ -126,7 +127,7 @@ async fn stream_from_websocket(
 ) -> Result<impl Stream<Item = Result<WsMessage>>> {
     let (ws_stream, ws_resp) = connect_async(url).await?;
 
-    handle_connection_response(ws_resp)?;
+    handle_connection_response(&ws_resp)?;
     log::info!("Connected to {base_url}");
 
     Ok(stream! {
@@ -157,7 +158,6 @@ async fn stream_from_websocket(
                     | tungstenite::Message::Pong(_)
                     | tungstenite::Message::Ping(_) => {
                         log::trace!("Received {msg:?}");
-                        continue; // Skip and continue to the next message
                     }
                     tungstenite::Message::Close(Some(frame)) => {
                         let reason = frame.reason.to_string();
@@ -208,7 +208,9 @@ async fn stream_from_websocket(
 }
 
 #[allow(clippy::result_large_err)]
-fn handle_connection_response(ws_resp: tungstenite::http::Response<Option<Vec<u8>>>) -> Result<()> {
+fn handle_connection_response(
+    ws_resp: &tungstenite::http::Response<Option<Vec<u8>>>,
+) -> Result<()> {
     if ws_resp.status() != tungstenite::http::StatusCode::SWITCHING_PROTOCOLS {
         return match ws_resp.body() {
             Some(resp) => Err(Error::ConnectRejected {

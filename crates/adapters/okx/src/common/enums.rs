@@ -16,13 +16,13 @@
 //! Enumerations mapping OKX concepts onto idiomatic Nautilus variants.
 
 use nautilus_model::enums::{
-    AggressorSide, LiquiditySide, OptionKind, OrderSide, OrderStatus, OrderType, PositionSide,
-    TriggerType,
+    AggressorSide, LiquiditySide, OptionKind, OrderSide, OrderSideSpecified, OrderStatus,
+    OrderType, PositionSide, TriggerType,
 };
 use serde::{Deserialize, Serialize};
 use strum::{AsRefStr, Display, EnumIter, EnumString};
 
-use crate::common::consts::OKX_CONDITIONAL_ORDER_TYPES;
+use crate::common::consts::{OKX_ADVANCE_ALGO_ORDER_TYPES, OKX_CONDITIONAL_ORDER_TYPES};
 
 /// Represents the type of book action.
 #[derive(
@@ -94,12 +94,11 @@ pub enum OKXSide {
     Sell,
 }
 
-impl From<OrderSide> for OKXSide {
-    fn from(value: OrderSide) -> Self {
+impl From<OrderSideSpecified> for OKXSide {
+    fn from(value: OrderSideSpecified) -> Self {
         match value {
-            OrderSide::Buy => Self::Buy,
-            OrderSide::Sell => Self::Sell,
-            _ => panic!("Invalid `OrderSide`"),
+            OrderSideSpecified::Buy => Self::Buy,
+            OrderSideSpecified::Sell => Self::Sell,
         }
     }
 }
@@ -161,7 +160,17 @@ pub enum OKXOrderType {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.okx")
+    pyo3::pyclass(
+        eq,
+        eq_int,
+        module = "nautilus_trader.core.nautilus_pyo3.okx",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXOrderStatus {
     Canceled,
@@ -180,7 +189,7 @@ impl From<OrderStatus> for OKXOrderStatus {
             OrderStatus::Accepted => Self::Live,
             OrderStatus::PartiallyFilled => Self::PartiallyFilled,
             OrderStatus::Filled => Self::Filled,
-            _ => panic!("Invalid `OrderStatus`"),
+            _ => panic!("Invalid `OrderStatus` for OKX: {value:?}"),
         }
     }
 }
@@ -240,7 +249,17 @@ impl From<LiquiditySide> for OKXExecType {
 #[serde(rename_all = "UPPERCASE")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.okx")
+    pyo3::pyclass(
+        eq,
+        eq_int,
+        module = "nautilus_trader.core.nautilus_pyo3.okx",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXInstrumentType {
     #[default]
@@ -299,7 +318,17 @@ pub enum OKXInstrumentStatus {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.okx")
+    pyo3::pyclass(
+        eq,
+        eq_int,
+        module = "nautilus_trader.core.nautilus_pyo3.okx",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXContractType {
     #[serde(rename = "")]
@@ -338,7 +367,7 @@ impl From<OKXOptionType> for OptionKind {
         match option_type {
             OKXOptionType::Call => Self::Call,
             OKXOptionType::Put => Self::Put,
-            _ => panic!("Invalid `option_type`, was None"),
+            _ => panic!("Invalid `OKXOptionType` for OptionKind: {option_type:?}"),
         }
     }
 }
@@ -363,7 +392,17 @@ impl From<OKXOptionType> for OptionKind {
 #[strum(ascii_case_insensitive)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.okx")
+    pyo3::pyclass(
+        eq,
+        eq_int,
+        module = "nautilus_trader.core.nautilus_pyo3.okx",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXTradeMode {
     #[default]
@@ -429,7 +468,17 @@ pub enum OKXAccountMode {
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.okx")
+    pyo3::pyclass(
+        eq,
+        eq_int,
+        module = "nautilus_trader.core.nautilus_pyo3.okx",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXMarginMode {
     #[serde(rename = "")]
@@ -461,7 +510,17 @@ pub enum OKXMarginMode {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.okx")
+    pyo3::pyclass(
+        eq,
+        eq_int,
+        module = "nautilus_trader.core.nautilus_pyo3.okx",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXPositionMode {
     #[default]
@@ -498,6 +557,7 @@ pub enum OKXPositionSide {
     Copy,
     Clone,
     Debug,
+    Default,
     Display,
     PartialEq,
     Eq,
@@ -510,6 +570,7 @@ pub enum OKXPositionSide {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum OKXSelfTradePreventionMode {
+    #[default]
     #[serde(rename = "")]
     None,
     CancelMaker,
@@ -543,6 +604,7 @@ pub enum OKXTakeProfitKind {
     Copy,
     Clone,
     Debug,
+    Default,
     Display,
     PartialEq,
     Eq,
@@ -554,7 +616,9 @@ pub enum OKXTakeProfitKind {
     Deserialize,
 )]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case", ascii_case_insensitive)]
 pub enum OKXTriggerType {
+    #[default]
     #[serde(rename = "")]
     None,
     Last,
@@ -570,6 +634,31 @@ impl From<TriggerType> for OKXTriggerType {
             TriggerType::IndexPrice => Self::Index,
             _ => Self::Last,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use rstest::rstest;
+
+    use super::OKXTriggerType;
+
+    #[rstest]
+    fn test_okx_trigger_type_from_str_accepts_snake_case_values() {
+        assert_eq!(
+            OKXTriggerType::from_str("last").unwrap(),
+            OKXTriggerType::Last
+        );
+        assert_eq!(
+            OKXTriggerType::from_str("mark").unwrap(),
+            OKXTriggerType::Mark
+        );
+        assert_eq!(
+            OKXTriggerType::from_str("index").unwrap(),
+            OKXTriggerType::Index
+        );
     }
 }
 
@@ -639,7 +728,15 @@ pub enum OKXBookChannel {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.okx")
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.okx",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.adapters.okx")
 )]
 pub enum OKXVipLevel {
     /// VIP level 0 (default tier).
@@ -773,10 +870,11 @@ impl From<OrderType> for OKXOrderType {
             OrderType::StopMarket
             | OrderType::StopLimit
             | OrderType::MarketIfTouched
-            | OrderType::LimitIfTouched => {
+            | OrderType::LimitIfTouched
+            | OrderType::TrailingStopMarket => {
                 panic!("Conditional order types must use OKXAlgoOrderType")
             }
-            _ => panic!("Invalid `OrderType` cannot be represented on OKX"),
+            _ => panic!("Invalid `OrderType` cannot be represented on OKX: {value:?}"),
         }
     }
 }
@@ -820,6 +918,11 @@ pub fn is_conditional_order(order_type: OrderType) -> bool {
     OKX_CONDITIONAL_ORDER_TYPES.contains(&order_type)
 }
 
+/// Helper to determine if an order type requires the advance algo cancel endpoint.
+pub fn is_advance_algo_order(order_type: OrderType) -> bool {
+    OKX_ADVANCE_ALGO_ORDER_TYPES.contains(&order_type)
+}
+
 /// Converts Nautilus conditional order types to OKX algo order type.
 ///
 /// # Errors
@@ -831,6 +934,7 @@ pub fn conditional_order_to_algo_type(order_type: OrderType) -> anyhow::Result<O
         | OrderType::StopLimit
         | OrderType::MarketIfTouched
         | OrderType::LimitIfTouched => Ok(OKXAlgoOrderType::Trigger),
+        OrderType::TrailingStopMarket => Ok(OKXAlgoOrderType::MoveOrderStop),
         _ => anyhow::bail!("Not a conditional order type: {order_type:?}"),
     }
 }
@@ -1050,4 +1154,92 @@ pub enum OKXBarSize {
     Month1,
     #[serde(rename = "3M")]
     Month3,
+}
+
+/// Options price type for order pricing.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Display,
+    PartialEq,
+    Eq,
+    Hash,
+    AsRefStr,
+    EnumIter,
+    EnumString,
+    Serialize,
+    Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OKXPriceType {
+    /// No price type specified.
+    #[default]
+    #[serde(rename = "")]
+    None,
+    /// Standard price.
+    Px,
+    /// Price in USD.
+    Usd,
+    /// Price in implied volatility.
+    Vol,
+}
+
+/// Funding rate settlement state.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Display,
+    PartialEq,
+    Eq,
+    Hash,
+    AsRefStr,
+    EnumIter,
+    EnumString,
+    Serialize,
+    Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OKXSettlementState {
+    /// No settlement state.
+    #[default]
+    #[serde(rename = "")]
+    None,
+    /// Settlement in progress.
+    Processing,
+    /// Settlement completed.
+    Settled,
+}
+
+/// Quick margin type for order margin management.
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Display,
+    PartialEq,
+    Eq,
+    Hash,
+    AsRefStr,
+    EnumIter,
+    EnumString,
+    Serialize,
+    Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum OKXQuickMarginType {
+    /// No quick margin type.
+    #[default]
+    #[serde(rename = "")]
+    None,
+    /// Manual margin management.
+    Manual,
+    /// Auto borrow margin.
+    AutoBorrow,
+    /// Auto repay margin.
+    AutoRepay,
 }

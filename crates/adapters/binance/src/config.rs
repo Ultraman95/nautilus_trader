@@ -26,6 +26,14 @@ use crate::common::enums::{BinanceEnvironment, BinanceProductType};
 ///
 /// Ed25519 API keys are required for SBE WebSocket streams.
 #[derive(Clone, Debug)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.binance", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.binance")
+)]
 pub struct BinanceDataClientConfig {
     /// Product types to subscribe to.
     pub product_types: Vec<BinanceProductType>,
@@ -39,6 +47,9 @@ pub struct BinanceDataClientConfig {
     pub api_key: Option<String>,
     /// API secret (Ed25519 base64-encoded or PEM).
     pub api_secret: Option<String>,
+    /// Interval in seconds for polling exchange info to detect instrument status
+    /// changes (e.g. Trading -> Halt). Set to 0 to disable. Defaults to 3600 (60 minutes).
+    pub instrument_status_poll_secs: u64,
 }
 
 impl Default for BinanceDataClientConfig {
@@ -50,6 +61,7 @@ impl Default for BinanceDataClientConfig {
             base_url_ws: None,
             api_key: None,
             api_secret: None,
+            instrument_status_poll_secs: 3600,
         }
     }
 }
@@ -66,6 +78,14 @@ impl ClientConfig for BinanceDataClientConfig {
 /// listenKey-based user data streams in favor of WebSocket API authentication,
 /// which only supports Ed25519.
 #[derive(Clone, Debug)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.binance", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.binance")
+)]
 pub struct BinanceExecClientConfig {
     /// Trader ID for the client.
     pub trader_id: TraderId,
@@ -77,12 +97,33 @@ pub struct BinanceExecClientConfig {
     pub environment: BinanceEnvironment,
     /// Optional base URL override for HTTP API.
     pub base_url_http: Option<String>,
-    /// Optional base URL override for WebSocket.
+    /// Optional base URL override for WebSocket user data stream.
     pub base_url_ws: Option<String>,
+    /// Optional base URL override for WebSocket trading API (Spot and USD-M Futures).
+    pub base_url_ws_trading: Option<String>,
+    /// Whether to use the WebSocket trading API for order operations (Spot and USD-M Futures).
+    pub use_ws_trading: bool,
     /// API key (Ed25519 required, uses env var if not provided).
     pub api_key: Option<String>,
     /// API secret (Ed25519 base64-encoded, required, uses env var if not provided).
     pub api_secret: Option<String>,
+}
+
+impl Default for BinanceExecClientConfig {
+    fn default() -> Self {
+        Self {
+            trader_id: TraderId::from("TRADER-001"),
+            account_id: AccountId::from("BINANCE-001"),
+            product_types: vec![BinanceProductType::Spot],
+            environment: BinanceEnvironment::Mainnet,
+            base_url_http: None,
+            base_url_ws: None,
+            base_url_ws_trading: None,
+            use_ws_trading: true,
+            api_key: None,
+            api_secret: None,
+        }
+    }
 }
 
 impl ClientConfig for BinanceExecClientConfig {

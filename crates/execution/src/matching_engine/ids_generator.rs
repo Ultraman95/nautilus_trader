@@ -108,6 +108,7 @@ impl IdsGenerator {
         generate: Option<bool>,
     ) -> Option<PositionId> {
         let generate = generate.unwrap_or(true);
+
         if self.oms_type == OmsType::Hedging {
             {
                 let cache = self.cache.as_ref().borrow();
@@ -116,6 +117,7 @@ impl IdsGenerator {
                     return Some(position_id.to_owned());
                 }
             }
+
             if generate {
                 self.generate_venue_position_id()
             } else {
@@ -152,6 +154,7 @@ impl IdsGenerator {
         }
 
         self.position_count += 1;
+
         if self.use_random_ids {
             Some(PositionId::new(Uuid::new_v4().to_string()))
         } else {
@@ -163,6 +166,7 @@ impl IdsGenerator {
 
     pub fn generate_venue_order_id(&mut self) -> VenueOrderId {
         self.order_count += 1;
+
         if self.use_random_ids {
             VenueOrderId::new(Uuid::new_v4().to_string())
         } else {
@@ -281,7 +285,7 @@ mod tests {
         // Add position to cache
         cache
             .borrow_mut()
-            .add_position(position.clone(), OmsType::Hedging)
+            .add_position(&position, OmsType::Hedging)
             .unwrap();
 
         let position_id = ids_generator.get_position_id(&market_order_buy, None);
@@ -315,7 +319,7 @@ mod tests {
         cache
             .as_ref()
             .borrow_mut()
-            .add_position(position.clone(), OmsType::Netting)
+            .add_position(&position, OmsType::Netting)
             .unwrap();
 
         // position id should be returned for the existing position

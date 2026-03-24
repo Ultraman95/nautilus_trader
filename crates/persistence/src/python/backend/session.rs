@@ -20,15 +20,16 @@ use nautilus_core::{
     python::{IntoPyObjectNautilusExt, to_pyruntime_err},
 };
 use nautilus_model::data::{
-    Bar, MarkPriceUpdate, OrderBookDelta, OrderBookDepth10, QuoteTick, TradeTick,
+    Bar, DataFFI, MarkPriceUpdate, OrderBookDelta, OrderBookDepth10, QuoteTick, TradeTick,
 };
 use pyo3::{prelude::*, types::PyCapsule};
 
 use crate::backend::session::{DataBackendSession, DataQueryResult};
 
 #[repr(C)]
-#[pyclass(eq, eq_int)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[pyclass(frozen, eq, eq_int, from_py_object)]
+#[pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.persistence")]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum NautilusDataType {
     // Custom = 0,  # First slot reserved for custom data
     OrderBookDelta = 1,
@@ -40,6 +41,15 @@ pub enum NautilusDataType {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
+impl NautilusDataType {
+    const fn __hash__(&self) -> isize {
+        *self as isize
+    }
+}
+
+#[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl DataBackendSession {
     #[new]
     #[pyo3(signature=(chunk_size=10_000))]
@@ -47,16 +57,15 @@ impl DataBackendSession {
         Self::new(chunk_size)
     }
 
-    /// Query a file for its records. the caller must specify `T` to indicate
-    /// the kind of data expected from this query.
+    /// Registers a Parquet file and adds a batch stream for decoding.
     ///
-    /// `table_name`: Logical `table_name` assigned to this file. Queries to this file should address the
-    /// file by its table name.
-    /// `file_path`: Path to file
-    /// `sql_query`: A custom sql query to retrieve records from file. If no query is provided a default
-    /// query "SELECT * FROM <`table_name`>" is run.
+    /// The caller must specify `T` to indicate the kind of data expected. `table_name` is
+    /// the logical name for queries; `file_path` is the Parquet path; `sql_query` defaults
+    /// to `SELECT * FROM {table_name} ORDER BY ts_init` if `None`.
     ///
-    /// # Safety
+    /// When `custom_type_name` is `Some`, it is merged into each batch's schema metadata
+    /// before decoding (as `type_name`). Use this for custom data when Parquet/DataFusion
+    /// does not preserve schema metadata so the decoder can look up the type in the registry.
     ///
     /// The file data must be ordered by the `ts_init` in ascending order for this
     /// to work correctly.
@@ -73,22 +82,22 @@ impl DataBackendSession {
 
         match data_type {
             NautilusDataType::OrderBookDelta => slf
-                .add_file::<OrderBookDelta>(table_name, file_path, sql_query)
+                .add_file::<OrderBookDelta>(table_name, file_path, sql_query, None)
                 .map_err(to_pyruntime_err),
             NautilusDataType::OrderBookDepth10 => slf
-                .add_file::<OrderBookDepth10>(table_name, file_path, sql_query)
+                .add_file::<OrderBookDepth10>(table_name, file_path, sql_query, None)
                 .map_err(to_pyruntime_err),
             NautilusDataType::QuoteTick => slf
-                .add_file::<QuoteTick>(table_name, file_path, sql_query)
+                .add_file::<QuoteTick>(table_name, file_path, sql_query, None)
                 .map_err(to_pyruntime_err),
             NautilusDataType::TradeTick => slf
-                .add_file::<TradeTick>(table_name, file_path, sql_query)
+                .add_file::<TradeTick>(table_name, file_path, sql_query, None)
                 .map_err(to_pyruntime_err),
             NautilusDataType::Bar => slf
-                .add_file::<Bar>(table_name, file_path, sql_query)
+                .add_file::<Bar>(table_name, file_path, sql_query, None)
                 .map_err(to_pyruntime_err),
             NautilusDataType::MarkPriceUpdate => slf
-                .add_file::<MarkPriceUpdate>(table_name, file_path, sql_query)
+                .add_file::<MarkPriceUpdate>(table_name, file_path, sql_query, None)
                 .map_err(to_pyruntime_err),
         }
     }
@@ -114,6 +123,7 @@ impl DataBackendSession {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl DataQueryResult {
     /// The reader implements an iterator.
     const fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
@@ -121,11 +131,18 @@ impl DataQueryResult {
     }
 
     /// Each iteration returns a chunk of values read from the parquet file.
+    /// The capsule contains a CVec of DataFFI (C layout) so Cython capsule_to_list can read it.
     fn __next__(mut slf: PyRefMut<'_, Self>) -> PyResult<Option<Py<PyAny>>> {
         match slf.next() {
             Some(acc) if !acc.is_empty() => {
-                let cvec = slf.set_chunk(acc);
+                let ffi_data: Vec<DataFFI> = acc
+                    .into_iter()
+                    .map(DataFFI::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(to_pyruntime_err)?;
+                let cvec: CVec = ffi_data.into();
                 Python::attach(|py| {
+                    // No destructor: Python must call drop_cvec_pycapsule to take ownership and free.
                     match PyCapsule::new_with_destructor::<CVec, _>(py, cvec, None, |_, _| {}) {
                         Ok(capsule) => Ok(Some(capsule.into_py_any_unwrap(py))),
                         Err(e) => Err(to_pyruntime_err(e)),

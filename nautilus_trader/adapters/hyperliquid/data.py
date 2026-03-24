@@ -133,7 +133,7 @@ class HyperliquidDataClient(LiveMarketDataClient):
 
         instruments = self.instrument_provider.instruments_pyo3()
 
-        await self._ws_client.connect(instruments, self._handle_msg)
+        await self._ws_client.connect(self._loop, instruments, self._handle_msg)
         self._log.info(f"Connected to WebSocket {self._ws_client.url}", LogColor.BLUE)
 
     async def _disconnect(self) -> None:
@@ -147,8 +147,6 @@ class HyperliquidDataClient(LiveMarketDataClient):
                 f"Disconnected from WebSocket {self._ws_client.url}",
                 LogColor.BLUE,
             )
-
-        self._log.info("Disconnected from Hyperliquid", LogColor.GREEN)
 
     def _cache_instruments(self) -> None:
         # Ensures instrument definitions are available for correct

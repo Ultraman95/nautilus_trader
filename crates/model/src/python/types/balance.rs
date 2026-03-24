@@ -24,7 +24,9 @@ use crate::{
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl AccountBalance {
+    /// Represents an account balance denominated in a particular currency.
     #[new]
     fn py_new(total: Money, locked: Money, free: Money) -> PyResult<Self> {
         Self::new_checked(total, locked, free).map_err(to_pyvalue_err)
@@ -105,7 +107,9 @@ impl AccountBalance {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl MarginBalance {
+    /// Creates a new `MarginBalance` instance.
     #[new]
     fn py_new(initial: Money, maintenance: Money, instrument: InstrumentId) -> Self {
         Self::new(initial, maintenance, instrument)
@@ -152,9 +156,6 @@ impl MarginBalance {
     ///
     /// Returns a `PyErr` if serialization fails.
     ///
-    /// # Panics
-    ///
-    /// Panics if parsing numeric values (`unwrap()`) fails due to invalid format.
     #[pyo3(name = "to_dict")]
     pub fn py_to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = PyDict::new(py);

@@ -15,7 +15,10 @@
 
 //! Configuration structures for the dYdX adapter.
 
+use std::num::NonZeroU32;
+
 use nautilus_model::identifiers::{AccountId, TraderId};
+use nautilus_network::ratelimiter::quota::Quota;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -101,6 +104,18 @@ pub struct DydxAdapterConfig {
     /// Maximum retry delay in milliseconds (default: 10000ms).
     #[serde(default = "default_retry_delay_max_ms")]
     pub retry_delay_max_ms: u64,
+    /// gRPC rate limit: maximum broadcast requests per second.
+    ///
+    /// Controls the rate of gRPC `broadcast_tx` calls to prevent 429 (ResourceExhausted)
+    /// errors from validator nodes. Known provider limits:
+    /// - Polkachu: 300 req/min (~5 req/s)
+    /// - KingNodes: 250 req/min (~4.2 req/s)
+    /// - AutoStake: 4 req/s
+    ///
+    /// Default: 4 requests per second (conservative, works across all public providers).
+    /// Set to `None` to disable rate limiting.
+    #[serde(default = "default_grpc_rate_limit_per_second")]
+    pub grpc_rate_limit_per_second: Option<u32>,
 }
 
 fn default_max_retries() -> u32 {
@@ -113,6 +128,11 @@ fn default_retry_delay_initial_ms() -> u64 {
 
 fn default_retry_delay_max_ms() -> u64 {
     10000
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn default_grpc_rate_limit_per_second() -> Option<u32> {
+    Some(4)
 }
 
 impl DydxAdapterConfig {
@@ -145,6 +165,14 @@ impl DydxAdapterConfig {
     pub const fn compute_is_testnet(&self) -> bool {
         matches!(self.network, DydxNetwork::Testnet)
     }
+
+    /// Returns the gRPC rate limiting quota, if configured.
+    #[must_use]
+    pub fn grpc_quota(&self) -> Option<Quota> {
+        self.grpc_rate_limit_per_second
+            .and_then(NonZeroU32::new)
+            .and_then(Quota::per_second)
+    }
 }
 
 impl Default for DydxAdapterConfig {
@@ -173,12 +201,21 @@ impl Default for DydxAdapterConfig {
             max_retries: default_max_retries(),
             retry_delay_initial_ms: default_retry_delay_initial_ms(),
             retry_delay_max_ms: default_retry_delay_max_ms(),
+            grpc_rate_limit_per_second: default_grpc_rate_limit_per_second(),
         }
     }
 }
 
 /// Configuration for the dYdX data client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.dydx", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.dydx")
+)]
 pub struct DydxDataClientConfig {
     /// Base URL for the HTTP API.
     pub base_url_http: Option<String>,
@@ -218,7 +255,15 @@ impl Default for DydxDataClientConfig {
 
 /// Configuration for the dYdX execution client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DYDXExecClientConfig {
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.dydx", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.dydx")
+)]
+pub struct DydxExecClientConfig {
     /// The trader ID for the client.
     pub trader_id: TraderId,
     /// The account ID for the client.
@@ -261,9 +306,35 @@ pub struct DYDXExecClientConfig {
     pub retry_delay_initial_ms: Option<u64>,
     /// Maximum retry delay in milliseconds.
     pub retry_delay_max_ms: Option<u64>,
+    /// gRPC rate limit: maximum broadcast requests per second.
+    #[serde(default = "default_grpc_rate_limit_per_second")]
+    pub grpc_rate_limit_per_second: Option<u32>,
 }
 
-impl DYDXExecClientConfig {
+impl Default for DydxExecClientConfig {
+    fn default() -> Self {
+        Self {
+            trader_id: TraderId::from("TRADER-001"),
+            account_id: AccountId::from("DYDX-001"),
+            network: DydxNetwork::default(),
+            grpc_endpoint: None,
+            grpc_urls: Vec::new(),
+            ws_endpoint: None,
+            http_endpoint: None,
+            private_key: None,
+            wallet_address: None,
+            subaccount_number: 0,
+            authenticator_ids: Vec::new(),
+            http_timeout_secs: None,
+            max_retries: None,
+            retry_delay_initial_ms: None,
+            retry_delay_max_ms: None,
+            grpc_rate_limit_per_second: default_grpc_rate_limit_per_second(),
+        }
+    }
+}
+
+impl DydxExecClientConfig {
     /// Returns the gRPC URLs to use, with fallback support.
     ///
     /// Returns `grpc_urls` if non-empty, otherwise uses `grpc_endpoint` if provided,
@@ -273,6 +344,7 @@ impl DYDXExecClientConfig {
         if !self.grpc_urls.is_empty() {
             return self.grpc_urls.clone();
         }
+
         if let Some(ref endpoint) = self.grpc_endpoint {
             return vec![endpoint.clone()];
         }
@@ -311,6 +383,14 @@ impl DYDXExecClientConfig {
     #[must_use]
     pub const fn is_testnet(&self) -> bool {
         matches!(self.network, DydxNetwork::Testnet)
+    }
+
+    /// Returns the gRPC rate limiting quota, if configured.
+    #[must_use]
+    pub fn grpc_quota(&self) -> Option<Quota> {
+        self.grpc_rate_limit_per_second
+            .and_then(NonZeroU32::new)
+            .and_then(Quota::per_second)
     }
 }
 

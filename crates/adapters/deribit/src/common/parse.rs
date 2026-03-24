@@ -191,6 +191,7 @@ fn parse_spot_instrument(
         None, // margin_maint
         Some(maker_fee),
         Some(taker_fee),
+        None,
         ts_event,
         ts_init,
     );
@@ -253,6 +254,7 @@ fn parse_perpetual_instrument(
         None, // margin_maint
         Some(maker_fee),
         Some(taker_fee),
+        None,
         ts_event,
         ts_init,
     );
@@ -324,6 +326,7 @@ fn parse_future_instrument(
         None, // margin_maint
         Some(maker_fee),
         Some(taker_fee),
+        None,
         ts_event,
         ts_init,
     );
@@ -408,6 +411,7 @@ fn parse_option_instrument(
         None,
         Some(maker_fee),
         Some(taker_fee),
+        None,
         ts_event,
         ts_init,
     );
@@ -471,7 +475,7 @@ pub fn parse_account_state(
                 let maintenance = Money::from_decimal(maintenance_margin, currency)?;
 
                 // Create a synthetic instrument_id for account-level margins
-                // SAFETY: Format string "ACCOUNT-{currency}" always produces valid ASCII
+                // Format string "ACCOUNT-{currency}" always produces valid ASCII
                 // symbol since currency codes are uppercase alphanumeric (e.g., BTC, ETH, USDT)
                 let margin_instrument_id = InstrumentId::new(
                     Symbol::from_str_unchecked(format!("ACCOUNT-{}", summary.currency)),

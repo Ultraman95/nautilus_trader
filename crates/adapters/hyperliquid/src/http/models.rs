@@ -22,8 +22,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use ustr::Ustr;
 
 use crate::common::enums::{
-    HyperliquidFillDirection, HyperliquidOrderStatus as HyperliquidOrderStatusEnum,
-    HyperliquidPositionType, HyperliquidSide,
+    HyperliquidFillDirection, HyperliquidLeverageType,
+    HyperliquidOrderStatus as HyperliquidOrderStatusEnum, HyperliquidPositionType, HyperliquidSide,
 };
 
 /// Response from candleSnapshot endpoint (returns array directly).
@@ -389,6 +389,9 @@ pub struct HyperliquidFill {
     pub crossed: bool,
     /// Fee paid for this fill.
     pub fee: String,
+    /// Token the fee was paid in (e.g. "USDC", "HYPE").
+    #[serde(rename = "feeToken")]
+    pub fee_token: Ustr,
 }
 
 /// Represents order status response from `POST /info`.
@@ -488,11 +491,11 @@ where
     T: Serialize,
 {
     /// Create a new exchange request with the given action.
-    pub fn new(action: T, nonce: u64, signature: String) -> Result<Self, String> {
+    pub fn new(action: T, nonce: u64, signature: &str) -> Result<Self, String> {
         Ok(Self {
             action,
             nonce,
-            signature: HyperliquidSignature::from_hex(&signature)?,
+            signature: HyperliquidSignature::from_hex(signature)?,
             vault_address: None,
             expires_after: None,
         })
@@ -502,13 +505,13 @@ where
     pub fn with_vault(
         action: T,
         nonce: u64,
-        signature: String,
+        signature: &str,
         vault_address: String,
     ) -> Result<Self, String> {
         Ok(Self {
             action,
             nonce,
-            signature: HyperliquidSignature::from_hex(&signature)?,
+            signature: HyperliquidSignature::from_hex(signature)?,
             vault_address: Some(vault_address),
             expires_after: None,
         })
@@ -537,6 +540,15 @@ pub enum HyperliquidExchangeResponse {
         error: String,
     },
 }
+
+impl HyperliquidExchangeResponse {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Status { status, .. } if status == RESPONSE_STATUS_OK)
+    }
+}
+
+/// The success status string returned by the Hyperliquid exchange API.
+pub const RESPONSE_STATUS_OK: &str = "ok";
 
 #[cfg(test)]
 mod tests {
@@ -571,11 +583,7 @@ mod tests {
         let json = r#"{"status": "ok", "response": {"type": "order"}}"#;
 
         let response: HyperliquidExchangeResponse = serde_json::from_str(json).unwrap();
-
-        match response {
-            HyperliquidExchangeResponse::Status { status, .. } => assert_eq!(status, "ok"),
-            _ => panic!("Expected status response"),
-        }
+        assert!(response.is_ok());
     }
 
     #[rstest]
@@ -702,13 +710,13 @@ pub struct HyperliquidExecTriggerParams {
     pub tpsl: HyperliquidExecTpSl,
 }
 
-/// Optional builder fee for orders in exchange endpoint.
+/// Builder code for order attribution in the exchange endpoint.
 ///
-/// The builder fee is specified in tenths of a basis point.
+/// The fee is specified in tenths of a basis point.
 /// For example, `f: 10` represents 1 basis point (0.01%).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HyperliquidExecBuilderFee {
-    /// Builder address to receive the fee.
+    /// Builder address for attribution.
     #[serde(rename = "b")]
     pub address: String,
     /// Fee in tenths of a basis point.
@@ -777,36 +785,15 @@ pub struct HyperliquidExecCancelByCloidRequest {
 }
 
 /// Modify specification for modifying existing orders via exchange endpoint.
+///
+/// The HL API requires the full order spec (same as a place order) plus
+/// the venue order ID to modify.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HyperliquidExecModifyOrderRequest {
-    /// Asset ID.
-    #[serde(rename = "a")]
-    pub asset: AssetId,
-    /// Order ID to modify.
-    #[serde(rename = "o")]
+    /// Venue order ID to modify.
     pub oid: OrderId,
-    /// New price (optional).
-    #[serde(
-        rename = "p",
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "crate::common::parse::serialize_optional_decimal_as_str",
-        deserialize_with = "crate::common::parse::deserialize_optional_decimal_from_str"
-    )]
-    pub price: Option<Decimal>,
-    /// New size (optional).
-    #[serde(
-        rename = "s",
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "crate::common::parse::serialize_optional_decimal_as_str",
-        deserialize_with = "crate::common::parse::deserialize_optional_decimal_from_str"
-    )]
-    pub size: Option<Decimal>,
-    /// New reduce-only flag (optional).
-    #[serde(rename = "r", skip_serializing_if = "Option::is_none")]
-    pub reduce_only: Option<bool>,
-    /// New order type (optional).
-    #[serde(rename = "t", skip_serializing_if = "Option::is_none")]
-    pub kind: Option<HyperliquidExecOrderKind>,
+    /// Full replacement order specification.
+    pub order: HyperliquidExecPlaceOrderRequest,
 }
 
 /// TWAP (Time-Weighted Average Price) order specification for exchange endpoint.
@@ -846,7 +833,7 @@ pub enum HyperliquidExecAction {
         /// Grouping strategy for TP/SL orders.
         #[serde(default)]
         grouping: HyperliquidExecGrouping,
-        /// Optional builder fee.
+        /// Optional builder code for attribution.
         #[serde(skip_serializing_if = "Option::is_none")]
         builder: Option<HyperliquidExecBuilderFee>,
     },
@@ -1152,9 +1139,8 @@ pub struct AssetPosition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LeverageInfo {
-    /// Leverage type (e.g., "cross", "isolated").
     #[serde(rename = "type")]
-    pub leverage_type: String,
+    pub leverage_type: HyperliquidLeverageType,
     /// Leverage value.
     pub value: u32,
 }
@@ -1191,7 +1177,7 @@ pub struct CumFundingInfo {
 #[serde(rename_all = "camelCase")]
 pub struct PositionData {
     /// Asset symbol/coin (e.g., "BTC").
-    pub coin: String,
+    pub coin: Ustr,
     /// Cumulative funding breakdown.
     #[serde(rename = "cumFunding")]
     pub cum_funding: CumFundingInfo,

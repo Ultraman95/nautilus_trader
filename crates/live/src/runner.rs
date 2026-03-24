@@ -213,6 +213,7 @@ impl AsyncRunner {
             Self::handle_data_event(evt);
             count += 1;
         }
+
         if count > 0 {
             log::debug!("Drained {count} pending data events");
         }
@@ -281,6 +282,12 @@ impl AsyncRunner {
             }
             DataEvent::FundingRate(funding_rate) => {
                 msgbus::send_any(MessagingSwitchboard::data_engine_process(), &funding_rate);
+            }
+            DataEvent::InstrumentStatus(status) => {
+                msgbus::send_any(MessagingSwitchboard::data_engine_process(), &status);
+            }
+            DataEvent::OptionGreeks(greeks) => {
+                msgbus::send_any(MessagingSwitchboard::data_engine_process(), &greeks);
             }
             #[cfg(feature = "defi")]
             DataEvent::DeFi(data) => {
@@ -430,7 +437,7 @@ mod tests {
         let command = DataCommand::Subscribe(SubscribeCommand::Data(SubscribeCustomData {
             client_id: Some(ClientId::from("TEST")),
             venue: None,
-            data_type: DataType::new("QuoteTick", None),
+            data_type: DataType::new("QuoteTick", None, None),
             command_id: UUID4::new(),
             ts_init: UnixNanos::default(),
             correlation_id: None,
@@ -960,7 +967,7 @@ mod tests {
         let command = DataCommand::Subscribe(SubscribeCommand::Data(SubscribeCustomData {
             client_id: Some(ClientId::from("TEST")),
             venue: None,
-            data_type: DataType::new("QuoteTick", None),
+            data_type: DataType::new("QuoteTick", None, None),
             command_id: UUID4::new(),
             ts_init: UnixNanos::default(),
             correlation_id: None,

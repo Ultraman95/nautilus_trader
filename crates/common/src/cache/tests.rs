@@ -131,6 +131,10 @@ fn test_order_when_initialized(mut cache: Cache, audusd_sim: CurrencyPair) {
     assert_eq!(cache.orders(None, None, None, None, None), vec![order]);
     assert!(cache.orders_open(None, None, None, None, None).is_empty());
     assert!(cache.orders_closed(None, None, None, None, None).is_empty());
+    assert_eq!(
+        cache.orders_active_local(None, None, None, None, None),
+        vec![order]
+    );
     assert!(
         cache
             .orders_emulated(None, None, None, None, None)
@@ -144,11 +148,16 @@ fn test_order_when_initialized(mut cache: Cache, audusd_sim: CurrencyPair) {
     assert!(cache.order_exists(&order.client_order_id()));
     assert!(!cache.is_order_open(&order.client_order_id()));
     assert!(!cache.is_order_closed(&order.client_order_id()));
+    assert!(cache.is_order_active_local(&order.client_order_id()));
     assert!(!cache.is_order_emulated(&order.client_order_id()));
     assert!(!cache.is_order_inflight(&order.client_order_id()));
     assert!(!cache.is_order_pending_cancel_local(&order.client_order_id()));
     assert_eq!(cache.orders_open_count(None, None, None, None, None), 0);
     assert_eq!(cache.orders_closed_count(None, None, None, None, None), 0);
+    assert_eq!(
+        cache.orders_active_local_count(None, None, None, None, None),
+        1
+    );
     assert_eq!(cache.orders_emulated_count(None, None, None, None, None), 0);
     assert_eq!(cache.orders_inflight_count(None, None, None, None, None), 0);
     assert_eq!(cache.orders_total_count(None, None, None, None, None), 1);
@@ -184,6 +193,11 @@ fn test_order_when_submitted(mut cache: Cache, audusd_sim: CurrencyPair) {
     assert!(cache.orders_closed(None, None, None, None, None).is_empty());
     assert!(
         cache
+            .orders_active_local(None, None, None, None, None)
+            .is_empty()
+    );
+    assert!(
+        cache
             .orders_emulated(None, None, None, None, None)
             .is_empty()
     );
@@ -195,11 +209,16 @@ fn test_order_when_submitted(mut cache: Cache, audusd_sim: CurrencyPair) {
     assert!(cache.order_exists(&order.client_order_id()));
     assert!(!cache.is_order_open(&order.client_order_id()));
     assert!(!cache.is_order_closed(&order.client_order_id()));
+    assert!(!cache.is_order_active_local(&order.client_order_id()));
     assert!(!cache.is_order_emulated(&order.client_order_id()));
     assert!(cache.is_order_inflight(&order.client_order_id()));
     assert!(!cache.is_order_pending_cancel_local(&order.client_order_id()));
     assert_eq!(cache.orders_open_count(None, None, None, None, None), 0);
     assert_eq!(cache.orders_closed_count(None, None, None, None, None), 0);
+    assert_eq!(
+        cache.orders_active_local_count(None, None, None, None, None),
+        0
+    );
     assert_eq!(cache.orders_emulated_count(None, None, None, None, None), 0);
     assert_eq!(cache.orders_inflight_count(None, None, None, None, None), 1);
     assert_eq!(cache.orders_total_count(None, None, None, None, None), 1);
@@ -411,6 +430,7 @@ fn test_position_ids_filtering(mut cache: Cache) {
             None,
             None,
             None,
+            None,
             UnixNanos::default(),
             UnixNanos::default(),
         )
@@ -431,7 +451,7 @@ fn test_position_ids_filtering(mut cache: Cache) {
 
     let fill_a_event = TestOrderEventStubs::filled(
         &base_order,
-        &InstrumentAny::CurrencyPair(instr_a0),
+        &InstrumentAny::CurrencyPair(instr_a0.clone()),
         None,
         Some(PositionId::new("POS-A")),
         None,
@@ -445,7 +465,7 @@ fn test_position_ids_filtering(mut cache: Cache) {
         OrderEventAny::Filled(f) => f,
         _ => unreachable!(),
     };
-    let pos_a = Position::new(&InstrumentAny::CurrencyPair(instr_a0), fill_a);
+    let pos_a = Position::new(&InstrumentAny::CurrencyPair(instr_a0.clone()), fill_a);
 
     // Second open position on venue B
     let order_b = OrderTestBuilder::new(OrderType::Market)
@@ -456,7 +476,7 @@ fn test_position_ids_filtering(mut cache: Cache) {
 
     let fill_b_event = TestOrderEventStubs::filled(
         &order_b,
-        &InstrumentAny::CurrencyPair(instr_b0),
+        &InstrumentAny::CurrencyPair(instr_b0.clone()),
         None,
         Some(PositionId::new("POS-B")),
         None,
@@ -479,9 +499,9 @@ fn test_position_ids_filtering(mut cache: Cache) {
     pos_closed.ts_closed = Some(UnixNanos::from(1));
 
     // Insert into cache
-    cache.add_position(pos_a.clone(), OmsType::Netting).unwrap();
-    cache.add_position(pos_b, OmsType::Netting).unwrap();
-    cache.add_position(pos_closed, OmsType::Netting).unwrap();
+    cache.add_position(&pos_a, OmsType::Netting).unwrap();
+    cache.add_position(&pos_b, OmsType::Netting).unwrap();
+    cache.add_position(&pos_closed, OmsType::Netting).unwrap();
 
     // Assertions
     assert_eq!(cache.position_ids(None, None, None, None).len(), 3);
@@ -807,9 +827,7 @@ fn test_position_when_some(mut cache: Cache, audusd_sim: CurrencyPair) {
         None,
     );
     let position = Position::new(&audusd_sim, filled.into());
-    cache
-        .add_position(position.clone(), OmsType::Netting)
-        .unwrap();
+    cache.add_position(&position, OmsType::Netting).unwrap();
 
     let result = cache.position(&position.id);
     assert_eq!(result, Some(&position));
@@ -854,7 +872,7 @@ fn test_instrument_when_empty(cache: Cache, audusd_sim: CurrencyPair) {
 #[rstest]
 fn test_instrument_when_some(mut cache: Cache, audusd_sim: CurrencyPair) {
     cache
-        .add_instrument(InstrumentAny::CurrencyPair(audusd_sim))
+        .add_instrument(InstrumentAny::CurrencyPair(audusd_sim.clone()))
         .unwrap();
 
     let result = cache.instrument(&audusd_sim.id);
@@ -872,13 +890,13 @@ fn test_instruments_when_empty(cache: Cache) {
 fn test_instruments_when_some(mut cache: Cache) {
     let esz1 = futures_contract_es(None, None);
     cache
-        .add_instrument(InstrumentAny::FuturesContract(esz1))
+        .add_instrument(InstrumentAny::FuturesContract(esz1.clone()))
         .unwrap();
 
     let result1 = cache.instruments(&esz1.id.venue, None);
     let result2 = cache.instruments(&esz1.id.venue, Some(&esz1.underlying));
-    assert_eq!(result1, vec![&InstrumentAny::FuturesContract(esz1)]);
-    assert_eq!(result2, vec![&InstrumentAny::FuturesContract(esz1)]);
+    assert_eq!(result1, vec![&InstrumentAny::FuturesContract(esz1.clone())]);
+    assert_eq!(result2, vec![&InstrumentAny::FuturesContract(esz1.clone())]);
 }
 
 #[rstest]
@@ -1287,6 +1305,7 @@ fn test_add_funding_rate(mut cache: Cache, audusd_sim: CurrencyPair) {
         audusd_sim.id,
         "0.0001".parse().unwrap(),
         None,
+        None,
         UnixNanos::from(5),
         UnixNanos::from(10),
     );
@@ -1303,6 +1322,7 @@ fn test_add_funding_rate_updates_existing(mut cache: Cache, audusd_sim: Currency
         audusd_sim.id,
         "0.0001".parse().unwrap(),
         None,
+        None,
         UnixNanos::from(5),
         UnixNanos::from(10),
     );
@@ -1310,6 +1330,7 @@ fn test_add_funding_rate_updates_existing(mut cache: Cache, audusd_sim: Currency
     let funding_rate2 = FundingRateUpdate::new(
         audusd_sim.id,
         "0.0002".parse().unwrap(),
+        None,
         None,
         UnixNanos::from(15),
         UnixNanos::from(20),
@@ -1506,9 +1527,7 @@ fn test_purge_order() {
 
     let mut position = Position::new(&audusd_sim, filled.into());
     let position_id = position.id;
-    cache
-        .add_position(position.clone(), OmsType::Netting)
-        .unwrap();
+    cache.add_position(&position, OmsType::Netting).unwrap();
 
     // Close the position to test purging from closed positions
     let order_close = OrderTestBuilder::new(OrderType::Market)
@@ -1629,9 +1648,7 @@ fn test_purge_position() {
     let position_id = position.id;
 
     // Add position to cache
-    cache
-        .add_position(position.clone(), OmsType::Netting)
-        .unwrap();
+    cache.add_position(&position, OmsType::Netting).unwrap();
 
     // Verify the position exists and is open
     assert!(cache.position_exists(&position_id));
@@ -1703,9 +1720,7 @@ fn test_purge_open_position_skips_purge() {
     let position = Position::new(&audusd_sim, filled.into());
     let position_id = position.id;
 
-    cache
-        .add_position(position.clone(), OmsType::Netting)
-        .unwrap();
+    cache.add_position(&position, OmsType::Netting).unwrap();
 
     // Verify position is open
     assert!(position.is_open());
@@ -1759,9 +1774,7 @@ fn test_purge_closed_positions_does_not_purge_reopened_position() {
     let position_id = position.id;
 
     // Add position to cache
-    cache
-        .add_position(position.clone(), OmsType::Netting)
-        .unwrap();
+    cache.add_position(&position, OmsType::Netting).unwrap();
     cache.update_position(&position).unwrap();
 
     // Verify position is LONG
@@ -2145,7 +2158,7 @@ fn test_purge_position_cleans_up_account_positions_index() {
 
     let position = Position::new(&instrument, filled.into());
     let position_id = position.id;
-    cache.add_position(position, OmsType::Hedging).unwrap();
+    cache.add_position(&position, OmsType::Hedging).unwrap();
 
     // Verify position is in account index (populated by add_position)
     assert!(cache.index.account_positions.contains_key(&account_id));
@@ -2198,7 +2211,7 @@ fn test_purge_position_cleans_up_account_positions_index() {
 fn test_update_own_order_book_with_market_order_does_not_panic(mut cache: Cache) {
     let audusd_sim = audusd_sim();
     cache
-        .add_instrument(InstrumentAny::CurrencyPair(audusd_sim))
+        .add_instrument(InstrumentAny::CurrencyPair(audusd_sim.clone()))
         .unwrap();
 
     // Create a LIMIT order to establish an own book for the instrument
@@ -2240,7 +2253,7 @@ fn test_update_own_order_book_with_market_order_does_not_panic(mut cache: Cache)
 
     let filled = TestOrderEventStubs::filled(
         &market_order_mut,
-        &InstrumentAny::CurrencyPair(audusd_sim),
+        &InstrumentAny::CurrencyPair(audusd_sim.clone()),
         Some(TradeId::new("T-001")),
         None,
         Some(Price::from("1.00010")),
@@ -2435,7 +2448,7 @@ fn test_purge_closed_orders_does_not_purge_order_list_with_open_orders() {
 fn test_force_remove_from_own_order_book(mut cache: Cache) {
     let audusd_sim = audusd_sim();
     cache
-        .add_instrument(InstrumentAny::CurrencyPair(audusd_sim))
+        .add_instrument(InstrumentAny::CurrencyPair(audusd_sim.clone()))
         .unwrap();
 
     let limit_order = OrderTestBuilder::new(OrderType::Limit)
@@ -2502,7 +2515,7 @@ fn test_force_remove_from_own_order_book(mut cache: Cache) {
 fn test_audit_own_order_books_with_inflight_orders(mut cache: Cache) {
     let audusd_sim = audusd_sim();
     cache
-        .add_instrument(InstrumentAny::CurrencyPair(audusd_sim))
+        .add_instrument(InstrumentAny::CurrencyPair(audusd_sim.clone()))
         .unwrap();
 
     let limit_order = OrderTestBuilder::new(OrderType::Limit)
@@ -2535,7 +2548,7 @@ fn test_audit_own_order_books_with_inflight_orders(mut cache: Cache) {
 fn test_audit_own_order_books_removes_closed(mut cache: Cache) {
     let audusd_sim = audusd_sim();
     cache
-        .add_instrument(InstrumentAny::CurrencyPair(audusd_sim))
+        .add_instrument(InstrumentAny::CurrencyPair(audusd_sim.clone()))
         .unwrap();
 
     let limit_order = OrderTestBuilder::new(OrderType::Limit)
@@ -2765,9 +2778,7 @@ fn test_position_flip_netting_mode_cleans_up_closed_index() {
     let position_id = position.id;
 
     // Add position to cache
-    cache
-        .add_position(position.clone(), OmsType::Netting)
-        .unwrap();
+    cache.add_position(&position, OmsType::Netting).unwrap();
 
     // Verify position is LONG and in open index
     assert!(position.is_long());
@@ -2836,7 +2847,7 @@ fn test_position_flip_netting_mode_cleans_up_closed_index() {
     // Add the reopened position to cache
     // THIS IS THE KEY TEST: add_position should remove from closed index
     cache
-        .add_position(position_reopened.clone(), OmsType::Netting)
+        .add_position(&position_reopened, OmsType::Netting)
         .unwrap();
 
     // The reopened position should be in open index, NOT closed index
@@ -3059,6 +3070,128 @@ fn test_add_non_emulated_order_not_in_orders_emulated(mut cache: Cache, audusd_s
         "Non-emulated order should not be in orders_emulated index"
     );
     assert_eq!(cache.orders_emulated_count(None, None, None, None, None), 0);
+}
+
+#[rstest]
+fn test_initialized_order_indexes_in_orders_active_local(
+    mut cache: Cache,
+    audusd_sim: CurrencyPair,
+) {
+    let mut order = OrderTestBuilder::new(OrderType::Limit)
+        .instrument_id(audusd_sim.id)
+        .side(OrderSide::Buy)
+        .price(Price::from("1.00000"))
+        .quantity(Quantity::from(100_000))
+        .build();
+
+    cache.add_order(order.clone(), None, None, false).unwrap();
+
+    assert!(
+        cache
+            .index
+            .orders_active_local
+            .contains(&order.client_order_id()),
+        "Initialized order should be in orders_active_local index after add"
+    );
+    assert_eq!(
+        cache.orders_active_local_count(None, None, None, None, None),
+        1
+    );
+
+    let submitted = OrderSubmitted::default();
+    order.apply(OrderEventAny::Submitted(submitted)).unwrap();
+    cache.update_order(&order).unwrap();
+
+    assert!(
+        !cache
+            .index
+            .orders_active_local
+            .contains(&order.client_order_id()),
+        "Submitted order should be removed from orders_active_local index"
+    );
+    assert_eq!(
+        cache.orders_active_local_count(None, None, None, None, None),
+        0
+    );
+}
+
+#[rstest]
+fn test_released_order_indexes_in_orders_active_local(mut cache: Cache, audusd_sim: CurrencyPair) {
+    let order = OrderTestBuilder::new(OrderType::StopMarket)
+        .instrument_id(audusd_sim.id)
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .trigger_price(Price::from("1.00010"))
+        .emulation_trigger(TriggerType::LastPrice)
+        .build();
+
+    cache.add_order(order.clone(), None, None, false).unwrap();
+
+    let released = OrderReleased::new(
+        order.trader_id(),
+        order.strategy_id(),
+        order.instrument_id(),
+        order.client_order_id(),
+        Price::from("1.00010"),
+        UUID4::new(),
+        UnixNanos::default(),
+        UnixNanos::default(),
+    );
+    let mut order = order;
+    order.apply(OrderEventAny::Released(released)).unwrap();
+    cache.update_order(&order).unwrap();
+
+    assert!(
+        cache
+            .index
+            .orders_active_local
+            .contains(&order.client_order_id()),
+        "Released order should remain in orders_active_local index"
+    );
+    assert!(cache.is_order_active_local(&order.client_order_id()));
+    assert_eq!(
+        cache.orders_active_local_count(None, None, None, None, None),
+        1
+    );
+}
+
+#[rstest]
+fn test_emulated_order_indexes_in_orders_active_local(mut cache: Cache, audusd_sim: CurrencyPair) {
+    let order = OrderTestBuilder::new(OrderType::StopMarket)
+        .instrument_id(audusd_sim.id)
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(100_000))
+        .trigger_price(Price::from("1.00010"))
+        .emulation_trigger(TriggerType::LastPrice)
+        .build();
+
+    cache.add_order(order.clone(), None, None, false).unwrap();
+
+    let emulated = OrderEmulated::new(
+        order.trader_id(),
+        order.strategy_id(),
+        order.instrument_id(),
+        order.client_order_id(),
+        UUID4::new(),
+        UnixNanos::default(),
+        UnixNanos::default(),
+    );
+    let mut order = order;
+    order.apply(OrderEventAny::Emulated(emulated)).unwrap();
+    cache.update_order(&order).unwrap();
+
+    assert!(
+        cache
+            .index
+            .orders_active_local
+            .contains(&order.client_order_id()),
+        "Emulated order should remain in orders_active_local index"
+    );
+    assert!(cache.is_order_active_local(&order.client_order_id()));
+    assert_eq!(
+        cache.orders_active_local_count(None, None, None, None, None),
+        1
+    );
 }
 
 #[rstest]

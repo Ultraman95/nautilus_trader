@@ -139,7 +139,7 @@ impl TransactionManager {
 
         let chain_seq = base_account.sequence;
         self.sequence_number.store(chain_seq, Ordering::SeqCst);
-        log::info!("Initialized sequence from chain: {chain_seq}");
+        log::debug!("Initialized sequence from chain: {chain_seq}");
         Ok(chain_seq)
     }
 
@@ -297,6 +297,7 @@ impl TransactionManager {
                         sub.auth_type,
                         sub.config
                     );
+
                     if sub.auth_type == "SignatureVerification" && sub.config == pubkey_b64 {
                         log::debug!("  -> MATCH! pubkey_b64={pubkey_b64}");
                         return true;
@@ -375,6 +376,7 @@ impl TransactionManager {
                 continue;
             }
             let new_value = current + count as u64;
+
             if self
                 .sequence_number
                 .compare_exchange(current, new_value, Ordering::SeqCst, Ordering::SeqCst)
@@ -409,7 +411,7 @@ impl TransactionManager {
             )
             .is_ok()
         {
-            log::info!("Initialized sequence from chain: {chain_seq}");
+            log::debug!("Initialized sequence from chain: {chain_seq}");
         }
         Ok(())
     }

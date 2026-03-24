@@ -128,6 +128,7 @@ class BetfairTestStubs:
                 "SportsAPING/v1.0/listClearedOrders": BetfairResponses.list_cleared_orders,
             }
             kw = {}
+
             if rpc_method == "SportsAPING/v1.0/listMarketCatalogue":
                 kw = {"filter_": request.params.filter}
             if rpc_method in responses:
@@ -366,6 +367,22 @@ class BetfairResponses:
         return BetfairResponses.load("betting_place_order_success.json")
 
     @staticmethod
+    def betting_place_order_batch_success():
+        return BetfairResponses.load("betting_place_order_batch_success.json")
+
+    @staticmethod
+    def betting_place_order_batch_partial_failure():
+        return BetfairResponses.load("betting_place_order_batch_partial_failure.json")
+
+    @staticmethod
+    def betting_cancel_orders_batch_success():
+        return BetfairResponses.load("betting_cancel_orders_batch_success.json")
+
+    @staticmethod
+    def betting_cancel_orders_batch_partial_failure():
+        return BetfairResponses.load("betting_cancel_orders_batch_partial_failure.json")
+
+    @staticmethod
     def betting_place_orders_old():
         return BetfairResponses.load("betting_place_orders_old.json")
 
@@ -434,6 +451,7 @@ class BetfairResponses:
     @staticmethod
     def betting_list_market_catalogue(filter_: MarketFilter | None = None) -> dict:
         result = BetfairResponses.load("betting_list_market_catalogue.json")
+
         if filter_:
             result = [r for r in result if r["marketId"] in filter_.market_ids]  # type: ignore
         return {"jsonrpc": "2.0", "result": result, "id": 1}

@@ -36,7 +36,9 @@ use crate::{
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl StopMarketOrder {
+    /// Creates a new `StopMarketOrder` instance.
     #[new]
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (trader_id, strategy_id, instrument_id, client_order_id, order_side, quantity, trigger_price, trigger_type, time_in_force, reduce_only, quote_quantity, init_id, ts_init, expire_time=None, display_qty=None, emulation_trigger=None, trigger_instrument_id=None, contingency_type=None, order_list_id=None, linked_order_ids=None, parent_order_id=None, exec_algorithm_id=None, exec_algorithm_params=None, exec_spawn_id=None, tags=None))]
@@ -99,8 +101,8 @@ impl StopMarketOrder {
 
     #[staticmethod]
     #[pyo3(name = "create")]
-    fn py_create(init: OrderInitialized) -> PyResult<Self> {
-        Ok(Self::from(init))
+    fn py_create(init: OrderInitialized) -> Self {
+        Self::from(init)
     }
 
     #[staticmethod]
@@ -127,7 +129,6 @@ impl StopMarketOrder {
         self.order_type
     }
 
-    #[getter]
     #[pyo3(name = "events")]
     fn py_events(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         self.events()

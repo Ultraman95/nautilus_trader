@@ -116,7 +116,15 @@ pub const QUANTITY_MIN: f64 = 0.0;
 #[derive(Clone, Copy, Default, Eq)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model", frozen)
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.model",
+        frozen,
+        from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.model")
 )]
 pub struct Quantity {
     /// Represents the raw fixed-point value, with `precision` defining the number of decimal places.
@@ -213,6 +221,7 @@ impl Quantity {
             raw == QUANTITY_UNDEF || raw <= QUANTITY_RAW_MAX,
             "`raw` value {raw} exceeds QUANTITY_RAW_MAX={QUANTITY_RAW_MAX} for Quantity"
         );
+
         if raw == QUANTITY_UNDEF {
             assert!(
                 precision == 0,
@@ -343,7 +352,7 @@ impl Quantity {
         let precision_diff = FIXED_PRECISION.saturating_sub(self.precision);
         let rescaled_raw = self.raw / QuantityRaw::pow(10, u32::from(precision_diff));
 
-        // SAFETY: The raw value is guaranteed to be within i128 range after scaling
+        // The raw value is guaranteed to be within i128 range after scaling
         // because our quantity constraints ensure the maximum raw value times the scaling
         // factor cannot exceed i128::MAX (high-precision) or i64::MAX (standard-precision).
         #[allow(clippy::useless_conversion)]

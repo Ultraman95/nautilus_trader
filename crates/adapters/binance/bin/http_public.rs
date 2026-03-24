@@ -25,9 +25,13 @@
 //! ```
 
 use nautilus_binance::{
-    common::{enums::BinanceEnvironment, fixed::mantissa_to_f64},
-    spot::http::{BinanceSpotHttpClient, DepthParams},
+    common::enums::BinanceEnvironment,
+    spot::{
+        http::{BinanceSpotHttpClient, DepthParams},
+        sbe::stream::mantissa_to_f64,
+    },
 };
+use nautilus_core::time::get_atomic_clock_realtime;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -44,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
     // Create client (no credentials needed for public endpoints)
     let client = BinanceSpotHttpClient::new(
         BinanceEnvironment::Mainnet,
+        get_atomic_clock_realtime(),
         None,     // api_key
         None,     // api_secret
         None,     // base_url_override

@@ -46,7 +46,9 @@ use crate::{
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl StopLimitOrder {
+    /// Creates a new `StopLimitOrder` instance.
     #[new]
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (trader_id, strategy_id, instrument_id, client_order_id, order_side, quantity, price, trigger_price, trigger_type, time_in_force, post_only, reduce_only, quote_quantity, init_id, ts_init, expire_time=None, display_qty=None, emulation_trigger=None, trigger_instrument_id=None, contingency_type=None, order_list_id=None, linked_order_ids=None, parent_order_id=None, exec_algorithm_id=None, exec_algorithm_params=None, exec_spawn_id=None, tags=None))]
@@ -129,8 +131,8 @@ impl StopLimitOrder {
 
     #[staticmethod]
     #[pyo3(name = "create")]
-    fn py_create(init: OrderInitialized) -> PyResult<Self> {
-        Ok(Self::from(init))
+    fn py_create(init: OrderInitialized) -> Self {
+        Self::from(init)
     }
 
     #[staticmethod]
@@ -374,7 +376,6 @@ impl StopLimitOrder {
             .map(|vec| vec.iter().map(|s| s.as_str()).collect())
     }
 
-    #[getter]
     #[pyo3(name = "events")]
     fn py_events(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         self.events()
@@ -519,7 +520,7 @@ impl StopLimitOrder {
         dict.set_item("ts_last", self.ts_last.as_u64())?;
         dict.set_item(
             "commissions",
-            commissions_from_indexmap(py, self.commissions().clone())?,
+            commissions_from_indexmap(py, self.commissions())?,
         )?;
         self.last_trade_id.map_or_else(
             || dict.set_item("last_trade_id", py.None()),

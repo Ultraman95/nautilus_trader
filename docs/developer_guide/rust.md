@@ -2,7 +2,7 @@
 
 The [Rust](https://www.rust-lang.org/learn) programming language is an ideal fit for implementing the mission-critical core of the platform and systems.
 Its strong type system, ownership model, and compile-time checks eliminate memory errors and data races by construction,
-while zero-cost abstractions and the absence of a garbage collector deliver C-like performance—critical for high-frequency trading workloads.
+while zero-cost abstractions and the absence of a garbage collector deliver C-like performance, important for high-frequency trading workloads.
 
 ## Cargo manifest conventions
 
@@ -26,7 +26,7 @@ while zero-cost abstractions and the absence of a garbage collector deliver C-li
 
 ## Feature flag conventions
 
-- Prefer additive feature flags—enabling a feature must not break existing functionality.
+- Prefer additive feature flags. Enabling a feature must not break existing functionality.
 - Use descriptive flag names that explain what capability is enabled.
 - Document every feature in the crate-level documentation so consumers know what they toggle.
 - Common patterns:
@@ -40,7 +40,7 @@ while zero-cost abstractions and the absence of a garbage collector deliver C-li
 ## Build configurations
 
 To avoid unnecessary rebuilds during development, align cargo features, profiles, and flags across different build targets.
-Cargo's build cache is keyed by the exact combination of features, profiles, and flags—any mismatch triggers a full rebuild.
+Cargo's build cache is keyed by the exact combination of features, profiles, and flags. Any mismatch triggers a full rebuild.
 
 ### Aligned targets (testing and linting)
 
@@ -111,7 +111,7 @@ All Rust files must include the standardized copyright header:
 // -------------------------------------------------------------------------------------------------
 ```
 
-:::info Automated enforcement
+:::info[Automated enforcement]
 The `check_copyright_year.sh` pre-commit hook verifies copyright headers include the current year.
 :::
 
@@ -165,7 +165,7 @@ pub fn process_symbol(symbol: Symbol) -> anyhow::Result<()> {
 }
 ```
 
-:::info Automated enforcement
+:::info[Automated enforcement]
 The `check_anyhow_usage.sh` pre-commit hook enforces these anyhow conventions automatically.
 :::
 
@@ -175,7 +175,7 @@ The `check_anyhow_usage.sh` pre-commit hook enforces these anyhow conventions au
   - Use `log::…` (`log::debug!`, `log::info!`, `log::warn!`, etc.) for all Rust components.
 - Start messages with a capitalised word, prefer complete sentences, and omit terminal periods (e.g. `"Processing batch"`, not `"Processing batch."`).
 
-:::info Automated enforcement
+:::info[Automated enforcement]
 The `check_logging_macro_usage.sh` pre-commit hook enforces fully qualified logging macros.
 :::
 
@@ -234,7 +234,7 @@ Use structured error handling patterns consistently:
    connect().context("BitMEX websocket did not become active")?;
    ```
 
-:::info Automated enforcement
+:::info[Automated enforcement]
 The `check_error_conventions.sh` and `check_anyhow_usage.sh` pre-commit hooks enforce these error handling patterns.
 :::
 
@@ -289,7 +289,7 @@ Adapter crates (under `crates/adapters/`) require special handling for spawning 
 
 4. **Tests are exempt**: Test code using `#[tokio::test]` creates its own runtime context, so `tokio::spawn()` works correctly. The enforcement hook skips test files and test modules.
 
-:::info Automated enforcement
+:::info[Automated enforcement]
 The `check_tokio_usage.sh` pre-commit hook enforces these adapter runtime patterns automatically.
 :::
 
@@ -303,6 +303,10 @@ Consistent attribute usage and ordering:
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.model")
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.model")
 )]
 pub struct Symbol(Ustr);
 ```
@@ -330,7 +334,18 @@ For enums with extensive derive attributes:
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(eq, eq_int, module = "nautilus_trader.model")
+    pyo3::pyclass(
+        frozen,
+        eq,
+        eq_int,
+        module = "nautilus_trader.model",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum AccountType {
     /// An account with unleveraged cash assets only.
@@ -339,6 +354,73 @@ pub enum AccountType {
     Margin = 2,
 }
 ```
+
+### Type stub annotations
+
+Python type stubs (`.pyi` files) are generated from Rust source using
+[pyo3-stub-gen](https://github.com/Jij-Inc/pyo3-stub-gen). Every type and function
+exposed to Python needs a matching stub annotation so the generated stubs stay in sync
+with the bindings.
+
+**Annotation types:**
+
+| PyO3 construct    | Stub annotation                                  |
+| ----------------- | ------------------------------------------------ |
+| `#[pyclass]`      | `pyo3_stub_gen::derive::gen_stub_pyclass`        |
+| enum `#[pyclass]` | `pyo3_stub_gen::derive::gen_stub_pyclass_enum`   |
+| `#[pymethods]`    | `pyo3_stub_gen::derive::gen_stub_pymethods`      |
+| `#[pyfunction]`   | `pyo3_stub_gen::derive::gen_stub_pyfunction`     |
+
+**Placement rules:**
+
+- On structs and enums, use `#[cfg_attr(feature = "python", ...)]` and place the stub
+  annotation directly below the `pyo3::pyclass` attribute.
+- On `#[pymethods]` impl blocks, place `#[pyo3_stub_gen::derive::gen_stub_pymethods]`
+  directly below `#[pymethods]`.
+- On functions, place the stub annotation directly above `#[pyfunction]`, after any doc
+  comments. Fully qualify the path rather than importing it.
+
+```rust
+/// Converts a list of `Bar` into Arrow IPC bytes.
+#[pyo3_stub_gen::derive::gen_stub_pyfunction(module = "nautilus_trader.serialization")]
+#[pyfunction(name = "bars_to_arrow")]
+pub fn py_bars_to_arrow(data: Vec<Bar>) -> PyResult<Py<PyBytes>> {
+    // ...
+}
+```
+
+```rust
+#[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
+impl AccountState {
+    #[staticmethod]
+    #[pyo3(name = "from_dict")]
+    pub fn py_from_dict(values: &Bound<'_, PyDict>) -> PyResult<Self> {
+        // ...
+    }
+}
+```
+
+**Module parameter:** set `module = "nautilus_trader.<package>"` to match the Python
+package where the type is imported. For example, model types use
+`nautilus_trader.model` and serialization functions use
+`nautilus_trader.serialization`.
+
+**Cargo.toml:** add `pyo3-stub-gen` as an optional dependency and include it in the
+`python` feature list:
+
+```toml
+[features]
+python = ["pyo3", "pyo3-stub-gen"]
+
+[dependencies]
+pyo3-stub-gen = { workspace = true, optional = true }
+```
+
+**Regenerating stubs:** run `make py-stubs-v2` (or `python python/generate_stubs.py`)
+after changing annotations. The post-processor handles `py_` prefix stripping,
+`@property`/`@staticmethod`/`@classmethod` decoration, keyword escaping, deduplication,
+and ruff formatting.
 
 ### Constructor patterns
 
@@ -398,7 +480,7 @@ impl<T: AsRef<str>> From<T> for Symbol {
 }
 ```
 
-**Design note**: The `From` impl may panic on invalid input. This is intentional for API ergonomics—use `FromStr` / `.parse()` when error handling is needed. The `From` impl provides convenience for cases where the input is known to be valid.
+**Design note**: The `From` impl may panic on invalid input. This is intentional for API ergonomics. Use `FromStr` / `.parse()` when error handling is needed. The `From` impl provides convenience for cases where the input is known to be valid.
 
 **Constraint**: This pattern cannot be used for types that implement `AsRef<str>` themselves (e.g., string wrapper types), as it would conflict with the blanket `impl<T> From<T> for T`. For such types, provide separate `From<&str>` and `From<String>` impls instead.
 
@@ -716,9 +798,34 @@ pub fn py_do_something() -> PyResult<()> {
 }
 ```
 
-:::info Automated enforcement
+:::info[Automated enforcement]
 The `check_pyo3_conventions.sh` pre-commit hook enforces the `py_` prefix for PyO3 functions.
 :::
+
+### PyO3 enum conventions
+
+Enums exposed to Python should use the following `pyclass` attributes:
+
+- `frozen`: enums are immutable value types.
+- `eq, eq_int`: enables equality with other enum instances and integer discriminants.
+- `rename_all = "SCREAMING_SNAKE_CASE"`: standardizes Python variant names.
+- `from_py_object`: enables conversion from Python objects.
+
+:::warning[Do not use the `hash` pyclass attribute with `eq_int` enums]
+PyO3's auto-generated `__hash__` uses Rust's `DefaultHasher`, which produces different values
+than Python's `hash()` on the equivalent integer. Since `eq_int` makes `MyEnum.VARIANT == 1`
+true, the hash contract (`a == b` implies `hash(a) == hash(b)`) would be violated. Instead,
+provide a manual `__hash__` returning the discriminant directly:
+:::
+
+```rust
+#[pymethods]
+impl MyEnum {
+    const fn __hash__(&self) -> isize {
+        *self as isize
+    }
+}
+```
 
 ### Testing conventions
 
@@ -726,7 +833,7 @@ The `check_pyo3_conventions.sh` pre-commit hook enforces the `py_` prefix for Py
 - Use `#[rstest]` attributes consistently, this standardization reduces cognitive overhead.
 - Do *not* use Arrange, Act, Assert separator comments in Rust tests.
 
-:::info Automated enforcement
+:::info[Automated enforcement]
 The `check_testing_conventions.sh` pre-commit hook enforces the use of `#[rstest]` over `#[test]`.
 :::
 
@@ -1017,6 +1124,13 @@ The project uses several tools for code quality:
 
 - **rustfmt**: Automatic code formatting (see `rustfmt.toml`).
 - **clippy**: Linting and best practices (see `clippy.toml`).
+  When suppressing `missing_panics_doc` or `missing_errors_doc`, include a `reason`
+  explaining why the lint does not apply:
+
+  ```rust
+  #[allow(clippy::missing_panics_doc, reason = "mutex poisoning is not expected")]
+  ```
+
 - **cbindgen**: C header generation for FFI.
 
 ## Rust version management

@@ -32,7 +32,6 @@ use nautilus_model::{
     types::Quantity,
 };
 use nautilus_testkit::testers::{ExecTester, ExecTesterConfig};
-use rust_decimal::Decimal;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -72,22 +71,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_delay_post_stop_secs(5)
         .build()?;
 
+    let order_qty = Quantity::from(1);
+
     let mut tester_config = ExecTesterConfig::new(
         StrategyId::from("EXEC_TESTER-001"),
         instrument_id,
         client_id,
-        Quantity::from("1000"), // Minor units for AX
+        order_qty,
     )
-    .with_open_position_on_start(Some(Decimal::from(1)))
+    .with_open_position_on_start(order_qty.as_decimal())
     .with_log_data(false)
     .with_use_post_only(true)
     .with_cancel_orders_on_stop(true)
     .with_close_positions_on_stop(true);
 
     tester_config.base.external_order_claims = Some(vec![instrument_id]);
-
-    // Use UUIDs for unique client order IDs
-    tester_config.base.use_uuid_client_order_ids = true;
 
     let tester = ExecTester::new(tester_config);
 

@@ -28,6 +28,7 @@ use nautilus_model::{
 };
 
 use crate::{
+    common::parse::{parse_instrument_id, parse_timestamp},
     csv::{
         create_book_order, create_csv_reader, infer_precision, parse_delta_record,
         parse_derivative_ticker_record, parse_quote_record, parse_trade_record,
@@ -36,7 +37,6 @@ use crate::{
             TardisOrderBookSnapshot25Record, TardisQuoteRecord, TardisTradeRecord,
         },
     },
-    parse::{parse_instrument_id, parse_timestamp},
 };
 
 fn update_precision_if_needed(current: &mut u8, value: f64, explicit: Option<u8>) -> bool {
@@ -64,6 +64,7 @@ fn update_deltas_precision(
         if price_precision.is_none() {
             delta.order.price.precision = current_price_precision;
         }
+
         if size_precision.is_none() {
             delta.order.size.precision = current_size_precision;
         }
@@ -82,6 +83,7 @@ fn update_quotes_precision(
             quote.bid_price.precision = current_price_precision;
             quote.ask_price.precision = current_price_precision;
         }
+
         if size_precision.is_none() {
             quote.bid_size.precision = current_size_precision;
             quote.ask_size.precision = current_size_precision;
@@ -100,6 +102,7 @@ fn update_trades_precision(
         if price_precision.is_none() {
             trade.price.precision = current_price_precision;
         }
+
         if size_precision.is_none() {
             trade.size.precision = current_size_precision;
         }
@@ -113,10 +116,6 @@ fn update_trades_precision(
 /// # Errors
 ///
 /// Returns an error if the file cannot be opened, read, or parsed as CSV.
-///
-/// # Panics
-///
-/// Panics if a CSV record has a zero size for a non-delete action or if data conversion fails.
 pub fn load_deltas<P: AsRef<Path>>(
     filepath: P,
     price_precision: Option<u8>,
@@ -278,6 +277,7 @@ pub fn load_depth10_from_snapshot5<P: AsRef<Path>>(
                         depth.bids[i].price.precision = current_price_precision;
                         depth.asks[i].price.precision = current_price_precision;
                     }
+
                     if size_precision.is_none() {
                         depth.bids[i].size.precision = current_size_precision;
                         depth.asks[i].size.precision = current_size_precision;
@@ -435,6 +435,7 @@ pub fn load_depth10_from_snapshot25<P: AsRef<Path>>(
                         depth.bids[i].price.precision = current_price_precision;
                         depth.asks[i].price.precision = current_price_precision;
                     }
+
                     if size_precision.is_none() {
                         depth.bids[i].size.precision = current_size_precision;
                         depth.asks[i].size.precision = current_size_precision;
@@ -563,10 +564,6 @@ pub fn load_depth10_from_snapshot25<P: AsRef<Path>>(
 /// # Errors
 ///
 /// Returns an error if the file cannot be opened, read, or parsed as CSV.
-///
-/// # Panics
-///
-/// Panics if a record has invalid data or CSV parsing errors.
 pub fn load_quotes<P: AsRef<Path>>(
     filepath: P,
     price_precision: Option<u8>,
@@ -640,10 +637,6 @@ pub fn load_quotes<P: AsRef<Path>>(
 /// # Errors
 ///
 /// Returns an error if the file cannot be opened, read, or parsed as CSV.
-///
-/// # Panics
-///
-/// Panics if a record has invalid trade size or CSV parsing errors.
 pub fn load_trades<P: AsRef<Path>>(
     filepath: P,
     price_precision: Option<u8>,
@@ -766,7 +759,7 @@ mod tests {
     use rstest::*;
 
     use super::*;
-    use crate::{parse::parse_price, tests::get_test_data_path};
+    use crate::common::{parse::parse_price, testing::get_test_data_path};
 
     #[rstest]
     #[case(0.0, 0)]
@@ -1422,7 +1415,7 @@ binance-futures,BTCUSDT,1640995200000000,1640995200100000,true,ask,50001.0,2.0";
         let zstd_level = parquet::basic::ZstdLevel::try_new(3).unwrap();
         let props = WriterProperties::builder()
             .set_compression(parquet::basic::Compression::ZSTD(zstd_level))
-            .set_max_row_group_size(1_000_000)
+            .set_max_row_group_row_count(Some(1_000_000))
             .build();
         let mut writer = ArrowWriter::try_new(file, Arc::new(schema), Some(props)).unwrap();
 

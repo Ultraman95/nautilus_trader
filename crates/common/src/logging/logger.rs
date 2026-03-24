@@ -229,6 +229,7 @@ impl Log for Logger {
                 component,
                 message: format!("{}", record.args()),
             };
+
             if let Err(SendError(LogEvent::Log(line))) = self.tx.send(LogEvent::Log(line)) {
                 eprintln!("Error sending log event (receiver closed): {line}");
             }
@@ -341,6 +342,7 @@ impl Logger {
             .ok_or_else(|| anyhow::anyhow!("Failed to create LogGuard from global sender"))
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn handle_messages(
         trader_id: String,
         instance_id: String,
@@ -362,7 +364,7 @@ impl Logger {
         // Pre-sort module filters by descending path length for O(n) longest-prefix lookup
         let mut module_filters_sorted: Vec<(Ustr, LevelFilter)> =
             module_level.into_iter().collect();
-        module_filters_sorted.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        module_filters_sorted.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
 
         let trader_id_cache = Ustr::from(&trader_id);
 
@@ -602,6 +604,10 @@ pub fn log<T: AsRef<str>>(level: LogLevel, color: LogColor, component: Ustr, mes
 #[cfg_attr(
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.common")
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.common")
 )]
 #[derive(Debug)]
 pub struct LogGuard {
@@ -878,7 +884,7 @@ mod tests {
     /// Helper to convert module level map to sorted vec (descending by path length)
     fn sorted_module_filters(map: AHashMap<Ustr, LevelFilter>) -> Vec<(Ustr, LevelFilter)> {
         let mut v: Vec<_> = map.into_iter().collect();
-        v.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        v.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
         v
     }
 

@@ -76,11 +76,13 @@ impl Debug for BacktestExecutionClient {
 }
 
 impl BacktestExecutionClient {
+    /// Creates a new [`BacktestExecutionClient`] instance.
+    #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         trader_id: TraderId,
         account_id: AccountId,
-        exchange: Rc<RefCell<SimulatedExchange>>,
+        exchange: &Rc<RefCell<SimulatedExchange>>,
         cache: Rc<RefCell<Cache>>,
         clock: Rc<RefCell<dyn Clock>>,
         routing: Option<bool>,

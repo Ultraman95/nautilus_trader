@@ -49,7 +49,15 @@ impl ClientConfig for OKXExecClientConfig {
 }
 
 /// Factory for creating OKX data clients.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.okx", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.okx")
+)]
 pub struct OKXDataClientFactory;
 
 impl OKXDataClientFactory {
@@ -99,7 +107,15 @@ impl DataClientFactory for OKXDataClientFactory {
 }
 
 /// Factory for creating OKX execution clients.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[cfg_attr(
+    feature = "python",
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.okx", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.okx")
+)]
 pub struct OKXExecutionClientFactory;
 
 impl OKXExecutionClientFactory {

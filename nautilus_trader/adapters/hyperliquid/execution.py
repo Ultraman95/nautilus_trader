@@ -23,7 +23,6 @@ from decimal import Decimal
 from typing import Any
 
 from nautilus_trader.adapters.hyperliquid.config import HyperliquidExecClientConfig
-from nautilus_trader.adapters.hyperliquid.constants import HYPERLIQUID_BUILDER_FEE_NOT_APPROVED
 from nautilus_trader.adapters.hyperliquid.constants import HYPERLIQUID_POST_ONLY_WOULD_MATCH
 from nautilus_trader.adapters.hyperliquid.constants import HYPERLIQUID_VENUE
 from nautilus_trader.adapters.hyperliquid.providers import HyperliquidInstrumentProvider
@@ -42,7 +41,6 @@ from nautilus_trader.execution.messages import GenerateOrderStatusReports
 from nautilus_trader.execution.messages import GeneratePositionStatusReports
 from nautilus_trader.execution.messages import ModifyOrder
 from nautilus_trader.execution.messages import QueryAccount
-from nautilus_trader.execution.messages import QueryOrder
 from nautilus_trader.execution.messages import SubmitOrder
 from nautilus_trader.execution.messages import SubmitOrderList
 from nautilus_trader.execution.reports import FillReport
@@ -54,6 +52,7 @@ from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import OrderStatus
 from nautilus_trader.model.enums import OrderType
+from nautilus_trader.model.enums import TimeInForce
 from nautilus_trader.model.enums import order_side_to_str
 from nautilus_trader.model.events import AccountState
 from nautilus_trader.model.events import OrderAccepted
@@ -129,6 +128,7 @@ class HyperliquidExecutionClient(LiveExecutionClient):
         # Log configuration details
         self._log.info(f"config.testnet={config.testnet}", LogColor.BLUE)
         self._log.info(f"config.http_timeout_secs={config.http_timeout_secs}", LogColor.BLUE)
+        self._log.info(f"config.normalize_prices={config.normalize_prices}", LogColor.BLUE)
         self._log.info(f"{config.http_proxy_url=}", LogColor.BLUE)
         self._log.info(f"{config.ws_proxy_url=}", LogColor.BLUE)
 
@@ -148,15 +148,22 @@ class HyperliquidExecutionClient(LiveExecutionClient):
         self._terminal_orders: nautilus_pyo3.FifoCache = nautilus_pyo3.FifoCache()
         self._pending_filled: set[str] = set()
 
-        # Get user address from HTTP client for WebSocket subscriptions
-        # Use vault address when vault trading, otherwise order/fill
-        # updates for the vault will be missed
+        self._fee_refresh_task: asyncio.Task | None = None
+
+        # Get user address from HTTP client for WebSocket subscriptions.
+        # Resolution order: account_address (agent wallet) → vault_address → EOA
         self._user_address: str | None = None
         try:
             eoa_address = self._client.get_user_address()
-            self._user_address = config.vault_address or eoa_address
+            self._user_address = config.account_address or config.vault_address or eoa_address
             self._log.info(f"User address (EOA): {eoa_address}", LogColor.BLUE)
-            if config.vault_address:
+
+            if config.account_address:
+                self._log.info(
+                    f"Account address (agent wallet, WS subscriptions): {config.account_address}",
+                    LogColor.BLUE,
+                )
+            elif config.vault_address:
                 self._log.info(
                     f"Vault address (WS subscriptions): {config.vault_address}",
                     LogColor.BLUE,
@@ -199,7 +206,7 @@ class HyperliquidExecutionClient(LiveExecutionClient):
 
         instruments = self._instrument_provider.instruments_pyo3()
 
-        await self._ws_client.connect(instruments, self._handle_msg)
+        await self._ws_client.connect(self._loop, instruments, self._handle_msg)
         self._log.info(f"Connected to WebSocket {self._ws_client.url}", LogColor.BLUE)
 
         if self._user_address:
@@ -443,17 +450,11 @@ class HyperliquidExecutionClient(LiveExecutionClient):
         except Exception as e:
             self._log.error(f"Failed to request fill reports for {order.client_order_id}: {e}")
 
-    async def _query_order(self, command: QueryOrder) -> None:
-        self._log.info(
-            f"Direct order query not implemented for {command.client_order_id}, "
-            f"order state is maintained through WebSocket updates and reconciliation",
-        )
-
     async def _query_account(self, command: QueryAccount) -> None:
-        self._log.info(
-            "Direct account query not implemented, "
-            "account state is maintained through WebSocket updates and reconciliation",
-        )
+        try:
+            await self._update_account_state()
+        except Exception as e:
+            self._log.error(f"Failed to query account state: {e}")
 
     async def _wait_for_quote(
         self,
@@ -507,14 +508,23 @@ class HyperliquidExecutionClient(LiveExecutionClient):
                 f"No cached quote available for {order.instrument_id} to calculate market order price",
             )
 
+        # Use trigger price as base for trigger orders to ensure limit_px
+        # satisfies Hyperliquid's constraint (SELL: limit_px <= triggerPx,
+        # BUY: limit_px >= triggerPx)
+        if (
+            order.order_type in (OrderType.STOP_MARKET, OrderType.MARKET_IF_TOUCHED)
+            and order.has_trigger_price
+        ):
+            base_price = Decimal(str(order.trigger_price))
+        elif order.side == OrderSide.BUY:
+            base_price = Decimal(str(quote.ask_price))
+        else:
+            base_price = Decimal(str(quote.bid_price))
+
         # Calculate price with slippage
         if order.side == OrderSide.BUY:
-            # For buys, add slippage to the ask price
-            base_price = Decimal(str(quote.ask_price))
             price = base_price * (Decimal(1) + slippage_pct)
         else:
-            # For sells, subtract slippage from the bid price
-            base_price = Decimal(str(quote.bid_price))
             price = base_price * (Decimal(1) - slippage_pct)
 
         # Hyperliquid requires max 5 significant figures AND max decimal places
@@ -523,22 +533,63 @@ class HyperliquidExecutionClient(LiveExecutionClient):
         # TODO: Extract this to Rust
         # Round in the direction that preserves slippage buffer
         quantizer = Decimal(10) ** -instrument.price_precision
+
         if order.side == OrderSide.BUY:
             price = price.quantize(quantizer, rounding=ROUND_CEILING)
         else:
             price = price.quantize(quantizer, rounding=ROUND_FLOOR)
 
+        # Strip trailing zeros to avoid exceeding 5 significant figures
+        price = price.normalize()
+
         self._log.debug(
             f"Calculated market order price: {price} (base: {base_price}, slippage: {slippage_pct})",
         )
 
-        return nautilus_pyo3.Price.from_str(str(price))
+        return nautilus_pyo3.Price.from_decimal(price)
+
+    def _derive_limit_from_trigger(self, order, trigger_price) -> Decimal:
+        slippage_pct = Decimal("0.005")
+        base_price = Decimal(str(trigger_price))
+
+        if order.side == OrderSide.BUY:
+            price = base_price * (Decimal(1) + slippage_pct)
+        else:
+            price = base_price * (Decimal(1) - slippage_pct)
+
+        price = self._round_to_significant_figures(price, sig_figs=5)
+
+        instrument = self._cache.instrument(order.instrument_id)
+        if instrument is not None:
+            quantizer = Decimal(10) ** -instrument.price_precision
+
+            if order.side == OrderSide.BUY:
+                price = price.quantize(quantizer, rounding=ROUND_CEILING)
+            else:
+                price = price.quantize(quantizer, rounding=ROUND_FLOOR)
+
+        return price.normalize()
+
+    def _check_time_in_force(self, order) -> bool:
+        if order.time_in_force not in (TimeInForce.GTC, TimeInForce.IOC):
+            self.generate_order_denied(
+                strategy_id=order.strategy_id,
+                instrument_id=order.instrument_id,
+                client_order_id=order.client_order_id,
+                reason=f"UNSUPPORTED_TIME_IN_FORCE: {TimeInForce(order.time_in_force).name} not supported by Hyperliquid",
+                ts_event=self._clock.timestamp_ns(),
+            )
+            return False
+        return True
 
     async def _submit_order(self, command: SubmitOrder) -> None:
         order = command.order
 
         if order.is_closed:
             self._log.warning(f"Order {order} is already closed")
+            return
+
+        if not self._check_time_in_force(order):
             return
 
         self.generate_order_submitted(
@@ -556,9 +607,12 @@ class HyperliquidExecutionClient(LiveExecutionClient):
             pyo3_quantity = nautilus_pyo3.Quantity.from_str(str(order.quantity))
             pyo3_time_in_force = time_in_force_to_pyo3(order.time_in_force)
 
-            # For market orders, calculate a slippage price from the cached quote
             if order.has_price:
-                pyo3_price = nautilus_pyo3.Price.from_str(str(order.price))
+                if self._config.normalize_prices:
+                    rounded = self._round_to_significant_figures(order.price.as_decimal())
+                    pyo3_price = nautilus_pyo3.Price.from_decimal(rounded)
+                else:
+                    pyo3_price = nautilus_pyo3.Price.from_str(str(order.price))
             elif order.order_type in (
                 OrderType.MARKET,
                 OrderType.STOP_MARKET,
@@ -568,11 +622,14 @@ class HyperliquidExecutionClient(LiveExecutionClient):
             else:
                 pyo3_price = None
 
-            pyo3_trigger_price = (
-                nautilus_pyo3.Price.from_str(str(order.trigger_price))
-                if order.has_trigger_price
-                else None
-            )
+            if order.has_trigger_price:
+                if self._config.normalize_prices:
+                    rounded = self._round_to_significant_figures(order.trigger_price.as_decimal())
+                    pyo3_trigger_price = nautilus_pyo3.Price.from_decimal(rounded)
+                else:
+                    pyo3_trigger_price = nautilus_pyo3.Price.from_str(str(order.trigger_price))
+            else:
+                pyo3_trigger_price = None
 
             # TODO: Refactor to use WebSocket trading API
             # Cache cloid mapping for WebSocket order/fill resolution
@@ -595,13 +652,12 @@ class HyperliquidExecutionClient(LiveExecutionClient):
             error_str = str(e)
             due_post_only = HYPERLIQUID_POST_ONLY_WOULD_MATCH in error_str
 
-            if HYPERLIQUID_BUILDER_FEE_NOT_APPROVED in error_str:
-                self._log.warning(
-                    "Builder fee not approved. See: "
-                    "https://nautilustrader.io/docs/nightly/integrations/hyperliquid#builder-fee-approval",
-                )
-
             self._terminal_orders.add(order.client_order_id.value)
+
+            # Only clean up cloid on confirmed rejections, not transport
+            # failures where the exchange may have accepted the order
+            if not isinstance(e, (TimeoutError, OSError)):
+                self._cleanup_cloid_mapping(order.client_order_id)
 
             self.generate_order_rejected(
                 strategy_id=order.strategy_id,
@@ -629,6 +685,10 @@ class HyperliquidExecutionClient(LiveExecutionClient):
         if not orders:
             return
 
+        orders = [o for o in orders if self._check_time_in_force(o)]
+        if not orders:
+            return
+
         now_ns = self._clock.timestamp_ns()
 
         for order in orders:
@@ -650,8 +710,13 @@ class HyperliquidExecutionClient(LiveExecutionClient):
             error_str = str(e)
             due_post_only = HYPERLIQUID_POST_ONLY_WOULD_MATCH in error_str
 
+            is_transport_error = isinstance(e, (TimeoutError, OSError))
+
             for order in orders:
                 self._terminal_orders.add(order.client_order_id.value)
+
+                if not is_transport_error:
+                    self._cleanup_cloid_mapping(order.client_order_id)
 
                 self.generate_order_rejected(
                     strategy_id=order.strategy_id,
@@ -663,10 +728,101 @@ class HyperliquidExecutionClient(LiveExecutionClient):
                 )
 
     async def _modify_order(self, command: ModifyOrder) -> None:
-        # The modify functionality exists in Rust but requires exposing post_action() to Python
-        self._log.warning(
-            f"Order modification requires venue_order_id and is not yet exposed via Python bindings for {command.client_order_id}",
-        )
+        order = self._cache.order(command.client_order_id)
+
+        if order is None:
+            self.generate_order_modify_rejected(
+                strategy_id=command.strategy_id,
+                instrument_id=command.instrument_id,
+                client_order_id=command.client_order_id,
+                venue_order_id=command.venue_order_id,
+                reason="ORDER_NOT_FOUND_IN_CACHE",
+                ts_event=self._clock.timestamp_ns(),
+            )
+            return
+
+        venue_order_id = None
+        if order.venue_order_id:
+            venue_order_id = order.venue_order_id
+        elif command.venue_order_id:
+            venue_order_id = command.venue_order_id
+
+        if venue_order_id is None:
+            self.generate_order_modify_rejected(
+                strategy_id=command.strategy_id,
+                instrument_id=command.instrument_id,
+                client_order_id=command.client_order_id,
+                venue_order_id=venue_order_id,
+                reason="VENUE_ORDER_ID_REQUIRED",
+                ts_event=self._clock.timestamp_ns(),
+            )
+            return
+
+        # Use command values if provided, else fall back to current order values
+        price = command.price if command.price else (order.price if order.has_price else None)
+        quantity = command.quantity if command.quantity else order.leaves_qty
+        trigger_price = command.trigger_price
+        if not trigger_price and order.has_trigger_price:
+            trigger_price = order.trigger_price
+
+        # StopMarket/MarketIfTouched have no limit price — derive a
+        # slippage-adjusted limit from the trigger, matching submit path
+        if price is None and trigger_price is not None:
+            price = self._derive_limit_from_trigger(order, trigger_price)
+
+        if price is None:
+            self.generate_order_modify_rejected(
+                strategy_id=command.strategy_id,
+                instrument_id=command.instrument_id,
+                client_order_id=command.client_order_id,
+                venue_order_id=venue_order_id,
+                reason="PRICE_REQUIRED_FOR_MODIFY",
+                ts_event=self._clock.timestamp_ns(),
+            )
+            return
+
+        try:
+            pyo3_instrument_id = nautilus_pyo3.InstrumentId.from_str(
+                command.instrument_id.value,
+            )
+            pyo3_venue_order_id = nautilus_pyo3.VenueOrderId(venue_order_id.value)
+            pyo3_order_side = nautilus_pyo3.OrderSide.from_str(order.side.name)
+            pyo3_order_type = order_type_to_pyo3(order.order_type)
+            pyo3_price = nautilus_pyo3.Price.from_str(str(price))
+            pyo3_quantity = nautilus_pyo3.Quantity.from_str(str(quantity))
+            pyo3_time_in_force = time_in_force_to_pyo3(order.time_in_force)
+            pyo3_client_order_id = nautilus_pyo3.ClientOrderId(
+                command.client_order_id.value,
+            )
+
+            pyo3_trigger_price = None
+
+            if trigger_price is not None:
+                pyo3_trigger_price = nautilus_pyo3.Price.from_str(str(trigger_price))
+
+            await self._client.modify_order(
+                instrument_id=pyo3_instrument_id,
+                venue_order_id=pyo3_venue_order_id,
+                order_side=pyo3_order_side,
+                order_type=pyo3_order_type,
+                price=pyo3_price,
+                quantity=pyo3_quantity,
+                trigger_price=pyo3_trigger_price,
+                reduce_only=order.is_reduce_only,
+                post_only=order.is_post_only,
+                time_in_force=pyo3_time_in_force,
+                client_order_id=pyo3_client_order_id,
+            )
+            self._log.info(f"Order modification requested for {command.client_order_id}")
+        except Exception as e:
+            self.generate_order_modify_rejected(
+                strategy_id=command.strategy_id,
+                instrument_id=command.instrument_id,
+                client_order_id=command.client_order_id,
+                venue_order_id=venue_order_id,
+                reason=str(e),
+                ts_event=self._clock.timestamp_ns(),
+            )
 
     async def _cancel_order(self, command: CancelOrder) -> None:
         # Try to get venue_order_id from cache first, fall back to command
@@ -995,13 +1151,16 @@ class HyperliquidExecutionClient(LiveExecutionClient):
                 return
 
             self._terminal_orders.add(key)
-            self._pending_filled.add(key)
 
-            # FILLED status often arrives before the fill event
-            self._log.debug(
-                f"Received FILLED status for {report.client_order_id!r} "
-                f"(order is {order.status_string()}) - fill event expected shortly",
-            )
+            # If fill already arrived (order already closed), clean up now
+            if order.is_closed:
+                self._cleanup_cloid_mapping(report.client_order_id)
+            else:
+                self._pending_filled.add(key)
+                self._log.debug(
+                    f"Received FILLED status for {report.client_order_id!r} "
+                    f"(order is {order.status_string()}) - fill event expected shortly",
+                )
         elif report.order_status == OrderStatus.TRIGGERED:
             # Only STOP_LIMIT, TRAILING_STOP_LIMIT, LIMIT_IF_TOUCHED can be triggered
             if order.order_type not in (
@@ -1038,13 +1197,10 @@ class HyperliquidExecutionClient(LiveExecutionClient):
             f"trade_id={report.trade_id}, qty={report.last_qty}, px={report.last_px}",
         )
 
-        # Skip duplicate fills (Hyperliquid sometimes sends duplicate userEvents)
         trade_id_str = report.trade_id.value
         if trade_id_str in self._processed_trade_ids:
             self._log.debug(f"Skipping duplicate fill: trade_id={report.trade_id}")
             return
-
-        self._processed_trade_ids.add(trade_id_str)
 
         client_order_id = self._resolve_cloid(report.client_order_id)
         report.client_order_id = client_order_id
@@ -1056,11 +1212,13 @@ class HyperliquidExecutionClient(LiveExecutionClient):
                 report.client_order_id = client_order_id
 
         if self._is_external_order(client_order_id):
+            self._processed_trade_ids.add(trade_id_str)
             self._send_fill_report(report)
             return
 
         order = self._cache.order(client_order_id)
         if order is None:
+            # Don't mark as processed - order may arrive later
             self._log.error(
                 f"Cannot process fill report - order for {client_order_id!r} not found",
             )
@@ -1068,10 +1226,13 @@ class HyperliquidExecutionClient(LiveExecutionClient):
 
         instrument = self._cache.instrument(order.instrument_id)
         if instrument is None:
+            self._processed_trade_ids.add(trade_id_str)
             self._log.error(
                 f"Cannot process fill report - instrument {order.instrument_id} not found",
             )
             return
+
+        self._processed_trade_ids.add(trade_id_str)
 
         key = order.client_order_id.value
 

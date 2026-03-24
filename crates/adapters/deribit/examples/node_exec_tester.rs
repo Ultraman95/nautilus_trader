@@ -79,19 +79,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_delay_post_stop_secs(5)
         .build()?;
 
+    let order_qty = Quantity::from(10); // 10 USD contracts (Deribit minimum)
+
     let mut tester_config = ExecTesterConfig::new(
         StrategyId::from("EXEC_TESTER-001"),
         instrument_id,
         client_id,
-        Quantity::from("10"), // 10 USD contracts (Deribit minimum)
+        order_qty,
     )
     .with_subscribe_trades(true)
     .with_subscribe_quotes(true)
+    .with_open_position_on_start(order_qty.as_decimal())
     .with_use_post_only(true)
     .with_log_data(false);
 
-    // Use UUIDs for unique client order IDs across restarts
-    tester_config.base.use_uuid_client_order_ids = true;
+    tester_config.base.external_order_claims = Some(vec![instrument_id]);
 
     let tester = ExecTester::new(tester_config);
 

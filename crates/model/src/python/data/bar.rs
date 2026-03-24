@@ -48,7 +48,10 @@ use crate::{
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl BarSpecification {
+    /// Represents a bar aggregation specification including a step, aggregation
+    /// method/rule and price type.
     #[new]
     fn py_new(step: usize, aggregation: BarAggregation, price_type: PriceType) -> PyResult<Self> {
         Self::new_checked(step, aggregation, price_type).map_err(to_pyvalue_err)
@@ -76,12 +79,37 @@ impl BarSpecification {
         self.to_string()
     }
 
+    #[getter]
+    #[pyo3(name = "step")]
+    fn py_step(&self) -> usize {
+        self.step.get()
+    }
+
+    #[getter]
+    #[pyo3(name = "aggregation")]
+    fn py_aggregation(&self) -> BarAggregation {
+        self.aggregation
+    }
+
+    #[getter]
+    #[pyo3(name = "price_type")]
+    fn py_price_type(&self) -> PriceType {
+        self.price_type
+    }
+
     #[staticmethod]
     #[pyo3(name = "fully_qualified_name")]
     fn py_fully_qualified_name() -> String {
         format!("{}:{}", PY_MODULE_MODEL, stringify!(BarSpecification))
     }
 
+    /// Returns the `TimeDelta` interval for this bar specification.
+    ///
+    /// # Notes
+    ///
+    /// For `BarAggregation.Month` and `BarAggregation.Year`, proxy values are used
+    /// (30 days for months, 365 days for years) to estimate their respective durations,
+    /// since months and years have variable lengths.
     #[getter]
     #[pyo3(name = "timedelta")]
     fn py_timedelta(&self) -> PyResult<chrono::TimeDelta> {
@@ -100,7 +128,10 @@ impl BarSpecification {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl BarType {
+    /// Represents a bar type including the instrument ID, bar specification and
+    /// aggregation source.
     #[new]
     #[pyo3(signature = (instrument_id, spec, aggregation_source = AggregationSource::External)
     )]
@@ -146,6 +177,7 @@ impl BarType {
         Self::from_str(value).map_err(to_pyvalue_err)
     }
 
+    /// Creates a new composite `BarType` instance.
     #[staticmethod]
     #[pyo3(name = "new_composite")]
     fn py_new_composite(
@@ -166,26 +198,35 @@ impl BarType {
         )
     }
 
+    /// Returns whether this instance is a standard bar type.
     #[pyo3(name = "is_standard")]
     fn py_is_standard(&self) -> bool {
         self.is_standard()
     }
 
+    /// Returns whether this instance is a composite bar type.
     #[pyo3(name = "is_composite")]
     fn py_is_composite(&self) -> bool {
         self.is_composite()
     }
 
+    /// Returns the standard bar type component.
     #[pyo3(name = "standard")]
     fn py_standard(&self) -> Self {
         self.standard()
     }
 
+    /// Returns any composite bar type component.
     #[pyo3(name = "composite")]
     fn py_composite(&self) -> Self {
         self.composite()
     }
 
+    /// Returns the instrument ID and bar specification as a tuple key.
+    ///
+    /// Useful as a hashmap key when aggregation source should be ignored,
+    /// such as for indicator registration where INTERNAL and EXTERNAL bars
+    /// should trigger the same indicators.
     #[pyo3(name = "id_spec_key")]
     fn py_id_spec_key(&self) -> (InstrumentId, BarSpecification) {
         self.id_spec_key()
@@ -242,8 +283,10 @@ impl Bar {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 #[allow(clippy::too_many_arguments)]
 impl Bar {
+    /// Represents an aggregated bar.
     #[new]
     fn py_new(
         bar_type: BarType,
@@ -344,20 +387,18 @@ impl Bar {
         format!("{}:{}", PY_MODULE_MODEL, stringify!(Bar))
     }
 
+    /// Returns the metadata for the type, for use with serialization formats.
     #[staticmethod]
     #[pyo3(name = "get_metadata")]
     fn py_get_metadata(
         bar_type: &BarType,
         price_precision: u8,
         size_precision: u8,
-    ) -> PyResult<HashMap<String, String>> {
-        Ok(Self::get_metadata(
-            bar_type,
-            price_precision,
-            size_precision,
-        ))
+    ) -> HashMap<String, String> {
+        Self::get_metadata(bar_type, price_precision, size_precision)
     }
 
+    /// Returns the field map for the type, for use with Arrow schemas.
     #[staticmethod]
     #[pyo3(name = "get_fields")]
     fn py_get_fields(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
@@ -374,18 +415,6 @@ impl Bar {
     #[pyo3(name = "from_dict")]
     fn py_from_dict(py: Python<'_>, values: Py<PyDict>) -> PyResult<Self> {
         from_dict_pyo3(py, values)
-    }
-
-    #[staticmethod]
-    #[pyo3(name = "from_json")]
-    fn py_from_json(data: Vec<u8>) -> PyResult<Self> {
-        Self::from_json_bytes(&data).map_err(to_pyvalue_err)
-    }
-
-    #[staticmethod]
-    #[pyo3(name = "from_msgpack")]
-    fn py_from_msgpack(data: Vec<u8>) -> PyResult<Self> {
-        Self::from_msgpack_bytes(&data).map_err(to_pyvalue_err)
     }
 
     /// Creates a `PyCapsule` containing a raw pointer to a `Data::Bar` object.
@@ -417,15 +446,28 @@ impl Bar {
     /// Return JSON encoded bytes representation of the object.
     #[pyo3(name = "to_json_bytes")]
     fn py_to_json_bytes(&self, py: Python<'_>) -> Py<PyAny> {
-        // SAFETY: Unwrap safe when serializing a valid object
         self.to_json_bytes().unwrap().into_py_any_unwrap(py)
     }
 
     /// Return MsgPack encoded bytes representation of the object.
     #[pyo3(name = "to_msgpack_bytes")]
     fn py_to_msgpack_bytes(&self, py: Python<'_>) -> Py<PyAny> {
-        // SAFETY: Unwrap safe when serializing a valid object
         self.to_msgpack_bytes().unwrap().into_py_any_unwrap(py)
+    }
+}
+
+#[pymethods]
+impl Bar {
+    #[staticmethod]
+    #[pyo3(name = "from_json")]
+    fn py_from_json(data: &[u8]) -> PyResult<Self> {
+        Self::from_json_bytes(data).map_err(to_pyvalue_err)
+    }
+
+    #[staticmethod]
+    #[pyo3(name = "from_msgpack")]
+    fn py_from_msgpack(data: &[u8]) -> PyResult<Self> {
+        Self::from_msgpack_bytes(data).map_err(to_pyvalue_err)
     }
 }
 
@@ -487,7 +529,7 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let dict_string = bar.py_to_dict(py).unwrap().to_string();
-            let expected_string = r"{'type': 'Bar', 'bar_type': 'AUDUSD.SIM-1-MINUTE-LAST-INTERNAL', 'open': '1.00010', 'high': '1.00020', 'low': '1.00000', 'close': '1.00010', 'volume': '100000', 'ts_event': 0, 'ts_init': 0}";
+            let expected_string = "{'type': 'Bar', 'bar_type': 'AUDUSD.SIM-1-MINUTE-LAST-INTERNAL', 'open': '1.00010', 'high': '1.00020', 'low': '1.00000', 'close': '1.00010', 'volume': '100000', 'ts_event': 0, 'ts_init': 0}";
             assert_eq!(dict_string, expected_string);
         });
     }

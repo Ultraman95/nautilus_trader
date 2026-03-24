@@ -24,7 +24,9 @@ use strum::IntoEnumIterator;
 use crate::common::enums::BitmexSymbolStatus;
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl BitmexSymbolStatus {
+    /// Represents the status of a BitMEX symbol.
     #[new]
     fn py_new(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Self> {
         let t = Self::type_object(py);
@@ -70,23 +72,5 @@ impl BitmexSymbolStatus {
     fn py_from_str(_cls: &Bound<'_, PyType>, data: &Bound<'_, PyAny>) -> PyResult<Self> {
         let data_str: String = data.str()?.extract()?;
         Self::from_str(&data_str).map_err(to_pyvalue_err)
-    }
-
-    #[classattr]
-    #[pyo3(name = "OPEN")]
-    const fn py_open() -> Self {
-        Self::Open
-    }
-
-    #[classattr]
-    #[pyo3(name = "CLOSED")]
-    const fn py_closed() -> Self {
-        Self::Closed
-    }
-
-    #[classattr]
-    #[pyo3(name = "UNLISTED")]
-    const fn py_unlisted() -> Self {
-        Self::Unlisted
     }
 }

@@ -68,9 +68,14 @@ pub trait FromU16 {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum AccountType {
     /// An account with unleveraged cash assets only.
@@ -108,9 +113,14 @@ pub enum AccountType {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum AggregationSource {
     /// The data is externally aggregated (outside the Nautilus system boundary).
@@ -145,9 +155,14 @@ pub enum AggregationSource {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum AggressorSide {
     /// There was no specific aggressor for the trade.
@@ -195,9 +210,14 @@ impl FromU8 for AggressorSide {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 #[allow(non_camel_case_types)]
 pub enum AssetClass {
@@ -257,9 +277,14 @@ impl FromU8 for AssetClass {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum BarAggregation {
     /// Based on a number of ticks.
@@ -326,9 +351,14 @@ pub enum BarAggregation {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum BarIntervalType {
     /// Left-open interval `(start, end]`: start is exclusive, end is inclusive (default).
@@ -363,9 +393,14 @@ pub enum BarIntervalType {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum BetSide {
     /// A "Back" bet signifies support for a specific outcome.
@@ -425,9 +460,14 @@ impl From<OrderSide> for BetSide {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum BookAction {
     /// An order is added to the book.
@@ -477,9 +517,14 @@ impl FromU8 for BookAction {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 #[allow(non_camel_case_types)]
 pub enum BookType {
@@ -530,9 +575,14 @@ impl FromU8 for BookType {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum ContingencyType {
     /// Not a contingent order.
@@ -571,9 +621,14 @@ pub enum ContingencyType {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum CurrencyType {
     /// A type of cryptocurrency or crypto token.
@@ -609,9 +664,14 @@ pub enum CurrencyType {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum InstrumentClass {
     /// A spot market instrument class. The current market price of an instrument that is bought or sold for immediate delivery and payment.
@@ -649,6 +709,14 @@ impl InstrumentClass {
             Self::Future | Self::FuturesSpread | Self::Option | Self::OptionSpread
         )
     }
+
+    /// Returns whether this instrument class allows negative prices.
+    pub const fn allows_negative_price(&self) -> bool {
+        matches!(
+            self,
+            Self::Option | Self::FuturesSpread | Self::OptionSpread
+        )
+    }
 }
 
 /// The type of event for an instrument close.
@@ -676,9 +744,14 @@ impl InstrumentClass {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum InstrumentCloseType {
     /// When the market session ended.
@@ -723,9 +796,14 @@ impl FromU8 for InstrumentCloseType {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 #[allow(clippy::enum_variant_names)]
 pub enum LiquiditySide {
@@ -762,9 +840,14 @@ pub enum LiquiditySide {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum MarketStatus {
     /// The instrument is trading.
@@ -806,9 +889,14 @@ pub enum MarketStatus {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum MarketStatusAction {
     /// No change.
@@ -896,9 +984,14 @@ impl FromU16 for MarketStatusAction {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum OmsType {
     /// There is no specific type of order management specified (will defer to the venue OMS).
@@ -937,9 +1030,14 @@ pub enum OmsType {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum OptionKind {
     /// A Call option gives the holder the right, but not the obligation, to buy an underlying asset at a specified strike price within a specified period of time.
@@ -974,9 +1072,14 @@ pub enum OptionKind {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum OtoTriggerMode {
     /// Release child order(s) pro-rata to each partial fill (default).
@@ -1013,9 +1116,14 @@ pub enum OtoTriggerMode {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum OrderSide {
     /// No order side is specified.
@@ -1146,9 +1254,14 @@ impl OrderSideSpecified {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum OrderStatus {
     /// The order is initialized (instantiated) within the Nautilus system.
@@ -1182,6 +1295,38 @@ pub enum OrderStatus {
 }
 
 impl OrderStatus {
+    /// Returns whether the order status represents an open/working order.
+    #[must_use]
+    pub const fn is_open(self) -> bool {
+        matches!(
+            self,
+            Self::Submitted
+                | Self::Accepted
+                | Self::Triggered
+                | Self::PendingUpdate
+                | Self::PendingCancel
+                | Self::PartiallyFilled
+        )
+    }
+
+    /// Returns whether the order status represents a terminal (closed) state.
+    #[must_use]
+    pub const fn is_closed(self) -> bool {
+        matches!(
+            self,
+            Self::Denied | Self::Rejected | Self::Canceled | Self::Expired | Self::Filled
+        )
+    }
+
+    /// Returns whether the order can be cancelled from this status.
+    #[must_use]
+    pub const fn is_cancellable(self) -> bool {
+        matches!(
+            self,
+            Self::Accepted | Self::Triggered | Self::PendingUpdate | Self::PartiallyFilled
+        )
+    }
+
     /// Returns a cached `AHashSet` of order statuses safe for cancellation queries.
     ///
     /// These are statuses where an order is working on the venue but not already
@@ -1207,20 +1352,6 @@ impl OrderStatus {
                 Self::PartiallyFilled,
             ])
         })
-    }
-
-    /// Returns whether the order status represents an open/working order.
-    #[must_use]
-    pub const fn is_open(self) -> bool {
-        matches!(
-            self,
-            Self::Submitted
-                | Self::Accepted
-                | Self::Triggered
-                | Self::PendingUpdate
-                | Self::PendingCancel
-                | Self::PartiallyFilled
-        )
     }
 }
 
@@ -1249,9 +1380,14 @@ impl OrderStatus {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum OrderType {
     /// A market order to buy or sell at the best available price in the current market.
@@ -1295,7 +1431,18 @@ pub enum OrderType {
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(eq, eq_int, module = "nautilus_trader.core.nautilus_pyo3.model.enums")
+    pyo3::pyclass(
+        frozen,
+        eq,
+        eq_int,
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum PositionAdjustmentType {
     /// Commission adjustment affecting position quantity.
@@ -1341,9 +1488,14 @@ impl FromU8 for PositionAdjustmentType {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum PositionSide {
     /// No position side is specified (only valid in the context of a filter for actions involving positions).
@@ -1400,9 +1552,14 @@ impl PositionSide {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum PositionSideSpecified {
     /// A neural/flat position, where no position is currently held in the market.
@@ -1450,9 +1607,14 @@ impl PositionSideSpecified {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum PriceType {
     /// The best quoted price at which buyers are willing to buy a quantity of an instrument.
@@ -1495,9 +1657,14 @@ pub enum PriceType {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 #[allow(non_camel_case_types)]
 pub enum RecordFlag {
@@ -1548,9 +1715,14 @@ impl RecordFlag {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum TimeInForce {
     /// Good Till Cancel (GTC) - Remains active until canceled.
@@ -1594,9 +1766,14 @@ pub enum TimeInForce {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum TradingState {
     /// Normal trading operations.
@@ -1633,9 +1810,14 @@ pub enum TradingState {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum TrailingOffsetType {
     /// No trailing offset type is specified (invalid for trailing type orders).
@@ -1677,9 +1859,14 @@ pub enum TrailingOffsetType {
         frozen,
         eq,
         eq_int,
-        hash,
-        module = "nautilus_trader.core.nautilus_pyo3.model.enums"
+        module = "nautilus_trader.core.nautilus_pyo3.model.enums",
+        from_py_object,
+        rename_all = "SCREAMING_SNAKE_CASE",
     )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass_enum(module = "nautilus_trader.model")
 )]
 pub enum TriggerType {
     /// No trigger type is specified (invalid for orders with a trigger).

@@ -35,7 +35,11 @@ use crate::{
 #[serde(tag = "type")]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.model")
 )]
 pub struct PositionAdjusted {
     /// The trader ID associated with the event.
@@ -123,7 +127,7 @@ mod tests {
             Some(Decimal::from_str("-0.001").unwrap()),
             None,
             Some(Ustr::from("O-123")),
-            Default::default(),
+            UUID4::default(),
             UnixNanos::from(1_000_000_000),
             UnixNanos::from(2_000_000_000),
         )
@@ -140,7 +144,7 @@ mod tests {
             None,
             Some(Money::new(-5.50, Currency::USD())),
             Some(Ustr::from("funding_2024_01_15_08:00")),
-            Default::default(),
+            UUID4::default(),
             UnixNanos::from(1_000_000_000),
             UnixNanos::from(2_000_000_000),
         )

@@ -495,6 +495,15 @@ class InteractiveBrokersClientMarketDataMixin(BaseMixin):
 
         """
         name = str(bar_type)
+
+        # Remove stale subscription so _subscribe() allocates a fresh req_id.
+        # After an IB gateway restart the old req_id is dead server-side;
+        # reusing it leaves the stream silent.
+        existing = self._subscriptions.get(name=name)
+        if existing is not None:
+            self._subscriptions.remove(req_id=existing.req_id)
+            self._subscription_start_times.pop(existing.req_id, None)
+
         now = self._clock.timestamp_ns()
         start = params.pop("start_ns", None)
 
@@ -611,7 +620,7 @@ class InteractiveBrokersClientMarketDataMixin(BaseMixin):
         end_date_time_str = (
             end_date_time.strftime("%Y%m%d %H:%M:%S %Z") if contract.secType != "CONTFUT" else ""
         )
-        name = (bar_type, end_date_time_str)
+        name = (str(bar_type), end_date_time_str)
 
         if not (request := self._requests.get(name=name)):
             req_id = self._next_req_id()
@@ -643,7 +652,8 @@ class InteractiveBrokersClientMarketDataMixin(BaseMixin):
 
             return await self._await_request(request, timeout, default_value=[])
         else:
-            self._log.info(f"Request already exist for {request}")
+            self._log.info(f"Request already exist for {request}, awaiting shared result")
+            await request.future
             return []
 
     async def get_historical_ticks(
@@ -1036,7 +1046,7 @@ class InteractiveBrokersClientMarketDataMixin(BaseMixin):
         Return the requested historical data bars.
         """
         if request := self._requests.get(req_id=req_id):
-            bar_type = request.name[0]
+            bar_type = BarType.from_str(request.name[0])
             bar = await self._ib_bar_to_nautilus_bar(
                 bar_type=bar_type,
                 bar=bar,

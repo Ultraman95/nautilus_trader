@@ -67,6 +67,7 @@ def main() -> None:
 
     # PostgreSQL configuration (optional, for caching blockchain data)
     postgres_config = None
+
     if os.getenv("USE_POSTGRES_CACHE"):
         postgres_config = PostgresConnectOptions(
             host=os.getenv("POSTGRES_HOST", "localhost"),
@@ -82,7 +83,7 @@ def main() -> None:
     client_config = BlockchainDataClientConfig(
         chain=chain,
         dex_ids=[
-            DexType.UniswapV3,
+            DexType.UNISWAP_V3,
         ],
         http_rpc_url=http_rpc_url,
         wss_rpc_url=wss_rpc_url,

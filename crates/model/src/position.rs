@@ -50,7 +50,11 @@ use crate::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model", from_py_object)
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.model")
 )]
 pub struct Position {
     pub events: Vec<OrderFilled>,
@@ -85,7 +89,8 @@ pub struct Position {
     pub avg_px_close: Option<f64>,
     pub realized_return: f64,
     pub realized_pnl: Option<Money>,
-    pub trade_ids: Vec<TradeId>,
+    #[serde(with = "nautilus_core::serialization::sorted_hashset")]
+    pub trade_ids: AHashSet<TradeId>,
     pub buy_qty: Quantity,
     pub sell_qty: Quantity,
     pub commissions: AHashMap<Currency, Money>,
@@ -115,7 +120,7 @@ impl Position {
         let mut item = Self {
             events: Vec::<OrderFilled>::new(),
             adjustments: Vec::<PositionAdjusted>::new(),
-            trade_ids: Vec::<TradeId>::new(),
+            trade_ids: AHashSet::<TradeId>::new(),
             buy_qty: Quantity::zero(instrument.size_precision()),
             sell_qty: Quantity::zero(instrument.size_precision()),
             commissions: AHashMap::<Currency, Money>::new(),
@@ -217,7 +222,7 @@ impl Position {
 
         // Reset mutable state
         self.events = Vec::new();
-        self.trade_ids = Vec::new();
+        self.trade_ids = AHashSet::new();
         self.adjustments = Vec::new();
         self.buy_qty = Quantity::zero(size_precision);
         self.sell_qty = Quantity::zero(size_precision);
@@ -297,7 +302,7 @@ impl Position {
         }
 
         self.events.push(*fill);
-        self.trade_ids.push(fill.trade_id);
+        self.trade_ids.insert(fill.trade_id);
 
         // Calculate cumulative commissions
         if let Some(commission) = fill.commission {
@@ -342,7 +347,7 @@ impl Position {
             self.apply_adjustment(adjustment);
         }
 
-        // SAFETY: size_precision is valid from instrument
+        // size_precision is valid from instrument
         self.quantity = Quantity::new(self.signed_qty.abs(), self.size_precision);
         if self.quantity > self.peak_qty {
             self.peak_qty = self.quantity;
@@ -411,8 +416,14 @@ impl Position {
             self.settlement_currency,
         ));
 
+        let was_short = self.signed_qty < 0.0;
         self.signed_qty += last_qty;
         self.buy_qty = self.buy_qty + last_qty_object;
+
+        // Position reversed from short to long
+        if was_short && self.signed_qty > 0.0 {
+            self.avg_px_open = last_px;
+        }
     }
 
     fn handle_sell_order_fill(&mut self, fill: &OrderFilled) {
@@ -457,8 +468,14 @@ impl Position {
             self.settlement_currency,
         ));
 
+        let was_long = self.signed_qty > 0.0;
         self.signed_qty -= last_qty;
         self.sell_qty = self.sell_qty + last_qty_object;
+
+        // Position reversed from long to short
+        if was_long && self.signed_qty < 0.0 {
+            self.avg_px_open = last_px;
+        }
     }
 
     /// Applies a position adjustment event.
@@ -502,11 +519,13 @@ impl Position {
             self.signed_qty = 0.0; // Normalize
         } else if self.signed_qty > 0.0 {
             self.side = PositionSide::Long;
+
             if self.entry == OrderSide::NoOrderSide {
                 self.entry = OrderSide::Buy;
             }
         } else {
             self.side = PositionSide::Short;
+
             if self.entry == OrderSide::NoOrderSide {
                 self.entry = OrderSide::Sell;
             }
@@ -632,6 +651,7 @@ impl Position {
                 "Cannot calculate inverse points: open price is zero or too small ({avg_px_open})"
             );
         }
+
         if avg_px_close.abs() < EPSILON {
             anyhow::bail!(
                 "Cannot calculate inverse points: close price is zero or too small ({avg_px_close})"
@@ -828,7 +848,7 @@ impl Position {
     /// Returns the last `TradeId` for the position (if any after purging).
     #[must_use]
     pub fn last_trade_id(&self) -> Option<TradeId> {
-        self.trade_ids.last().copied()
+        self.events.last().map(|e| e.trade_id)
     }
 
     /// Returns whether the position is long (positive quantity).
@@ -887,7 +907,7 @@ impl Hash for Position {
 
 impl Display for Position {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let quantity_str = if self.quantity == Quantity::zero(self.price_precision) {
+        let quantity_str = if self.quantity == Quantity::zero(self.size_precision) {
             String::new()
         } else {
             self.quantity.to_formatted_string() + " "
@@ -2379,7 +2399,7 @@ mod tests {
         assert_eq!(position.events.len(), 1);
         assert_eq!(position.trade_ids.len(), 1);
         assert_eq!(position.events[0].client_order_id, order2.client_order_id());
-        assert_eq!(position.trade_ids[0], TradeId::new("2"));
+        assert!(position.trade_ids.contains(&TradeId::new("2")));
     }
 
     #[rstest]

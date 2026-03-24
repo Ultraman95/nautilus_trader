@@ -36,9 +36,11 @@ python = [
   "nautilus-core/python",
   "nautilus-model/python",
   "nautilus-serialization/python",
+  "nautilus-system/python",
   "pyo3",
   "pyo3-async-runtimes",
   "replay",
+  "pyo3-stub-gen",
 ]
 replay = []
 high-precision = ["nautilus-model/high-precision"]
@@ -50,14 +52,16 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 nautilus-common = { workspace = true, features = ["live"] }
 nautilus-core = { workspace = true }
-nautilus-cryptography = { workspace = true }
 nautilus-model = { workspace = true, features = ["python"] }
-nautilus-serialization = { workspace = true }
+nautilus-network = { workspace = true }
+nautilus-serialization = { workspace = true, features = ["arrow"] }
+nautilus-system = { workspace = true }
 
 ahash = { workspace = true }
 anyhow = { workspace = true }
 arrow = { workspace = true }
 async-stream = { workspace = true }
+async-trait = { workspace = true }
 chrono = { workspace = true }
 csv = { workspace = true }
 derive_builder = { workspace = true }
@@ -66,7 +70,6 @@ futures-util = { workspace = true }
 heck = { workspace = true }
 log = { workspace = true }
 parquet = { workspace = true }
-reqwest = { workspace = true }
 rust_decimal = { workspace = true }
 rust_decimal_macros = { workspace = true }
 ryu = { workspace = true }
@@ -76,6 +79,7 @@ strum = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true }
 urlencoding = { workspace = true }
 ustr = { workspace = true }
 uuid = { workspace = true }
@@ -83,8 +87,12 @@ zeroize = { workspace = true }
 
 pyo3 = { workspace = true, optional = true }
 pyo3-async-runtimes = { workspace = true, optional = true }
+pyo3-stub-gen = { workspace = true, optional = true }
 
 [dev-dependencies]
+axum = { workspace = true }
+dotenvy = { workspace = true }
+nautilus-live = { workspace = true }
 nautilus-persistence = { workspace = true }
 nautilus-testkit = { workspace = true }
 rstest = { workspace = true }
@@ -109,4 +117,11 @@ doc = false
 [[bin]]
 name = "stream_deltas_bench"
 path = "bin/stream_deltas_bench.rs"
+doc = false
+
+# Run with `cargo run --example tardis-data-tester -p nautilus-tardis`
+[[example]]
+name = "tardis-data-tester"
+path = "examples/node_data_tester.rs"
+required-features = []
 doc = false

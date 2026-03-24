@@ -53,11 +53,11 @@ or pull requests to add margin trading functionality are welcome.
 To provide complete API functionality to traders, the integration includes several
 custom data types:
 
-- `BinanceTicker`: Represents data returned for Binance 24-hour ticker subscriptions, including comprehensive price and statistical information.
+- `BinanceTicker`: Represents data returned for Binance 24-hour ticker subscriptions, including price and statistical information.
 - `BinanceBar`: Represents data for historical requests or real-time subscriptions to Binance bars, with additional volume metrics.
 - `BinanceFuturesMarkPriceUpdate`: Represents mark price updates for Binance Futures subscriptions.
 
-See the Binance [API Reference](../api_reference/adapters/binance.md) for full definitions.
+See the Binance [API Reference](/docs/python-api-latest/adapters/binance.html) for full definitions.
 
 ## Symbology
 
@@ -235,7 +235,7 @@ When an order is submitted with `price_match`, the following sequence of events 
 4. **OrderUpdated event**: If the Binance-accepted price differs from the original reference price, Nautilus immediately generates an `OrderUpdated` event with the actual working price.
 5. **Price synchronization**: The order's limit price in the Nautilus cache is now synchronized with the actual price accepted by Binance.
 
-This ensures that the order price in your system accurately reflects what Binance has accepted, which is critical for position management, risk calculations, and strategy logic.
+This ensures that the order price in your system accurately reflects what Binance has accepted, which is important for position management, risk calculations, and strategy logic.
 
 #### Example
 
@@ -267,6 +267,34 @@ For trailing stop market orders on Binance:
 
 :::warning
 Do not use `trigger_price` for trailing stop orders - it will fail with an error. Use `activation_price` instead.
+:::
+
+## Link & Trade
+
+The NautilusTrader integration ID is automatically prefixed to all
+system-generated client order IDs for every order placed through the Binance
+Rust adapter. This provides transparent order attribution through Binance's
+[Link and Trade](https://developers.binance.com/docs/binance_link/link-and-trade)
+program without requiring any user configuration.
+
+The adapter encodes outgoing `ClientOrderId` values into a compact format that
+fits within Binance's 36-character `newClientOrderId` limit, and decodes
+incoming order events back to the original ID before they reach strategies.
+This transformation is fully transparent: strategies see only their original
+`ClientOrderId` values at all times.
+
+:::note
+The integration ID prefix applies to all order operations including
+submissions, modifications, cancellations, and status queries. Orders placed
+before this support was added are handled gracefully through passthrough
+decoding.
+:::
+
+:::info
+This feature is currently available in the Rust adapter only. Users can opt out
+by passing a custom `client_order_id` on their orders, or by removing the
+encoding calls and recompiling. There is no technical limitation preventing
+either approach.
 :::
 
 ## Order books
@@ -343,6 +371,84 @@ def on_data(self, data: Data):
         # Do something with the data
 ```
 
+## Funding rates
+
+The adapter subscribes to funding rate data through the
+[Mark Price Stream](https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Mark-Price-Stream)
+WebSocket endpoint, which provides the current funding rate and next funding time.
+
+The `interval` field on `FundingRateUpdate` is `None` for Binance because the Mark Price Stream
+does not include a funding interval field. Binance exposes `fundingIntervalHours` through the
+[Get Funding Rate Info](https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Get-Funding-Rate-Info)
+REST endpoint, but this is not currently consumed by the adapter.
+
+## Instrument status polling
+
+:::info[Rust adapter only]
+This feature is available in the Rust data clients (`LiveNode`). The Python
+data clients do not poll for status changes.
+:::
+
+The adapter periodically polls Binance `exchangeInfo` to detect changes in
+instrument trading status. When a symbol transitions between states (e.g.
+Trading to Halt, or Trading to Delivering for a futures contract approaching
+expiry), the adapter emits an `InstrumentStatus` event.
+
+The polling interval defaults to 3600 seconds (60 minutes) and is configurable
+via `instrument_status_poll_secs` in the data client config. Set to `0` to
+disable polling entirely.
+
+On initial connect, the adapter seeds its status cache from the exchange info
+response without emitting events. Only subsequent polls that detect a status
+change emit `InstrumentStatus` events. If a symbol disappears from exchange
+info (e.g. after delisting or contract expiry), the adapter emits
+`NotAvailableForTrading`.
+
+### Status mapping
+
+#### Spot
+
+| Binance status     | MarketStatusAction         |
+|--------------------|----------------------------|
+| Trading            | Trading                    |
+| EndOfDay           | Close                      |
+| Halt               | Halt                       |
+| Break              | Pause                      |
+| NonRepresentable   | NotAvailableForTrading     |
+
+#### Futures (USD-M)
+
+| Binance status     | MarketStatusAction         |
+|--------------------|----------------------------|
+| Trading            | Trading                    |
+| PendingTrading     | PreOpen                    |
+| PreTrading         | PreOpen                    |
+| PostTrading        | PostClose                  |
+| EndOfDay           | Close                      |
+| Halt               | Halt                       |
+| AuctionMatch       | Cross                      |
+| Break              | Pause                      |
+
+#### Futures (COIN-M)
+
+| Binance status     | MarketStatusAction         |
+|--------------------|----------------------------|
+| Trading            | Trading                    |
+| PendingTrading     | PreOpen                    |
+| PreDelivering      | PreClose                   |
+| Delivering         | Close                      |
+| Delivered          | Close                      |
+| PreDelisting       | PreClose                   |
+| Delisting          | Suspend                    |
+| Down               | NotAvailableForTrading     |
+
+:::note
+Only instruments that are in a tradable state at connect time are tracked.
+Symbols that start in a non-trading state (e.g. halted at connect) do not
+appear in the instruments cache, so status transitions for them are not
+monitored.
+:::
+
 ## Rate limiting
 
 Binance uses an interval-based rate limiting system where request weight is tracked per fixed time window (every minute, resetting at :00 seconds). Each API endpoint has an assigned weight cost, and your total weight usage is tracked per IP address.
@@ -384,7 +490,7 @@ The WebSocket API (used for user data streams) shares the same weight quota as t
 
 The adapter uses token bucket rate limiters to approximate Binance's interval-based limits. This reduces the risk of quota violations while maintaining throughput for normal operations.
 
-For endpoints with dynamic weight (e.g., `/klines` scales with the `limit` parameter), the adapter draws a single token per call. Large history requests may need manual pacing—monitor the `X-MBX-USED-WEIGHT-*` response headers to track actual usage.
+For endpoints with dynamic weight (e.g., `/klines` scales with the `limit` parameter), the adapter draws a single token per call. Large history requests may need manual pacing. Monitor the `X-MBX-USED-WEIGHT-*` response headers to track actual usage.
 
 :::warning
 Binance returns HTTP 429 when you exceed the allowed weight. Repeated violations trigger temporary IP bans (escalating from 2 minutes to 3 days for repeat offenders).
@@ -417,6 +523,7 @@ For the latest rate limits, query `/api/v3/exchangeInfo` (Spot) or `/fapi/v1/exc
 | `testnet`                          | `False`   | **Deprecated**: use `environment=BinanceEnvironment.TESTNET` instead. |
 | `update_instruments_interval_mins` | `60`      | Interval (minutes) between instrument catalogue refreshes. |
 | `use_agg_trade_ticks`              | `False`   | When `True`, subscribe to aggregated trade ticks instead of raw trades. |
+| `instrument_status_poll_secs`      | `3600`    | *Rust only.* Interval (seconds) between exchange info polls to detect instrument status changes. Set to `0` to disable. |
 
 ### Execution client configuration options
 
@@ -425,7 +532,7 @@ For the latest rate limits, query `/api/v3/exchangeInfo` (Spot) or `/fapi/v1/exc
 | `venue`                              | `BINANCE` | Venue identifier used when registering the client. |
 | `api_key`                            | `None`    | Binance API key; loaded from environment variables when omitted. |
 | `api_secret`                         | `None`    | Binance API secret; loaded from environment variables when omitted. |
-| `key_type`                           | `HMAC`    | **Deprecated**: key type is now auto-detected from the API secret format. Only needed to force `RSA` (data clients only — RSA is not supported for execution). |
+| `key_type`                           | `HMAC`    | **Deprecated**: key type is now auto-detected from the API secret format. Only needed to force `RSA` (data clients only, RSA is not supported for execution). |
 | `account_type`                       | `SPOT`    | Account type for order placement (spot, margin, USDT futures, coin futures). |
 | `base_url_http`                      | `None`    | Override for the HTTP REST base URL. |
 | `base_url_ws`                        | `None`    | Override for the WebSocket API base URL. |
@@ -502,7 +609,7 @@ node.build()
 ### Key types
 
 Binance supports three API key types: **Ed25519**, **HMAC-SHA256**, and **RSA**.
-The adapter auto-detects the key type from your API secret format — no configuration needed.
+The adapter auto-detects the key type from your API secret format, so no configuration is needed.
 
 **Ed25519 is strongly recommended** for all API access. Binance recommends Ed25519 for
 its superior performance and security, and a future version of NautilusTrader will
@@ -511,8 +618,8 @@ require Ed25519 exclusively.
 | Key Type | Data Clients | Execution Clients | Status |
 |----------|--------------|-------------------|--------|
 | Ed25519  | ✓            | ✓                 | **Recommended** |
-| HMAC     | ✓            | ✓                 | Deprecated — will be removed in a future version. |
-| RSA      | ✓            | -                 | Deprecated — not supported for execution. |
+| HMAC     | ✓            | ✓                 | Deprecated, will be removed in a future version. |
+| RSA      | ✓            | -                 | Deprecated, not supported for execution. |
 
 :::tip
 **We strongly recommend switching to Ed25519 keys now.** Generate an Ed25519 keypair and register
@@ -520,8 +627,10 @@ it with Binance. See [Generating Ed25519 keys](#generating-ed25519-keys) below f
 :::
 
 :::note
-Ed25519 keys must be provided in base64-encoded ASN.1/DER format (PEM file contents).
+Ed25519 keys must be provided in unencrypted PEM format (base64-encoded ASN.1/DER).
 The implementation automatically extracts the 32-byte seed from the DER structure.
+Encrypted (password-protected) PEM keys are not supported. If your key is encrypted,
+decrypt it first: `openssl pkey -in encrypted.pem -out decrypted.pem`
 :::
 
 #### Generating Ed25519 keys
@@ -574,10 +683,11 @@ execution clients, but Ed25519 offers better performance and will become the onl
 key type in a future version. See [Key types](#key-types) for details.
 :::
 
-:::note
-The `BINANCE_ED25519_*` and `BINANCE_*_ED25519_*` environment variables are deprecated and will
-be removed in a future version. Migrate to using Ed25519 keys in the standard
-`BINANCE_API_KEY`/`BINANCE_API_SECRET` variables.
+:::warning
+The `BINANCE_ED25519_*` and `BINANCE_*_ED25519_*` environment variables have been removed
+for Spot/Margin. For Futures, they are deprecated with a warning and will be removed in a
+future version. Rename them to the standard `BINANCE_API_KEY`/`BINANCE_API_SECRET` variables
+(Ed25519 keys are now auto-detected).
 :::
 
 When starting the trading node, you'll receive immediate confirmation of whether your
@@ -610,17 +720,19 @@ should behave identically to standard Binance.
 
 ### Environments
 
-Binance provides three trading environments, configured via the `environment` option:
+Binance provides three trading environments. Each has separate API credentials
+and endpoints. The `environment` config option selects which one to use.
 
-| Environment  | Config                   | Description                                                         |
-|--------------|--------------------------|---------------------------------------------------------------------|
-| **Live**     | `environment="LIVE"`     | Production trading with real funds (default).                       |
-| **Demo**     | `environment="DEMO"`     | Practice trading with simulated funds on production infrastructure. |
-| **Testnet**  | `environment="TESTNET"`  | Separate test network for development and integration testing.      |
+| Environment | Config                  | Description                                                            |
+|-------------|-------------------------|------------------------------------------------------------------------|
+| **Live**    | `environment="LIVE"`    | Production trading with real funds (default).                          |
+| **Demo**    | `environment="DEMO"`    | Simulated funds on production infrastructure. Recommended for testing. |
+| **Testnet** | `environment="TESTNET"` | Separate test network (Spot only). Limited futures support.            |
 
 #### Live (production)
 
-The default environment for live trading with real funds.
+The default environment for live trading with real funds. Uses your main
+Binance account credentials.
 
 ```python
 config = BinanceExecClientConfig(
@@ -631,34 +743,64 @@ config = BinanceExecClientConfig(
 )
 ```
 
-Environment variables: `BINANCE_API_KEY`, `BINANCE_API_SECRET`
+| Variable             | Description         |
+|----------------------|---------------------|
+| `BINANCE_API_KEY`    | Mainnet API key.    |
+| `BINANCE_API_SECRET` | Mainnet API secret. |
 
 #### Demo trading
 
-Practice trading with simulated funds. Spot demo uses dedicated production infrastructure (`demo-api.binance.com`), while Futures demo shares testnet endpoints. Create demo API keys from the [Binance Demo Trading page](https://www.binance.com/en/demo-trading).
+Practice trading with simulated funds on production infrastructure. Demo
+accounts use the same Binance login as your live account but trade with
+virtual balances. This is the recommended environment for integration testing,
+especially for futures.
+
+**How to get demo credentials:**
+
+1. Log in at [binance.com/en/demo-trading](https://www.binance.com/en/demo-trading).
+2. Go to **API Management** and create a demo API key.
+3. Demo keys work for both Spot and Futures on demo endpoints.
+
+| Endpoint       | URL                          |
+|----------------|------------------------------|
+| Spot HTTP      | `demo-api.binance.com`       |
+| Spot WS        | `demo-stream.binance.com`    |
+| USD-M HTTP     | `demo-fapi.binance.com`      |
 
 ```python
 config = BinanceExecClientConfig(
     api_key="YOUR_DEMO_API_KEY",
     api_secret="YOUR_DEMO_API_SECRET",
-    account_type=BinanceAccountType.SPOT,
+    account_type=BinanceAccountType.USDT_FUTURES,
     environment=BinanceEnvironment.DEMO,
 )
 ```
 
-Environment variables: `BINANCE_DEMO_API_KEY`, `BINANCE_DEMO_API_SECRET` (shared across Spot and Futures)
+| Variable              | Description                                        |
+|-----------------------|----------------------------------------------------|
+| `BINANCE_DEMO_API_KEY`    | Demo API key (shared across Spot and Futures). |
+| `BINANCE_DEMO_API_SECRET` | Demo API secret.                               |
 
 :::warning
-**Demo environment limitations:**
-
-- COIN-M Futures are **not supported** in demo mode.
-- Futures demo shares testnet infrastructure, so market data and liquidity may differ from production.
-
+COIN-M Futures are not supported in demo mode.
 :::
 
 #### Testnet
 
-A separate test network for development and integration testing. Spot testnet is at `testnet.binance.vision`, Futures testnet at `testnet.binancefuture.com`.
+A separate test network with its own user accounts, balances, and order books.
+Spot testnet is at `testnet.binance.vision`. The futures testnet at
+`testnet.binancefuture.com` now redirects to demo; use `environment="DEMO"`
+for futures testing instead.
+
+**How to get Spot testnet credentials:**
+
+1. Go to [testnet.binance.vision](https://testnet.binance.vision/).
+2. Log in with GitHub.
+3. Generate an API key (HMAC, RSA, or Ed25519).
+
+**Futures testnet:** Binance has merged the futures testnet into the demo
+environment. If you need to test futures, use `environment="DEMO"` with
+demo credentials instead.
 
 ```python
 config = BinanceExecClientConfig(
@@ -669,11 +811,16 @@ config = BinanceExecClientConfig(
 )
 ```
 
-Environment variables (Spot/Margin): `BINANCE_TESTNET_API_KEY`, `BINANCE_TESTNET_API_SECRET`
-Environment variables (Futures): `BINANCE_FUTURES_TESTNET_API_KEY`, `BINANCE_FUTURES_TESTNET_API_SECRET`
+| Variable                             | Description                      |
+|--------------------------------------|----------------------------------|
+| `BINANCE_TESTNET_API_KEY`            | Spot testnet API key.            |
+| `BINANCE_TESTNET_API_SECRET`         | Spot testnet API secret.         |
+| `BINANCE_FUTURES_TESTNET_API_KEY`    | Futures testnet API key (deprecated, use demo). |
+| `BINANCE_FUTURES_TESTNET_API_SECRET` | Futures testnet API secret (deprecated, use demo). |
 
 :::note
-Testnet uses completely separate infrastructure from production. Market data and liquidity differ significantly from live.
+Testnet credentials are completely separate from your live account. Market
+data and liquidity differ from production.
 :::
 
 :::warning

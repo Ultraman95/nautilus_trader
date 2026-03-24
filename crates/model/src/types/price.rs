@@ -155,7 +155,15 @@ pub const ERROR_PRICE: Price = Price {
 #[derive(Clone, Copy, Default, Eq)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.model", frozen)
+    pyo3::pyclass(
+        module = "nautilus_trader.core.nautilus_pyo3.model",
+        frozen,
+        from_py_object
+    )
+)]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.model")
 )]
 pub struct Price {
     /// Represents the raw fixed-point value, with `precision` defining the number of decimal places.
@@ -220,6 +228,7 @@ impl Price {
                 || (raw >= PRICE_RAW_MIN && raw <= PRICE_RAW_MAX),
             "`raw` value {raw} outside valid range [{PRICE_RAW_MIN}, {PRICE_RAW_MAX}] for Price"
         );
+
         if raw == PRICE_UNDEF {
             assert!(
                 precision == 0,
@@ -694,6 +703,7 @@ pub fn check_positive_price(value: Price, param: &str) -> anyhow::Result<()> {
     if value.raw == PRICE_UNDEF {
         anyhow::bail!("invalid `Price` for '{param}', was PRICE_UNDEF")
     }
+
     if !value.is_positive() {
         anyhow::bail!("invalid `Price` for '{param}' not positive, was {value}")
     }

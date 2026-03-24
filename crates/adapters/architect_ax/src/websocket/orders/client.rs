@@ -28,6 +28,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use nautilus_common::live::get_runtime;
 use nautilus_core::{
+    AtomicMap,
     consts::NAUTILUS_USER_AGENT,
     nanos::UnixNanos,
     time::{AtomicTime, get_atomic_clock_realtime},
@@ -47,7 +48,7 @@ use nautilus_network::{
 };
 use ustr::Ustr;
 
-use super::handler::{FeedHandler, HandlerCommand, WsOrderInfo};
+use super::handler::{AxOrdersWsFeedHandler, HandlerCommand, WsOrderInfo};
 use crate::{
     common::{
         consts::AX_NAUTILUS_TAG,
@@ -62,6 +63,27 @@ const DEFAULT_HEARTBEAT_SECS: u64 = 30;
 
 /// Result type for Ax orders WebSocket operations.
 pub type AxOrdersWsResult<T> = Result<T, AxOrdersWsClientError>;
+
+/// Shared caches for order state tracking between the client and consumers.
+#[derive(Debug, Clone)]
+pub struct OrdersCaches {
+    /// Maps client order IDs to order metadata.
+    pub orders_metadata: Arc<DashMap<ClientOrderId, OrderMetadata>>,
+    /// Maps venue order IDs to client order IDs.
+    pub venue_to_client_id: Arc<DashMap<VenueOrderId, ClientOrderId>>,
+    /// Maps AX cid values to client order IDs.
+    pub cid_to_client_order_id: Arc<DashMap<u64, ClientOrderId>>,
+}
+
+impl Default for OrdersCaches {
+    fn default() -> Self {
+        Self {
+            orders_metadata: Arc::new(DashMap::new()),
+            venue_to_client_id: Arc::new(DashMap::new()),
+            cid_to_client_order_id: Arc::new(DashMap::new()),
+        }
+    }
+}
 
 /// Error type for the Ax orders WebSocket client.
 #[derive(Debug, Clone)]
@@ -99,10 +121,6 @@ impl From<&'static str> for AxOrdersWsClientError {
 ///
 /// Provides authenticated order management including placing, canceling,
 /// and monitoring order status via WebSocket.
-#[cfg_attr(
-    feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.architect")
-)]
 pub struct AxOrdersWebSocketClient {
     clock: &'static AtomicTime,
     url: String,
@@ -113,10 +131,8 @@ pub struct AxOrdersWebSocketClient {
     signal: Arc<AtomicBool>,
     task_handle: Option<tokio::task::JoinHandle<()>>,
     auth_tracker: AuthTracker,
-    instruments_cache: Arc<DashMap<Ustr, InstrumentAny>>,
-    orders_metadata: Arc<DashMap<ClientOrderId, OrderMetadata>>,
-    venue_to_client_id: Arc<DashMap<VenueOrderId, ClientOrderId>>,
-    cid_to_client_order_id: Arc<DashMap<u64, ClientOrderId>>,
+    instruments_cache: Arc<AtomicMap<Ustr, InstrumentAny>>,
+    caches: OrdersCaches,
     request_id_counter: Arc<AtomicI64>,
     account_id: AccountId,
     trader_id: TraderId,
@@ -145,9 +161,7 @@ impl Clone for AxOrdersWebSocketClient {
             task_handle: None,
             auth_tracker: self.auth_tracker.clone(),
             instruments_cache: Arc::clone(&self.instruments_cache),
-            orders_metadata: Arc::clone(&self.orders_metadata),
-            venue_to_client_id: Arc::clone(&self.venue_to_client_id),
-            cid_to_client_order_id: Arc::clone(&self.cid_to_client_order_id),
+            caches: self.caches.clone(),
             request_id_counter: Arc::clone(&self.request_id_counter),
             account_id: self.account_id,
             trader_id: self.trader_id,
@@ -179,10 +193,8 @@ impl AxOrdersWebSocketClient {
             signal: Arc::new(AtomicBool::new(false)),
             task_handle: None,
             auth_tracker: AuthTracker::default(),
-            instruments_cache: Arc::new(DashMap::new()),
-            orders_metadata: Arc::new(DashMap::new()),
-            venue_to_client_id: Arc::new(DashMap::new()),
-            cid_to_client_order_id: Arc::new(DashMap::new()),
+            instruments_cache: Arc::new(AtomicMap::new()),
+            caches: OrdersCaches::default(),
             request_id_counter: Arc::new(AtomicI64::new(1)),
             account_id,
             trader_id,
@@ -229,41 +241,52 @@ impl AxOrdersWebSocketClient {
     /// Caches an instrument for use during message parsing.
     pub fn cache_instrument(&self, instrument: InstrumentAny) {
         let symbol = instrument.symbol().inner();
-        self.instruments_cache.insert(symbol, instrument.clone());
+        self.instruments_cache.insert(symbol, instrument);
+    }
 
-        // If connected, also send to handler
-        if self.is_active() {
-            let cmd = HandlerCommand::UpdateInstrument(Box::new(instrument));
-            let cmd_tx = self.cmd_tx.clone();
-            get_runtime().spawn(async move {
-                let guard = cmd_tx.read().await;
-                let _ = guard.send(cmd);
-            });
-        }
+    /// Caches multiple instruments for use during message parsing.
+    pub fn cache_instruments(&self, instruments: &[InstrumentAny]) {
+        self.instruments_cache.rcu(|m| {
+            for inst in instruments {
+                m.insert(inst.symbol().inner(), inst.clone());
+            }
+        });
     }
 
     /// Returns a cached instrument by symbol.
     #[must_use]
     pub fn get_cached_instrument(&self, symbol: &Ustr) -> Option<InstrumentAny> {
-        self.instruments_cache.get(symbol).map(|r| r.clone())
+        self.instruments_cache.get_cloned(symbol)
+    }
+
+    /// Returns the shared order caches.
+    #[must_use]
+    pub fn caches(&self) -> &OrdersCaches {
+        &self.caches
+    }
+
+    /// Returns the instruments cache.
+    #[must_use]
+    pub fn instruments_cache(&self) -> Arc<AtomicMap<Ustr, InstrumentAny>> {
+        Arc::clone(&self.instruments_cache)
     }
 
     /// Returns the orders metadata cache.
     #[must_use]
     pub fn orders_metadata(&self) -> &Arc<DashMap<ClientOrderId, OrderMetadata>> {
-        &self.orders_metadata
+        &self.caches.orders_metadata
     }
 
     /// Returns the cid to client order ID mapping for order correlation.
     #[must_use]
     pub fn cid_to_client_order_id(&self) -> &Arc<DashMap<u64, ClientOrderId>> {
-        &self.cid_to_client_order_id
+        &self.caches.cid_to_client_order_id
     }
 
     /// Resolves a cid to a ClientOrderId if the mapping exists.
     #[must_use]
     pub fn resolve_cid(&self, cid: u64) -> Option<ClientOrderId> {
-        self.cid_to_client_order_id.get(&cid).map(|v| *v)
+        self.caches.cid_to_client_order_id.get(&cid).map(|v| *v)
     }
 
     /// Registers an external order with the WebSocket handler for event tracking.
@@ -279,7 +302,7 @@ impl AxOrdersWebSocketClient {
         instrument_id: InstrumentId,
         strategy_id: StrategyId,
     ) -> bool {
-        if self.orders_metadata.contains_key(&client_order_id) {
+        if self.caches.orders_metadata.contains_key(&client_order_id) {
             return true;
         }
 
@@ -305,8 +328,11 @@ impl AxOrdersWebSocketClient {
             quote_currency: instrument.quote_currency(),
         };
 
-        self.orders_metadata.insert(client_order_id, metadata);
-        self.venue_to_client_id
+        self.caches
+            .orders_metadata
+            .insert(client_order_id, metadata);
+        self.caches
+            .venue_to_client_id
             .insert(venue_order_id, client_order_id);
 
         log::debug!(
@@ -355,6 +381,7 @@ impl AxOrdersWebSocketClient {
             reconnect_backoff_factor: Some(1.5),
             reconnect_jitter_ms: Some(250),
             reconnect_max_attempts: None,
+            idle_timeout_ms: None,
         };
 
         // Retry initial connection with exponential backoff
@@ -438,16 +465,6 @@ impl AxOrdersWebSocketClient {
 
         self.send_cmd(HandlerCommand::SetClient(client)).await?;
 
-        if !self.instruments_cache.is_empty() {
-            let cached_instruments: Vec<InstrumentAny> = self
-                .instruments_cache
-                .iter()
-                .map(|entry| entry.value().clone())
-                .collect();
-            self.send_cmd(HandlerCommand::InitializeInstruments(cached_instruments))
-                .await?;
-        }
-
         // Bearer token is passed in connection headers
         self.send_cmd(HandlerCommand::Authenticate {
             token: bearer_token.to_string(),
@@ -456,20 +473,16 @@ impl AxOrdersWebSocketClient {
 
         let signal = Arc::clone(&self.signal);
         let auth_tracker = self.auth_tracker.clone();
-        let account_id = self.account_id;
-        let orders_metadata = Arc::clone(&self.orders_metadata);
-        let venue_to_client_id = Arc::clone(&self.venue_to_client_id);
-        let cid_to_client_order_id = Arc::clone(&self.cid_to_client_order_id);
+        let orders_metadata = Arc::clone(&self.caches.orders_metadata);
+        let cid_to_client_order_id = Arc::clone(&self.caches.cid_to_client_order_id);
 
         let stream_handle = get_runtime().spawn(async move {
-            let mut handler = FeedHandler::new(
+            let mut handler = AxOrdersWsFeedHandler::new(
                 signal.clone(),
                 cmd_rx,
                 raw_rx,
                 auth_tracker.clone(),
-                account_id,
                 orders_metadata,
-                venue_to_client_id,
                 cid_to_client_order_id,
             );
 
@@ -608,11 +621,15 @@ impl AxOrdersWebSocketClient {
             price_precision: instrument.price_precision(),
             quote_currency: instrument.quote_currency(),
         };
-        self.orders_metadata.insert(client_order_id, metadata);
+        self.caches
+            .orders_metadata
+            .insert(client_order_id, metadata);
 
         // Store cid -> client_order_id mapping for correlation
         let cid = client_order_id_to_cid(&client_order_id);
-        self.cid_to_client_order_id.insert(cid, client_order_id);
+        self.caches
+            .cid_to_client_order_id
+            .insert(cid, client_order_id);
 
         let order = AxWsPlaceOrder {
             rid: request_id,
@@ -643,8 +660,8 @@ impl AxOrdersWebSocketClient {
             .await;
 
         if result.is_err() {
-            self.orders_metadata.remove(&client_order_id);
-            self.cid_to_client_order_id.remove(&cid);
+            self.caches.orders_metadata.remove(&client_order_id);
+            self.caches.cid_to_client_order_id.remove(&cid);
         }
 
         result?;

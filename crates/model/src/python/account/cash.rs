@@ -27,7 +27,9 @@ use crate::{
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl CashAccount {
+    /// Creates a new `CashAccount` instance.
     #[new]
     #[pyo3(signature = (event, calculate_account_state, allow_borrowing = false))]
     pub fn py_new(
@@ -44,11 +46,6 @@ impl CashAccount {
             CompareOp::Ne => self.ne(other).into_py_any_unwrap(py),
             _ => py.NotImplemented(),
         }
-    }
-
-    #[getter]
-    fn id(&self) -> AccountId {
-        self.id
     }
 
     #[getter]
@@ -160,7 +157,7 @@ impl CashAccount {
         py: Python,
     ) -> PyResult<Money> {
         let instrument = pyobject_to_instrument_any(py, instrument)?;
-        self.calculate_balance_locked(instrument, side, quantity, price, use_quote_for_inverse)
+        self.calculate_balance_locked(&instrument, side, quantity, price, use_quote_for_inverse)
             .map_err(to_pyvalue_err)
     }
 
@@ -180,7 +177,7 @@ impl CashAccount {
         }
         let instrument = pyobject_to_instrument_any(py, instrument)?;
         self.calculate_commission(
-            instrument,
+            &instrument,
             last_qty,
             last_px,
             liquidity_side,
@@ -199,7 +196,7 @@ impl CashAccount {
         py: Python,
     ) -> PyResult<Vec<Money>> {
         let instrument = pyobject_to_instrument_any(py, instrument)?;
-        self.calculate_pnls(instrument, fill, position)
+        self.calculate_pnls(&instrument, &fill, position)
             .map_err(to_pyvalue_err)
     }
 

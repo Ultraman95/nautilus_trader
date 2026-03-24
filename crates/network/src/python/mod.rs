@@ -20,6 +20,10 @@
 // memory leak), so the compiler raises an error about an unknown cfg feature.
 // This attribute prevents those errors without actually enabling `gil-refs`.
 #![allow(unexpected_cfgs)]
+#![allow(
+    clippy::missing_errors_doc,
+    reason = "errors documented on underlying Rust methods"
+)]
 
 pub mod http;
 pub mod socket;
@@ -27,7 +31,8 @@ pub mod websocket;
 
 use std::num::NonZeroU32;
 
-use pyo3::{exceptions::PyException, prelude::*};
+use nautilus_core::python::to_pyexception;
+use pyo3::prelude::*;
 
 use crate::{
     python::{
@@ -38,6 +43,7 @@ use crate::{
 };
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl Quota {
     /// Construct a quota for a number of requests per second.
     ///
@@ -46,12 +52,13 @@ impl Quota {
     /// Returns a `PyErr` if the max burst capacity is 0
     #[staticmethod]
     pub fn rate_per_second(max_burst: u32) -> PyResult<Self> {
-        match NonZeroU32::new(max_burst) {
-            Some(max_burst) => Ok(Self::per_second(max_burst)),
-            None => Err(PyErr::new::<PyException, _>(
-                "Max burst capacity should be a non-zero integer",
-            )),
-        }
+        let max_burst = NonZeroU32::new(max_burst)
+            .ok_or_else(|| to_pyexception("Max burst capacity should be a non-zero integer"))?;
+        Self::per_second(max_burst).ok_or_else(|| {
+            to_pyexception(
+                "Max burst too large: replenish interval rounds to zero (max 1_000_000_000)",
+            )
+        })
     }
 
     /// Construct a quota for a number of requests per minute.
@@ -63,7 +70,7 @@ impl Quota {
     pub fn rate_per_minute(max_burst: u32) -> PyResult<Self> {
         match NonZeroU32::new(max_burst) {
             Some(max_burst) => Ok(Self::per_minute(max_burst)),
-            None => Err(PyErr::new::<PyException, _>(
+            None => Err(to_pyexception(
                 "Max burst capacity should be a non-zero integer",
             )),
         }
@@ -78,7 +85,7 @@ impl Quota {
     pub fn rate_per_hour(max_burst: u32) -> PyResult<Self> {
         match NonZeroU32::new(max_burst) {
             Some(max_burst) => Ok(Self::per_hour(max_burst)),
-            None => Err(PyErr::new::<PyException, _>(
+            None => Err(to_pyexception(
                 "Max burst capacity should be a non-zero integer",
             )),
         }

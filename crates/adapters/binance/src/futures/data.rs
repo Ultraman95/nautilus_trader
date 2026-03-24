@@ -35,30 +35,33 @@ use nautilus_common::{
             SubscribeInstruments, SubscribeMarkPrices, SubscribeQuotes, SubscribeTrades,
             TradesResponse, UnsubscribeBars, UnsubscribeBookDeltas, UnsubscribeFundingRates,
             UnsubscribeIndexPrices, UnsubscribeMarkPrices, UnsubscribeQuotes, UnsubscribeTrades,
+            subscribe::SubscribeInstrumentStatus, unsubscribe::UnsubscribeInstrumentStatus,
         },
     },
 };
 use nautilus_core::{
-    MUTEX_POISONED,
+    AtomicMap, MUTEX_POISONED,
     datetime::{NANOSECONDS_IN_MILLISECOND, datetime_to_unix_nanos},
     nanos::UnixNanos,
     time::{AtomicTime, get_atomic_clock_realtime},
 };
 use nautilus_model::{
     data::{BookOrder, Data, OrderBookDelta, OrderBookDeltas, OrderBookDeltas_API},
-    enums::{BookAction, BookType, OrderSide, RecordFlag},
+    enums::{BookAction, BookType, MarketStatusAction, OrderSide, RecordFlag},
     identifiers::{ClientId, InstrumentId, Venue},
     instruments::{Instrument, InstrumentAny},
     types::{Price, Quantity},
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use ustr::Ustr;
 
 use crate::{
     common::{
         consts::{BINANCE_BOOK_DEPTHS, BINANCE_VENUE},
         enums::BinanceProductType,
         parse::bar_spec_to_binance_interval,
+        status::diff_and_emit_statuses,
         symbol::format_binance_stream_symbol,
     },
     config::BinanceDataClientConfig,
@@ -66,9 +69,13 @@ use crate::{
         http::{
             client::BinanceFuturesHttpClient, models::BinanceOrderBook, query::BinanceDepthParams,
         },
-        websocket::{
+        websocket::streams::{
             client::BinanceFuturesWebSocketClient,
-            messages::{NautilusDataWsMessage, NautilusWsMessage},
+            messages::BinanceFuturesWsStreamsMessage,
+            parse_data::{
+                parse_agg_trade, parse_book_ticker, parse_depth_update, parse_kline,
+                parse_mark_price, parse_trade,
+            },
         },
     },
 };
@@ -110,6 +117,7 @@ pub struct BinanceFuturesDataClient {
     cancellation_token: CancellationToken,
     tasks: Vec<JoinHandle<()>>,
     instruments: Arc<RwLock<AHashMap<InstrumentId, InstrumentAny>>>,
+    status_cache: Arc<RwLock<AHashMap<InstrumentId, MarketStatusAction>>>,
     book_buffers: Arc<RwLock<AHashMap<InstrumentId, BookBuffer>>>,
     book_subscriptions: Arc<RwLock<AHashMap<InstrumentId, u32>>>,
     mark_price_refs: Arc<RwLock<AHashMap<InstrumentId, u32>>>,
@@ -143,6 +151,7 @@ impl BinanceFuturesDataClient {
         let http_client = BinanceFuturesHttpClient::new(
             product_type,
             config.environment,
+            clock,
             config.api_key.clone(),
             config.api_secret.clone(),
             config.base_url_http.clone(),
@@ -172,6 +181,7 @@ impl BinanceFuturesDataClient {
             cancellation_token: CancellationToken::new(),
             tasks: Vec::new(),
             instruments: Arc::new(RwLock::new(AHashMap::new())),
+            status_cache: Arc::new(RwLock::new(AHashMap::new())),
             book_buffers: Arc::new(RwLock::new(AHashMap::new())),
             book_subscriptions: Arc::new(RwLock::new(AHashMap::new())),
             mark_price_refs: Arc::new(RwLock::new(AHashMap::new())),
@@ -202,86 +212,128 @@ impl BinanceFuturesDataClient {
 
     #[allow(clippy::too_many_arguments)]
     fn handle_ws_message(
-        msg: NautilusWsMessage,
+        msg: BinanceFuturesWsStreamsMessage,
         data_sender: &tokio::sync::mpsc::UnboundedSender<DataEvent>,
         instruments: &Arc<RwLock<AHashMap<InstrumentId, InstrumentAny>>>,
+        ws_instruments: &Arc<AtomicMap<Ustr, InstrumentAny>>,
         book_buffers: &Arc<RwLock<AHashMap<InstrumentId, BookBuffer>>>,
         book_subscriptions: &Arc<RwLock<AHashMap<InstrumentId, u32>>>,
         book_epoch: &Arc<RwLock<u64>>,
         http_client: &BinanceFuturesHttpClient,
         clock: &'static AtomicTime,
     ) {
+        let ts_init = clock.get_time_ns();
+        let cache = ws_instruments.load();
+
         match msg {
-            NautilusWsMessage::Data(data_msg) => match data_msg {
-                NautilusDataWsMessage::Data(payloads) => {
-                    for data in payloads {
-                        Self::send_data(data_sender, data);
+            BinanceFuturesWsStreamsMessage::AggTrade(ref trade_msg) => {
+                if let Some(instrument) = cache.get(&trade_msg.symbol) {
+                    match parse_agg_trade(trade_msg, instrument, ts_init) {
+                        Ok(trade) => Self::send_data(data_sender, Data::Trade(trade)),
+                        Err(e) => log::warn!("Failed to parse aggregate trade: {e}"),
                     }
                 }
-                NautilusDataWsMessage::DepthUpdate {
-                    deltas,
-                    first_update_id,
-                    prev_final_update_id,
-                } => {
-                    let instrument_id = deltas.instrument_id;
-                    let final_update_id = deltas.sequence;
+            }
+            BinanceFuturesWsStreamsMessage::Trade(ref trade_msg) => {
+                if let Some(instrument) = cache.get(&trade_msg.symbol) {
+                    match parse_trade(trade_msg, instrument, ts_init) {
+                        Ok(trade) => Self::send_data(data_sender, Data::Trade(trade)),
+                        Err(e) => log::warn!("Failed to parse trade: {e}"),
+                    }
+                }
+            }
+            BinanceFuturesWsStreamsMessage::BookTicker(ref ticker_msg) => {
+                if let Some(instrument) = cache.get(&ticker_msg.symbol) {
+                    match parse_book_ticker(ticker_msg, instrument, ts_init) {
+                        Ok(quote) => Self::send_data(data_sender, Data::Quote(quote)),
+                        Err(e) => log::warn!("Failed to parse book ticker: {e}"),
+                    }
+                }
+            }
+            BinanceFuturesWsStreamsMessage::DepthUpdate(ref depth_msg) => {
+                if let Some(instrument) = cache.get(&depth_msg.symbol) {
+                    match parse_depth_update(depth_msg, instrument, ts_init) {
+                        Ok(deltas) => {
+                            let instrument_id = deltas.instrument_id;
+                            let final_update_id = deltas.sequence;
+                            let first_update_id = depth_msg.first_update_id;
+                            let prev_final_update_id = depth_msg.prev_final_update_id;
 
-                    // Check if we're buffering for this instrument
-                    {
-                        let mut buffers = book_buffers.write().expect(MUTEX_POISONED);
-                        if let Some(buffer) = buffers.get_mut(&instrument_id) {
-                            buffer.updates.push(BufferedDepthUpdate {
-                                deltas,
-                                first_update_id,
-                                final_update_id,
-                                prev_final_update_id,
-                            });
-                            return;
+                            {
+                                let mut buffers = book_buffers.write().expect(MUTEX_POISONED);
+                                if let Some(buffer) = buffers.get_mut(&instrument_id) {
+                                    buffer.updates.push(BufferedDepthUpdate {
+                                        deltas,
+                                        first_update_id,
+                                        final_update_id,
+                                        prev_final_update_id,
+                                    });
+                                    return;
+                                }
+                            }
+
+                            Self::send_data(
+                                data_sender,
+                                Data::Deltas(OrderBookDeltas_API::new(deltas)),
+                            );
                         }
+                        Err(e) => log::warn!("Failed to parse depth update: {e}"),
                     }
-
-                    // Not buffering, emit directly
-                    Self::send_data(data_sender, Data::Deltas(OrderBookDeltas_API::new(deltas)));
                 }
-                NautilusDataWsMessage::Instrument(instrument) => {
-                    upsert_instrument(instruments, *instrument);
-                }
-                NautilusDataWsMessage::RawJson(value) => {
-                    log::debug!("Unhandled JSON message: {value:?}");
-                }
-            },
-            NautilusWsMessage::Exec(exec_msg) => {
-                log::debug!("Received exec message in data client (ignored): {exec_msg:?}");
             }
-            NautilusWsMessage::ExecRaw(raw_msg) => {
-                log::debug!("Received raw exec message in data client (ignored): {raw_msg:?}");
+            BinanceFuturesWsStreamsMessage::MarkPrice(ref mark_msg) => {
+                if let Some(instrument) = cache.get(&mark_msg.symbol) {
+                    match parse_mark_price(mark_msg, instrument, ts_init) {
+                        Ok((mark_update, index_update, _funding_update)) => {
+                            Self::send_data(data_sender, Data::MarkPriceUpdate(mark_update));
+                            Self::send_data(data_sender, Data::IndexPriceUpdate(index_update));
+                        }
+                        Err(e) => log::warn!("Failed to parse mark price: {e}"),
+                    }
+                }
             }
-            NautilusWsMessage::Error(e) => {
+            BinanceFuturesWsStreamsMessage::Kline(ref kline_msg) => {
+                if let Some(instrument) = cache.get(&kline_msg.symbol) {
+                    match parse_kline(kline_msg, instrument, ts_init) {
+                        Ok(Some(bar)) => Self::send_data(data_sender, Data::Bar(bar)),
+                        Ok(None) => {} // Kline not closed yet
+                        Err(e) => log::warn!("Failed to parse kline: {e}"),
+                    }
+                }
+            }
+            BinanceFuturesWsStreamsMessage::ForceOrder(_)
+            | BinanceFuturesWsStreamsMessage::Ticker(_) => {
+                log::debug!("Unhandled market data message type");
+            }
+            // Execution messages ignored by data client
+            BinanceFuturesWsStreamsMessage::AccountUpdate(_)
+            | BinanceFuturesWsStreamsMessage::OrderUpdate(_)
+            | BinanceFuturesWsStreamsMessage::AlgoUpdate(_)
+            | BinanceFuturesWsStreamsMessage::MarginCall(_)
+            | BinanceFuturesWsStreamsMessage::AccountConfigUpdate(_)
+            | BinanceFuturesWsStreamsMessage::ListenKeyExpired => {}
+            BinanceFuturesWsStreamsMessage::Error(e) => {
                 log::error!(
                     "Binance Futures WebSocket error: code={}, msg={}",
                     e.code,
                     e.msg
                 );
             }
-            NautilusWsMessage::Reconnected => {
+            BinanceFuturesWsStreamsMessage::Reconnected => {
                 log::info!("WebSocket reconnected, rebuilding order book snapshots");
 
-                // Increment epoch to invalidate any in-flight snapshot tasks
                 let epoch = {
                     let mut guard = book_epoch.write().expect(MUTEX_POISONED);
                     *guard = guard.wrapping_add(1);
                     *guard
                 };
 
-                // Get all active book subscriptions
                 let subs: Vec<(InstrumentId, u32)> = {
                     let guard = book_subscriptions.read().expect(MUTEX_POISONED);
                     guard.iter().map(|(k, v)| (*k, *v)).collect()
                 };
 
-                // Trigger snapshot rebuild for each active subscription
                 for (instrument_id, depth) in subs {
-                    // Start buffering deltas with new epoch
                     {
                         let mut buffers = book_buffers.write().expect(MUTEX_POISONED);
                         buffers.insert(instrument_id, BookBuffer::new(epoch));
@@ -292,7 +344,6 @@ impl BinanceFuturesDataClient {
                         starting (reconnect, epoch={epoch})"
                     );
 
-                    // Spawn snapshot fetch task
                     let http = http_client.clone();
                     let sender = data_sender.clone();
                     let buffers = book_buffers.clone();
@@ -564,6 +615,7 @@ impl BinanceFuturesDataClient {
                             if buffer.epoch != epoch {
                                 break;
                             }
+
                             if buffer.updates.is_empty() {
                                 buffers.remove(&instrument_id);
                                 break;
@@ -807,10 +859,33 @@ impl DataClient for BinanceFuturesDataClient {
             .await
             .context("failed to request Binance Futures instruments")?;
 
+        // Seed the status cache from the HTTP client's instruments cache
         {
-            let mut guard = self.instruments.write().expect(MUTEX_POISONED);
+            let mut inst_guard = self.instruments.write().expect(MUTEX_POISONED);
+            let mut status_guard = self.status_cache.write().expect(MUTEX_POISONED);
+
             for instrument in &instruments {
-                guard.insert(instrument.id(), instrument.clone());
+                inst_guard.insert(instrument.id(), instrument.clone());
+            }
+
+            let http_instruments = self.http_client.instruments_cache();
+            for entry in http_instruments.iter() {
+                let raw_symbol = entry.key();
+                let action = match entry.value() {
+                    crate::futures::http::client::BinanceFuturesInstrument::UsdM(s) => {
+                        MarketStatusAction::from(s.status)
+                    }
+                    crate::futures::http::client::BinanceFuturesInstrument::CoinM(s) => s
+                        .contract_status
+                        .map_or(MarketStatusAction::NotAvailableForTrading, Into::into),
+                };
+
+                for instrument in &instruments {
+                    if instrument.raw_symbol().as_str() == raw_symbol.as_str() {
+                        status_guard.insert(instrument.id(), action);
+                        break;
+                    }
+                }
             }
         }
 
@@ -820,7 +895,7 @@ impl DataClient for BinanceFuturesDataClient {
             }
         }
 
-        self.ws_client.cache_instruments(instruments);
+        self.ws_client.cache_instruments(&instruments);
 
         log::info!("Connecting to Binance Futures WebSocket...");
         self.ws_client.connect().await.map_err(|e| {
@@ -832,6 +907,7 @@ impl DataClient for BinanceFuturesDataClient {
         let stream = self.ws_client.stream();
         let sender = self.data_sender.clone();
         let insts = self.instruments.clone();
+        let ws_insts = self.ws_client.instruments_cache();
         let buffers = self.book_buffers.clone();
         let book_subs = self.book_subscriptions.clone();
         let book_epoch = self.book_epoch.clone();
@@ -848,6 +924,7 @@ impl DataClient for BinanceFuturesDataClient {
                             message,
                             &sender,
                             &insts,
+                            &ws_insts,
                             &buffers,
                             &book_subs,
                             &book_epoch,
@@ -863,6 +940,66 @@ impl DataClient for BinanceFuturesDataClient {
             }
         });
         self.tasks.push(handle);
+
+        // Spawn instrument status polling task
+        let poll_secs = self.config.instrument_status_poll_secs;
+        if poll_secs > 0 {
+            let poll_http = self.http_client.clone();
+            let poll_sender = self.data_sender.clone();
+            let poll_instruments = self.instruments.clone();
+            let poll_status_cache = self.status_cache.clone();
+            let poll_cancel = self.cancellation_token.clone();
+            let poll_clock = self.clock;
+
+            let poll_handle = get_runtime().spawn(async move {
+                let mut interval =
+                    tokio::time::interval(tokio::time::Duration::from_secs(poll_secs));
+                interval.tick().await; // Skip first immediate tick
+
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            match poll_http.request_symbol_statuses().await {
+                                Ok(symbol_statuses) => {
+                                    let ts = poll_clock.get_time_ns();
+                                    let inst_guard = poll_instruments.read()
+                                        .expect(MUTEX_POISONED);
+
+                                    // Build raw_symbol -> InstrumentId lookup
+                                    let raw_to_id: AHashMap<Ustr, InstrumentId> = inst_guard
+                                        .values()
+                                        .map(|inst| (inst.raw_symbol().inner(), inst.id()))
+                                        .collect();
+
+                                    let mut new_statuses = AHashMap::new();
+                                    for (raw_symbol, action) in &symbol_statuses {
+                                        if let Some(&id) = raw_to_id.get(raw_symbol) {
+                                            new_statuses.insert(id, *action);
+                                        }
+                                    }
+                                    drop(inst_guard);
+
+                                    let mut cache = poll_status_cache.write()
+                                        .expect(MUTEX_POISONED);
+                                    diff_and_emit_statuses(
+                                        &new_statuses, &mut cache, &poll_sender, ts, ts,
+                                    );
+                                }
+                                Err(e) => {
+                                    log::warn!("Futures instrument status poll failed: {e}");
+                                }
+                            }
+                        }
+                        () = poll_cancel.cancelled() => {
+                            log::debug!("Futures instrument status polling task cancelled");
+                            break;
+                        }
+                    }
+                }
+            });
+            self.tasks.push(poll_handle);
+            log::info!("Futures instrument status polling started: interval={poll_secs}s");
+        }
 
         self.is_connected.store(true, Ordering::Release);
         log::info!("Connected: client_id={}", self.client_id);
@@ -1129,6 +1266,17 @@ impl DataClient for BinanceFuturesDataClient {
         )
     }
 
+    fn subscribe_instrument_status(
+        &mut self,
+        cmd: &SubscribeInstrumentStatus,
+    ) -> anyhow::Result<()> {
+        log::debug!(
+            "subscribe_instrument_status: {id} (status changes detected via periodic exchange info polling)",
+            id = cmd.instrument_id,
+        );
+        Ok(())
+    }
+
     fn unsubscribe_book_deltas(&mut self, cmd: &UnsubscribeBookDeltas) -> anyhow::Result<()> {
         let instrument_id = cmd.instrument_id;
         let ws = self.ws_client.clone();
@@ -1309,6 +1457,17 @@ impl DataClient for BinanceFuturesDataClient {
         Ok(())
     }
 
+    fn unsubscribe_instrument_status(
+        &mut self,
+        cmd: &UnsubscribeInstrumentStatus,
+    ) -> anyhow::Result<()> {
+        log::debug!(
+            "unsubscribe_instrument_status: {id}",
+            id = cmd.instrument_id,
+        );
+        Ok(())
+    }
+
     fn request_instruments(&self, request: RequestInstruments) -> anyhow::Result<()> {
         let http = self.http_client.clone();
         let sender = self.data_sender.clone();
@@ -1367,27 +1526,6 @@ impl DataClient for BinanceFuturesDataClient {
         let end_nanos = datetime_to_unix_nanos(end);
 
         get_runtime().spawn(async move {
-            {
-                let guard = instruments.read().expect(MUTEX_POISONED);
-                if let Some(instrument) = guard.get(&instrument_id) {
-                    let response = DataResponse::Instrument(Box::new(InstrumentResponse::new(
-                        request_id,
-                        client_id,
-                        instrument.id(),
-                        instrument.clone(),
-                        start_nanos,
-                        end_nanos,
-                        clock.get_time_ns(),
-                        params,
-                    )));
-
-                    if let Err(e) = sender.send(DataEvent::Response(response)) {
-                        log::error!("Failed to send instrument response: {e}");
-                    }
-                    return;
-                }
-            }
-
             match http.request_instruments().await {
                 Ok(all_instruments) => {
                     for instrument in &all_instruments {
@@ -1453,6 +1591,7 @@ impl DataClient for BinanceFuturesDataClient {
                         clock.get_time_ns(),
                         params,
                     ));
+
                     if let Err(e) = sender.send(DataEvent::Response(response)) {
                         log::error!("Failed to send trades response: {e}");
                     }
@@ -1495,6 +1634,7 @@ impl DataClient for BinanceFuturesDataClient {
                         clock.get_time_ns(),
                         params,
                     ));
+
                     if let Err(e) = sender.send(DataEvent::Response(response)) {
                         log::error!("Failed to send bars response: {e}");
                     }

@@ -50,9 +50,7 @@ impl OrderAny {
     /// - The first event is not `OrderInitialized`.
     /// - Any event has an invalid state transition when applied to the order.
     ///
-    /// # Panics
-    ///
-    /// Panics if `events` is empty (after the check, but before .unwrap()).
+    #[allow(clippy::missing_panics_doc)] // Guarded by empty check above
     pub fn from_events(events: Vec<OrderEventAny>) -> anyhow::Result<Self> {
         if events.is_empty() {
             anyhow::bail!("No order events provided to create OrderAny");
@@ -85,7 +83,6 @@ impl OrderAny {
     /// Panics if the first event is not `OrderInitialized` (violates invariant).
     #[must_use]
     pub fn init_event(&self) -> &crate::events::OrderInitialized {
-        // SAFETY: Order specification guarantees at least one event (OrderInitialized)
         match self
             .events()
             .first()

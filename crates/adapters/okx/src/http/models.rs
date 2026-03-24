@@ -103,6 +103,43 @@ pub struct OKXIndexTicker {
     pub ts: u64,
 }
 
+/// Represents an order book level from the GET /api/v5/market/books endpoint.
+/// Each entry is a 4-element tuple: [price, size, liquidated_orders, num_orders].
+pub type OKXOrderBookLevel = (String, String, String, String);
+
+/// Represents an order book snapshot from the GET /api/v5/market/books endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OKXOrderBookSnapshot {
+    /// Ask levels [price, size, liquidated_orders_count, orders_count].
+    pub asks: Vec<OKXOrderBookLevel>,
+    /// Bid levels [price, size, liquidated_orders_count, orders_count].
+    pub bids: Vec<OKXOrderBookLevel>,
+    /// Timestamp in milliseconds.
+    #[serde(deserialize_with = "deserialize_string_to_u64")]
+    pub ts: u64,
+}
+
+/// Represents a funding rate history entry from the GET /api/v5/public/funding-rate-history endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OKXFundingRateHistory {
+    /// Instrument type.
+    pub inst_type: OKXInstrumentType,
+    /// Instrument ID.
+    pub inst_id: Ustr,
+    /// Funding rate.
+    pub funding_rate: String,
+    /// Realized rate.
+    pub realized_rate: String,
+    /// Funding time, Unix timestamp in milliseconds.
+    #[serde(deserialize_with = "deserialize_string_to_u64")]
+    pub funding_time: u64,
+    /// Funding rate calculation method.
+    #[serde(default)]
+    pub method: Option<String>,
+}
+
 /// Represents a position tier from the GET /api/v5/public/position-tiers endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -175,7 +212,11 @@ pub struct OKXAccount {
 /// Represents a balance detail for a single currency in an OKX account.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
+#[cfg_attr(feature = "python", pyo3::pyclass(from_py_object))]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.okx")
+)]
 pub struct OKXBalanceDetail {
     /// Available balance.
     pub avail_bal: String,
@@ -433,7 +474,82 @@ pub struct OKXPlaceOrderResponse {
     /// Last update time (optional).
     #[serde(default)]
     pub u_time: Option<String>,
+    /// The result of the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s_code: Option<String>,
+    /// Error message if the request failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s_msg: Option<String>,
 }
+
+/// Represents an attached TP/SL instruction on `POST /api/v5/trade/order`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OKXAttachAlgoOrdRequest {
+    /// Client order ID for the attached TP/SL OCO object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attach_algo_cl_ord_id: Option<String>,
+    /// Stop-loss trigger price.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sl_trigger_px: Option<String>,
+    /// Stop-loss order price.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sl_ord_px: Option<String>,
+    /// Stop-loss trigger price type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sl_trigger_px_type: Option<OKXTriggerType>,
+    /// Take-profit trigger price.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tp_trigger_px: Option<String>,
+    /// Take-profit order price.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tp_ord_px: Option<String>,
+    /// Take-profit trigger price type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tp_trigger_px_type: Option<OKXTriggerType>,
+}
+
+/// Represents the request body for `POST /api/v5/trade/order` (place order).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OKXPlaceOrderRequest {
+    /// Instrument ID.
+    pub inst_id: String,
+    /// Trade mode (cash, cross, isolated).
+    pub td_mode: OKXTradeMode,
+    /// Currency used for margin trading when required by OKX.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ccy: Option<String>,
+    /// Client-supplied order ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cl_ord_id: Option<String>,
+    /// Order tag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    /// Order side (buy, sell).
+    pub side: OKXSide,
+    /// Position side for derivatives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pos_side: Option<OKXPositionSide>,
+    /// Order type.
+    pub ord_type: OKXOrderType,
+    /// Order size.
+    pub sz: String,
+    /// Limit price when required by the order type.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub px: Option<String>,
+    /// Reduce-only flag.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reduce_only: Option<bool>,
+    /// Target currency for spot market orders.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tgt_ccy: Option<OKXTargetCurrency>,
+    /// Attached TP/SL OCO instructions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attach_algo_ords: Option<Vec<OKXAttachAlgoOrdRequest>>,
+}
+
+pub use crate::common::models::OKXAttachedAlgoOrd;
 
 /// Represents a single historical order record from `GET /api/v5/trade/orders-history`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -449,6 +565,12 @@ pub struct OKXOrderHistory {
     /// Client-supplied algo order ID (for conditional orders).
     #[serde(default)]
     pub algo_cl_ord_id: Option<Ustr>,
+    /// Attached child client order ID if OKX surfaces one at the top level.
+    #[serde(default, deserialize_with = "deserialize_empty_string_as_none")]
+    pub attach_algo_cl_ord_id: Option<String>,
+    /// Attached TP/SL child orders associated with the parent order.
+    #[serde(default)]
+    pub attach_algo_ords: Vec<OKXAttachedAlgoOrd>,
     /// Client account ID (may be omitted by OKX).
     #[serde(default)]
     pub cl_act_id: Option<Ustr>,
@@ -541,7 +663,7 @@ pub struct OKXOrderAlgo {
     /// Instrument type.
     pub inst_type: OKXInstrumentType,
     /// Algo order type.
-    pub ord_type: OKXOrderType,
+    pub ord_type: OKXAlgoOrderType,
     /// Current order state.
     pub state: OKXOrderStatus,
     /// Order side.
@@ -549,6 +671,7 @@ pub struct OKXOrderAlgo {
     /// Position side.
     pub pos_side: OKXPositionSide,
     /// Submitted size.
+    #[serde(default)]
     pub sz: String,
     /// Trigger price (empty for certain algo styles).
     #[serde(default)]
@@ -556,6 +679,24 @@ pub struct OKXOrderAlgo {
     /// Trigger price type (last/mark/index).
     #[serde(default)]
     pub trigger_px_type: Option<OKXTriggerType>,
+    /// Stop-loss trigger price for conditional close orders.
+    #[serde(default)]
+    pub sl_trigger_px: String,
+    /// Stop-loss order price for conditional close orders.
+    #[serde(default)]
+    pub sl_ord_px: String,
+    /// Stop-loss trigger price type (last/mark/index).
+    #[serde(default)]
+    pub sl_trigger_px_type: Option<OKXTriggerType>,
+    /// Take-profit trigger price for conditional close orders.
+    #[serde(default)]
+    pub tp_trigger_px: String,
+    /// Take-profit order price for conditional close orders.
+    #[serde(default)]
+    pub tp_ord_px: String,
+    /// Take-profit trigger price type (last/mark/index).
+    #[serde(default)]
+    pub tp_trigger_px_type: Option<OKXTriggerType>,
     /// Order price (-1 indicates market execution once triggered).
     #[serde(default)]
     pub ord_px: String,
@@ -567,6 +708,9 @@ pub struct OKXOrderAlgo {
     /// Reduce-only flag.
     #[serde(default)]
     pub reduce_only: String,
+    /// Fraction of the position to close for close-order algos.
+    #[serde(default)]
+    pub close_fraction: String,
     /// Executed price (if triggered).
     #[serde(default)]
     pub actual_px: String,
@@ -588,6 +732,15 @@ pub struct OKXOrderAlgo {
     /// Optional tag supplied during submission.
     #[serde(default)]
     pub tag: String,
+    /// Callback price ratio for trailing stop (e.g. "0.01" for 1%).
+    #[serde(default)]
+    pub callback_ratio: String,
+    /// Callback price spread for trailing stop (absolute distance).
+    #[serde(default)]
+    pub callback_spread: String,
+    /// Activation price for trailing stop.
+    #[serde(default)]
+    pub active_px: String,
 }
 
 /// Represents a transaction detail (fill) from `GET /api/v5/trade/fills`.
@@ -708,11 +861,12 @@ pub struct OKXPlaceAlgoOrderRequest {
     pub td_mode: OKXTradeMode,
     /// Order side (buy, sell).
     pub side: OKXSide,
-    /// Algo order type (trigger).
+    /// Algo order type (trigger, conditional, move_order_stop, etc.).
     #[serde(rename = "ordType")]
     pub ord_type: OKXAlgoOrderType,
-    /// Order size.
-    pub sz: String,
+    /// Order size. Omitted for `closeFraction` close orders.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sz: Option<String>,
     /// Client-supplied algo order ID.
     #[serde(rename = "algoClOrdId", skip_serializing_if = "Option::is_none")]
     pub algo_cl_ord_id: Option<String>,
@@ -725,6 +879,24 @@ pub struct OKXPlaceAlgoOrderRequest {
     /// Trigger type (last, mark, index).
     #[serde(rename = "triggerPxType", skip_serializing_if = "Option::is_none")]
     pub trigger_px_type: Option<OKXTriggerType>,
+    /// Stop-loss trigger price for conditional close orders.
+    #[serde(rename = "slTriggerPx", skip_serializing_if = "Option::is_none")]
+    pub sl_trigger_px: Option<String>,
+    /// Stop-loss order price for conditional close orders.
+    #[serde(rename = "slOrdPx", skip_serializing_if = "Option::is_none")]
+    pub sl_ord_px: Option<String>,
+    /// Stop-loss trigger type (last, mark, index).
+    #[serde(rename = "slTriggerPxType", skip_serializing_if = "Option::is_none")]
+    pub sl_trigger_px_type: Option<OKXTriggerType>,
+    /// Take-profit trigger price for conditional close orders.
+    #[serde(rename = "tpTriggerPx", skip_serializing_if = "Option::is_none")]
+    pub tp_trigger_px: Option<String>,
+    /// Take-profit order price for conditional close orders.
+    #[serde(rename = "tpOrdPx", skip_serializing_if = "Option::is_none")]
+    pub tp_ord_px: Option<String>,
+    /// Take-profit trigger type (last, mark, index).
+    #[serde(rename = "tpTriggerPxType", skip_serializing_if = "Option::is_none")]
+    pub tp_trigger_px_type: Option<OKXTriggerType>,
     /// Target currency (base_ccy or quote_ccy).
     #[serde(rename = "tgtCcy", skip_serializing_if = "Option::is_none")]
     pub tgt_ccy: Option<OKXTargetCurrency>,
@@ -740,6 +912,21 @@ pub struct OKXPlaceAlgoOrderRequest {
     /// Whether it's a reduce-only order.
     #[serde(rename = "reduceOnly", skip_serializing_if = "Option::is_none")]
     pub reduce_only: Option<bool>,
+    /// Fraction of the position to close for eligible algo close orders.
+    #[serde(rename = "closeFraction", skip_serializing_if = "Option::is_none")]
+    pub close_fraction: Option<String>,
+    /// Callback rate for trailing stop (e.g., "0.01" for 1%). Either this or
+    /// `callback_spread` is required for `move_order_stop` orders.
+    #[serde(rename = "callbackRatio", skip_serializing_if = "Option::is_none")]
+    pub callback_ratio: Option<String>,
+    /// Callback spread for trailing stop (fixed price distance). Either this or
+    /// `callback_ratio` is required for `move_order_stop` orders.
+    #[serde(rename = "callbackSpread", skip_serializing_if = "Option::is_none")]
+    pub callback_spread: Option<String>,
+    /// Activation price for trailing stop. If empty, the trailing stop
+    /// activates immediately when placed.
+    #[serde(rename = "activePx", skip_serializing_if = "Option::is_none")]
+    pub active_px: Option<String>,
 }
 
 /// Represents the response from `POST /api/v5/trade/order-algo` (place algo order).
@@ -791,6 +978,57 @@ pub struct OKXCancelAlgoOrderResponse {
     /// Error message if the request failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub s_msg: Option<String>,
+}
+
+/// Represents the request body for `POST /api/v5/trade/amend-algos` (amend algo order).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OKXAmendAlgoOrderRequest {
+    /// Instrument ID.
+    pub inst_id: String,
+    /// Algo order ID.
+    pub algo_id: String,
+    /// Client-supplied algo order ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algo_cl_ord_id: Option<String>,
+    /// New order size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_sz: Option<String>,
+    /// New trigger price (for trigger/conditional orders).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_trigger_px: Option<String>,
+    /// New order price (for limit orders after trigger).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_order_px: Option<String>,
+    /// New callback ratio for trailing stop (e.g., "0.01" for 1%).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_callback_ratio: Option<String>,
+    /// New callback spread for trailing stop (fixed price distance).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_callback_spread: Option<String>,
+    /// New activation price for trailing stop.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_active_px: Option<String>,
+}
+
+/// Represents the response from `POST /api/v5/trade/amend-algos` (amend algo order).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OKXAmendAlgoOrderResponse {
+    /// Algo order ID.
+    pub algo_id: String,
+    /// Client-supplied algo order ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub algo_cl_ord_id: Option<String>,
+    /// The result of the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s_code: Option<String>,
+    /// Error message if the request failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub s_msg: Option<String>,
+    /// Request ID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub req_id: Option<String>,
 }
 
 /// Represents the response from `GET /api/v5/public/time` (get system time).
@@ -848,16 +1086,26 @@ mod tests {
             td_mode: OKXTradeMode::Isolated,
             side: OKXSide::Buy,
             ord_type: OKXAlgoOrderType::Trigger,
-            sz: "0.01".to_string(),
+            sz: Some("0.01".to_string()),
             algo_cl_ord_id: Some("test123".to_string()),
             trigger_px: Some("3000".to_string()),
             order_px: Some("-1".to_string()),
             trigger_px_type: Some(OKXTriggerType::Last),
+            sl_trigger_px: None,
+            sl_ord_px: None,
+            sl_trigger_px_type: None,
+            tp_trigger_px: None,
+            tp_ord_px: None,
+            tp_trigger_px_type: None,
             tgt_ccy: None,
             pos_side: None,
             close_position: None,
             tag: None,
             reduce_only: None,
+            close_fraction: None,
+            callback_ratio: None,
+            callback_spread: None,
+            active_px: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -875,6 +1123,49 @@ mod tests {
         assert!(!json.contains("tgtCcy"));
         assert!(!json.contains("posSide"));
         assert!(!json.contains("closePosition"));
+        assert!(!json.contains("closeFraction"));
+    }
+
+    #[rstest]
+    fn test_algo_order_request_serializes_close_fraction() {
+        let request = OKXPlaceAlgoOrderRequest {
+            inst_id: "ETH-USDT-SWAP".to_string(),
+            inst_id_code: None,
+            td_mode: OKXTradeMode::Cross,
+            side: OKXSide::Sell,
+            ord_type: OKXAlgoOrderType::Conditional,
+            sz: None,
+            algo_cl_ord_id: Some("close-frac-123".to_string()),
+            trigger_px: None,
+            order_px: None,
+            trigger_px_type: None,
+            sl_trigger_px: Some("3000".to_string()),
+            sl_ord_px: Some("-1".to_string()),
+            sl_trigger_px_type: Some(OKXTriggerType::Last),
+            tp_trigger_px: None,
+            tp_ord_px: None,
+            tp_trigger_px_type: None,
+            tgt_ccy: None,
+            pos_side: Some(OKXPositionSide::Net),
+            close_position: None,
+            tag: None,
+            reduce_only: Some(true),
+            close_fraction: Some("1".to_string()),
+            callback_ratio: None,
+            callback_spread: None,
+            active_px: None,
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"ordType\":\"conditional\""));
+        assert!(json.contains("\"closeFraction\":\"1\""));
+        assert!(json.contains("\"slTriggerPx\":\"3000\""));
+        assert!(json.contains("\"slOrdPx\":\"-1\""));
+        assert!(json.contains("\"slTriggerPxType\":\"last\""));
+        assert!(json.contains("\"reduceOnly\":true"));
+        assert!(!json.contains("\"sz\""));
+        assert!(!json.contains("triggerPx"));
     }
 
     #[rstest]
@@ -885,16 +1176,26 @@ mod tests {
             td_mode: OKXTradeMode::Cross,
             side: OKXSide::Sell,
             ord_type: OKXAlgoOrderType::Trigger,
-            sz: "0.1".to_string(),
+            sz: Some("0.1".to_string()),
             algo_cl_ord_id: None,
             trigger_px: Some("50000".to_string()),
             order_px: Some("49900".to_string()),
             trigger_px_type: Some(OKXTriggerType::Mark),
+            sl_trigger_px: None,
+            sl_ord_px: None,
+            sl_trigger_px_type: None,
+            tp_trigger_px: None,
+            tp_ord_px: None,
+            tp_trigger_px_type: None,
             tgt_ccy: Some(OKXTargetCurrency::BaseCcy),
             pos_side: Some(OKXPositionSide::Net),
             close_position: None,
             tag: None,
             reduce_only: Some(true),
+            close_fraction: None,
+            callback_ratio: None,
+            callback_spread: None,
+            active_px: None,
         };
 
         // OKX expects an array of requests
@@ -949,5 +1250,242 @@ mod tests {
         assert!(json.contains("\"instId\":\"BTC-USDT\""));
         assert!(json.contains("\"algoClOrdId\":\"client123\""));
         assert!(!json.contains("\"algoId\""));
+    }
+
+    #[rstest]
+    fn test_amend_algo_order_trigger_serialization() {
+        let request = OKXAmendAlgoOrderRequest {
+            inst_id: "ETH-USDT-SWAP".to_string(),
+            algo_id: "123456".to_string(),
+            algo_cl_ord_id: None,
+            new_sz: None,
+            new_trigger_px: Some("3500".to_string()),
+            new_order_px: Some("3490".to_string()),
+            new_callback_ratio: None,
+            new_callback_spread: None,
+            new_active_px: None,
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"instId\":\"ETH-USDT-SWAP\""));
+        assert!(json.contains("\"algoId\":\"123456\""));
+        assert!(json.contains("\"newTriggerPx\":\"3500\""));
+        assert!(json.contains("\"newOrderPx\":\"3490\""));
+        assert!(!json.contains("newSz"));
+        assert!(!json.contains("algoClOrdId"));
+        assert!(!json.contains("newCallbackRatio"));
+    }
+
+    #[rstest]
+    fn test_amend_algo_order_trailing_stop_serialization() {
+        let request = OKXAmendAlgoOrderRequest {
+            inst_id: "BTC-USDT-SWAP".to_string(),
+            algo_id: "789012".to_string(),
+            algo_cl_ord_id: Some("client456".to_string()),
+            new_sz: Some("0.1".to_string()),
+            new_trigger_px: None,
+            new_order_px: None,
+            new_callback_ratio: Some("0.02".to_string()),
+            new_callback_spread: None,
+            new_active_px: Some("50000".to_string()),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"instId\":\"BTC-USDT-SWAP\""));
+        assert!(json.contains("\"algoId\":\"789012\""));
+        assert!(json.contains("\"algoClOrdId\":\"client456\""));
+        assert!(json.contains("\"newSz\":\"0.1\""));
+        assert!(json.contains("\"newCallbackRatio\":\"0.02\""));
+        assert!(json.contains("\"newActivePx\":\"50000\""));
+        assert!(!json.contains("newTriggerPx"));
+        assert!(!json.contains("newOrderPx"));
+    }
+
+    #[rstest]
+    fn test_trailing_stop_request_callback_ratio_serialization() {
+        let request = OKXPlaceAlgoOrderRequest {
+            inst_id: "BTC-USDT-SWAP".to_string(),
+            inst_id_code: None,
+            td_mode: OKXTradeMode::Cross,
+            side: OKXSide::Buy,
+            ord_type: OKXAlgoOrderType::MoveOrderStop,
+            sz: Some("0.1".to_string()),
+            algo_cl_ord_id: Some("trail-001".to_string()),
+            trigger_px: None,
+            order_px: None,
+            trigger_px_type: None,
+            sl_trigger_px: None,
+            sl_ord_px: None,
+            sl_trigger_px_type: None,
+            tp_trigger_px: None,
+            tp_ord_px: None,
+            tp_trigger_px_type: None,
+            tgt_ccy: None,
+            pos_side: None,
+            close_position: None,
+            tag: None,
+            reduce_only: None,
+            close_fraction: None,
+            callback_ratio: Some("0.01".to_string()),
+            callback_spread: None,
+            active_px: None,
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"ordType\":\"move_order_stop\""));
+        assert!(json.contains("\"callbackRatio\":\"0.01\""));
+        assert!(!json.contains("callbackSpread"));
+        assert!(!json.contains("activePx"));
+    }
+
+    #[rstest]
+    fn test_trailing_stop_request_callback_spread_serialization() {
+        let request = OKXPlaceAlgoOrderRequest {
+            inst_id: "ETH-USDT-SWAP".to_string(),
+            inst_id_code: None,
+            td_mode: OKXTradeMode::Isolated,
+            side: OKXSide::Sell,
+            ord_type: OKXAlgoOrderType::MoveOrderStop,
+            sz: Some("1.0".to_string()),
+            algo_cl_ord_id: None,
+            trigger_px: None,
+            order_px: None,
+            trigger_px_type: None,
+            sl_trigger_px: None,
+            sl_ord_px: None,
+            sl_trigger_px_type: None,
+            tp_trigger_px: None,
+            tp_ord_px: None,
+            tp_trigger_px_type: None,
+            tgt_ccy: None,
+            pos_side: None,
+            close_position: None,
+            tag: None,
+            reduce_only: Some(true),
+            close_fraction: None,
+            callback_ratio: None,
+            callback_spread: Some("50.5".to_string()),
+            active_px: None,
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"callbackSpread\":\"50.5\""));
+        assert!(!json.contains("callbackRatio"));
+        assert!(!json.contains("activePx"));
+    }
+
+    #[rstest]
+    fn test_trailing_stop_request_with_activation_price_serialization() {
+        let request = OKXPlaceAlgoOrderRequest {
+            inst_id: "BTC-USDT-SWAP".to_string(),
+            inst_id_code: None,
+            td_mode: OKXTradeMode::Cross,
+            side: OKXSide::Buy,
+            ord_type: OKXAlgoOrderType::MoveOrderStop,
+            sz: Some("0.5".to_string()),
+            algo_cl_ord_id: None,
+            trigger_px: None,
+            order_px: None,
+            trigger_px_type: None,
+            sl_trigger_px: None,
+            sl_ord_px: None,
+            sl_trigger_px_type: None,
+            tp_trigger_px: None,
+            tp_ord_px: None,
+            tp_trigger_px_type: None,
+            tgt_ccy: None,
+            pos_side: None,
+            close_position: None,
+            tag: None,
+            reduce_only: None,
+            close_fraction: None,
+            callback_ratio: Some("0.005".to_string()),
+            callback_spread: None,
+            active_px: Some("65000".to_string()),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"callbackRatio\":\"0.005\""));
+        assert!(json.contains("\"activePx\":\"65000\""));
+        assert!(!json.contains("callbackSpread"));
+    }
+
+    #[rstest]
+    fn test_amend_algo_order_callback_spread_serialization() {
+        let request = OKXAmendAlgoOrderRequest {
+            inst_id: "ETH-USDT-SWAP".to_string(),
+            algo_id: "456789".to_string(),
+            algo_cl_ord_id: None,
+            new_sz: None,
+            new_trigger_px: None,
+            new_order_px: None,
+            new_callback_ratio: None,
+            new_callback_spread: Some("25.0".to_string()),
+            new_active_px: Some("4000".to_string()),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"newCallbackSpread\":\"25.0\""));
+        assert!(json.contains("\"newActivePx\":\"4000\""));
+        assert!(!json.contains("newCallbackRatio"));
+        assert!(!json.contains("newTriggerPx"));
+        assert!(!json.contains("newSz"));
+    }
+
+    #[rstest]
+    fn test_amend_algo_order_size_only_serialization() {
+        let request = OKXAmendAlgoOrderRequest {
+            inst_id: "BTC-USDT-SWAP".to_string(),
+            algo_id: "111222".to_string(),
+            algo_cl_ord_id: None,
+            new_sz: Some("0.5".to_string()),
+            new_trigger_px: None,
+            new_order_px: None,
+            new_callback_ratio: None,
+            new_callback_spread: None,
+            new_active_px: None,
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"newSz\":\"0.5\""));
+        assert!(!json.contains("newTriggerPx"));
+        assert!(!json.contains("newOrderPx"));
+        assert!(!json.contains("newCallbackRatio"));
+        assert!(!json.contains("newCallbackSpread"));
+        assert!(!json.contains("newActivePx"));
+    }
+
+    #[rstest]
+    fn test_amend_algo_order_all_fields_serialization() {
+        let request = OKXAmendAlgoOrderRequest {
+            inst_id: "BTC-USDT-SWAP".to_string(),
+            algo_id: "333444".to_string(),
+            algo_cl_ord_id: Some("client789".to_string()),
+            new_sz: Some("1.0".to_string()),
+            new_trigger_px: Some("60000".to_string()),
+            new_order_px: Some("59900".to_string()),
+            new_callback_ratio: Some("0.015".to_string()),
+            new_callback_spread: Some("100".to_string()),
+            new_active_px: Some("62000".to_string()),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("\"instId\":\"BTC-USDT-SWAP\""));
+        assert!(json.contains("\"algoId\":\"333444\""));
+        assert!(json.contains("\"algoClOrdId\":\"client789\""));
+        assert!(json.contains("\"newSz\":\"1.0\""));
+        assert!(json.contains("\"newTriggerPx\":\"60000\""));
+        assert!(json.contains("\"newOrderPx\":\"59900\""));
+        assert!(json.contains("\"newCallbackRatio\":\"0.015\""));
+        assert!(json.contains("\"newCallbackSpread\":\"100\""));
+        assert!(json.contains("\"newActivePx\":\"62000\""));
     }
 }

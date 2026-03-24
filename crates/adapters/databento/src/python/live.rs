@@ -44,6 +44,10 @@ use crate::{
     feature = "python",
     pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.databento")
 )]
+#[cfg_attr(
+    feature = "python",
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.databento")
+)]
 #[derive(Debug)]
 pub struct DatabentoLiveClient {
     #[pyo3(get)]
@@ -138,6 +142,7 @@ fn call_python(py: Python, callback: &Py<PyAny>, py_obj: Py<PyAny>) {
 }
 
 #[pymethods]
+#[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl DatabentoLiveClient {
     /// # Errors
     ///
@@ -197,6 +202,7 @@ impl DatabentoLiveClient {
 
     #[pyo3(name = "subscribe")]
     #[pyo3(signature = (schema, instrument_ids, start=None, snapshot=None))]
+    #[allow(clippy::needless_pass_by_value)]
     fn py_subscribe(
         &mut self,
         schema: String,
@@ -246,6 +252,7 @@ impl DatabentoLiveClient {
         if self.is_closed {
             return Err(to_pyruntime_err("Client already closed"));
         }
+
         if self.is_running {
             return Err(to_pyruntime_err("Client already running"));
         }
@@ -257,7 +264,7 @@ impl DatabentoLiveClient {
         let (msg_tx, msg_rx) = tokio::sync::mpsc::channel::<LiveMessage>(self.buffer_size);
 
         // Consume the receiver
-        // SAFETY: We guard the client from being started more than once with the
+        // We guard the client from being started more than once with the
         // `is_running` flag, so here it is safe to unwrap the command receiver.
         let cmd_rx = self
             .cmd_rx
@@ -303,6 +310,7 @@ impl DatabentoLiveClient {
         if !self.is_running {
             return Err(to_pyruntime_err("Client never started"));
         }
+
         if self.is_closed {
             return Err(to_pyruntime_err("Client already closed"));
         }

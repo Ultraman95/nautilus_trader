@@ -42,7 +42,7 @@ use std::{env, time::Duration};
 use nautilus_dydx::{
     common::consts::{DYDX_TESTNET_HTTP_URL, DYDX_TESTNET_WS_URL},
     http::client::DydxHttpClient,
-    websocket::{client::DydxWebSocketClient, handler::HandlerCommand},
+    websocket::client::DydxWebSocketClient,
 };
 use nautilus_model::{
     data::{BarSpecification, BarType},
@@ -126,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ticker = instrument_id.symbol.as_str().trim_end_matches("-PERP");
             let topic = format!("{ticker}/1MIN");
 
-            ws_client.send_command(HandlerCommand::RegisterBarType { topic, bar_type })?;
+            ws_client.bar_types().insert(topic, bar_type);
 
             log::info!("Subscribing to 1-minute candles for {instrument_id}");
             ws_client.subscribe_candles(instrument_id, "1MIN").await?;
@@ -136,6 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             log::info!("");
 
             log::info!("- Subscribing to trades");
+
             if let Err(e) = ws_client.subscribe_trades(instrument_id).await {
                 log::error!("Failed to subscribe to trades: {e}");
             } else {
@@ -145,6 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             log::info!("- Subscribing to orderbook");
+
             if let Err(e) = ws_client.subscribe_orderbook(instrument_id).await {
                 log::error!("Failed to subscribe to orderbook: {e}");
             } else {
@@ -162,9 +164,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ticker = instrument_id.symbol.as_str().trim_end_matches("-PERP");
             let topic = format!("{ticker}/1MIN");
 
-            ws_client.send_command(HandlerCommand::RegisterBarType { topic, bar_type })?;
+            ws_client.bar_types().insert(topic, bar_type);
 
             log::info!("- Subscribing to 1-minute candles");
+
             if let Err(e) = ws_client.subscribe_candles(instrument_id, "1MIN").await {
                 log::error!("Failed to subscribe to candles: {e}");
             } else {
