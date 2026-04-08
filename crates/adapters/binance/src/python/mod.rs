@@ -20,11 +20,15 @@
     reason = "errors documented on underlying Rust methods"
 )]
 
+pub mod arrow;
 pub mod config;
 pub mod enums;
 pub mod factories;
+pub mod types;
 
 use nautilus_core::python::{to_pyruntime_err, to_pyvalue_err};
+use nautilus_model::data::ensure_rust_extractor_registered;
+use nautilus_serialization::ensure_custom_data_registered;
 use nautilus_system::{
     factories::{ClientConfig, DataClientFactory, ExecutionClientFactory},
     get_global_pyo3_registry,
@@ -32,7 +36,12 @@ use nautilus_system::{
 use pyo3::prelude::*;
 
 use crate::{
-    common::enums::{BinanceEnvironment, BinancePositionSide, BinanceProductType},
+    common::{
+        bar::BinanceBar,
+        consts::{BINANCE_NAUTILUS_FUTURES_BROKER_ID, BINANCE_NAUTILUS_SPOT_BROKER_ID},
+        encoder::decode_broker_id,
+        enums::{BinanceEnvironment, BinanceMarginType, BinancePositionSide, BinanceProductType},
+    },
     config::{BinanceDataClientConfig, BinanceExecClientConfig},
     factories::{BinanceDataClientFactory, BinanceExecutionClientFactory},
 };
@@ -89,6 +98,32 @@ fn extract_binance_exec_config(
     }
 }
 
+/// Decodes a Binance Spot encoded `clientOrderId` back to the original value.
+///
+/// Binance Spot orders placed through the Rust execution client have their
+/// `ClientOrderId` encoded with a broker ID prefix for Link and Trade
+/// attribution. This function reverses that encoding.
+///
+/// Strings without the broker prefix are returned unchanged.
+#[pyfunction]
+#[pyo3(name = "decode_binance_spot_client_order_id")]
+fn py_decode_binance_spot_client_order_id(encoded: &str) -> String {
+    decode_broker_id(encoded, BINANCE_NAUTILUS_SPOT_BROKER_ID)
+}
+
+/// Decodes a Binance Futures encoded `clientOrderId` back to the original value.
+///
+/// Binance Futures orders placed through the Rust execution client have their
+/// `ClientOrderId` encoded with a broker ID prefix for Link and Trade
+/// attribution. This function reverses that encoding.
+///
+/// Strings without the broker prefix are returned unchanged.
+#[pyfunction]
+#[pyo3(name = "decode_binance_futures_client_order_id")]
+fn py_decode_binance_futures_client_order_id(encoded: &str) -> String {
+    decode_broker_id(encoded, BINANCE_NAUTILUS_FUTURES_BROKER_ID)
+}
+
 /// Binance adapter Python module.
 ///
 /// Loaded as `nautilus_pyo3.binance`.
@@ -100,11 +135,31 @@ fn extract_binance_exec_config(
 pub fn binance(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BinanceProductType>()?;
     m.add_class::<BinanceEnvironment>()?;
+    m.add_class::<BinanceMarginType>()?;
     m.add_class::<BinancePositionSide>()?;
+    m.add_class::<BinanceBar>()?;
+    m.add_function(wrap_pyfunction!(arrow::get_binance_arrow_schema_map, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        arrow::py_binance_bar_to_arrow_record_batch_bytes,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        arrow::py_binance_bar_from_arrow_record_batch_bytes,
+        m
+    )?)?;
     m.add_class::<BinanceDataClientConfig>()?;
     m.add_class::<BinanceExecClientConfig>()?;
     m.add_class::<BinanceDataClientFactory>()?;
     m.add_class::<BinanceExecutionClientFactory>()?;
+    m.add_function(wrap_pyfunction!(py_decode_binance_spot_client_order_id, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_decode_binance_futures_client_order_id,
+        m
+    )?)?;
+
+    // Register BinanceBar for Arrow/JSON serialization and Python extraction
+    ensure_custom_data_registered::<BinanceBar>();
+    let _ = ensure_rust_extractor_registered::<BinanceBar>();
 
     let registry = get_global_pyo3_registry();
 

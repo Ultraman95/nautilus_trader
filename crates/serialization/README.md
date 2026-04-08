@@ -20,15 +20,13 @@ This enables efficient data storage, retrieval, and interoperability across diff
 - **Cap'n Proto serialization**: Zero-copy, schema-based serialization for efficient data interchange.
 - **SBE decode utilities**: Zero-copy cursor, shared decode errors, and generic var/group decoders for SBE parsers.
 
-## Platform
+## NautilusTrader
 
-[NautilusTrader](https://nautilustrader.io) is an open-source, high-performance, production-grade
-algorithmic trading platform, providing quantitative traders with the ability to backtest
-portfolios of automated trading strategies on historical data with an event-driven engine,
-and also deploy those same strategies live, with no code changes.
+[NautilusTrader](https://nautilustrader.io) is an open-source, production-grade, Rust-native
+engine for multi-asset, multi-venue trading systems.
 
-NautilusTrader's design, architecture, and implementation philosophy prioritizes software correctness and safety at the
-highest level, with the aim of supporting mission-critical, trading system backtesting and live deployment workloads.
+The system spans research, deterministic simulation, and live execution within a single
+event-driven architecture, providing research-to-live semantic parity.
 
 ## Feature flags
 
@@ -49,7 +47,7 @@ To build with Cap'n Proto serialization enabled:
 cargo build -p nautilus-serialization --features capnp
 ```
 
-The Cap'n Proto compiler is required. See the [Environment Setup](../../docs/developer_guide/environment_setup.md#capn-proto) guide for installation instructions. The required version is specified in the `capnp-version` file in the repository root.
+The Cap'n Proto compiler is required. See the [Environment Setup](../../docs/developer_guide/environment_setup.md#capn-proto) guide for installation instructions. The required version is specified in `tools.toml` in the repository root.
 
 ## Cap'n Proto schemas
 

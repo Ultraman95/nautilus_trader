@@ -32,8 +32,8 @@ use nautilus_common::{
     },
     runner::{
         SyncDataCommandSender, SyncTradingCommandSender, data_cmd_queue_is_empty,
-        drain_data_cmd_queue, drain_trading_cmd_queue, init_data_cmd_sender, init_exec_cmd_sender,
-        trading_cmd_queue_is_empty,
+        drain_data_cmd_queue, drain_trading_cmd_queue, replace_data_cmd_sender,
+        replace_exec_cmd_sender, trading_cmd_queue_is_empty,
     },
 };
 use nautilus_core::{UUID4, UnixNanos, datetime::unix_nanos_to_iso8601, formatting::Separable};
@@ -50,7 +50,7 @@ use nautilus_model::{
     types::{Currency, Money},
 };
 use nautilus_system::{config::NautilusKernelConfig, kernel::NautilusKernel};
-use nautilus_trading::strategy::Strategy;
+use nautilus_trading::{ExecutionAlgorithm, strategy::Strategy};
 use rust_decimal::Decimal;
 
 use crate::{
@@ -313,12 +313,14 @@ impl BacktestEngine {
     pub fn add_instrument(&mut self, instrument: &InstrumentAny) -> anyhow::Result<()> {
         let instrument_id = instrument.id();
         if let Some(exchange) = self.venues.get_mut(&instrument.id().venue) {
-            if matches!(instrument, InstrumentAny::CurrencyPair(_))
-                && exchange.borrow().account_type != AccountType::Margin
+            if matches!(
+                instrument,
+                InstrumentAny::CurrencyPair(_) | InstrumentAny::TokenizedAsset(_)
+            ) && exchange.borrow().account_type != AccountType::Margin
                 && exchange.borrow().base_currency.is_some()
             {
                 anyhow::bail!(
-                    "Cannot add a `CurrencyPair` instrument {instrument_id} for a venue with a single-currency CASH account"
+                    "Cannot add a multi-currency spot instrument {instrument_id} for a venue with a single-currency CASH account"
                 )
             }
             exchange.borrow_mut().add_instrument(instrument.clone())?;
@@ -408,24 +410,26 @@ impl BacktestEngine {
     ///
     /// # Errors
     ///
-    /// Returns an error if the strategy is already registered or the trader is running.
+    /// Returns an error if the strategy is already registered or the trader is in an invalid
+    /// state for strategy registration.
     pub fn add_strategy<T>(&mut self, strategy: T) -> anyhow::Result<()>
     where
         T: Strategy + Component + Debug + 'static,
     {
-        self.kernel.trader.add_strategy(strategy)
+        self.kernel.trader.borrow_mut().add_strategy(strategy)
     }
 
     /// Adds an actor to the backtest engine.
     ///
     /// # Errors
     ///
-    /// Returns an error if the actor is already registered or the trader is running.
+    /// Returns an error if the actor is already registered or the trader is in an invalid
+    /// state for actor registration.
     pub fn add_actor<T>(&mut self, actor: T) -> anyhow::Result<()>
     where
         T: DataActor + Component + Debug + 'static,
     {
-        self.kernel.trader.add_actor(actor)
+        self.kernel.trader.borrow_mut().add_actor(actor)
     }
 
     /// Adds an execution algorithm to the backtest engine.
@@ -435,9 +439,12 @@ impl BacktestEngine {
     /// Returns an error if the algorithm is already registered or the trader is running.
     pub fn add_exec_algorithm<T>(&mut self, exec_algorithm: T) -> anyhow::Result<()>
     where
-        T: DataActor + Component + Debug + 'static,
+        T: ExecutionAlgorithm + Component + Debug + 'static,
     {
-        self.kernel.trader.add_exec_algorithm(exec_algorithm)
+        self.kernel
+            .trader
+            .borrow_mut()
+            .add_exec_algorithm(exec_algorithm)
     }
 
     /// Run a backtest.
@@ -663,7 +670,7 @@ impl BacktestEngine {
     pub fn reset(&mut self) {
         log::debug!("Resetting");
 
-        if self.kernel.trader.is_running() {
+        if self.kernel.trader.borrow().is_running() {
             self.end();
         }
 
@@ -678,7 +685,7 @@ impl BacktestEngine {
         self.kernel.risk_engine.borrow_mut().reset();
 
         // Reset trader
-        if let Err(e) = self.kernel.trader.reset() {
+        if let Err(e) = self.kernel.trader.borrow_mut().reset() {
             log::error!("Error resetting trader: {e:?}");
         }
 
@@ -737,7 +744,7 @@ impl BacktestEngine {
     ///
     /// Returns an error if any strategy fails to dispose.
     pub fn clear_strategies(&mut self) -> anyhow::Result<()> {
-        self.kernel.trader.clear_strategies()
+        self.kernel.trader.borrow_mut().clear_strategies()
     }
 
     /// Clear all execution algorithms from the engine's internal trader.
@@ -746,7 +753,7 @@ impl BacktestEngine {
     ///
     /// Returns an error if any execution algorithm fails to dispose.
     pub fn clear_exec_algorithms(&mut self) -> anyhow::Result<()> {
-        self.kernel.trader.clear_exec_algorithms()
+        self.kernel.trader.borrow_mut().clear_exec_algorithms()
     }
 
     /// Dispose of the backtest engine, releasing all resources.
@@ -775,6 +782,7 @@ impl BacktestEngine {
 
         let analyzer = self.build_analyzer(&cache, &positions);
         let mut stats_pnls = AHashMap::new();
+
         for currency in analyzer.currencies() {
             if let Ok(pnls) = analyzer.get_performance_stats_pnls(Some(currency), None) {
                 stats_pnls.insert(currency.code.to_string(), pnls);
@@ -835,9 +843,11 @@ impl BacktestEngine {
         for venue in self.venues.keys() {
             if let Some(account) = cache.account_for_venue(venue) {
                 let account_ref: &dyn Account = match account {
-                    AccountAny::Cash(cash) => cash,
                     AccountAny::Margin(margin) => margin,
+                    AccountAny::Cash(cash) => cash,
+                    AccountAny::Betting(betting) => betting,
                 };
+
                 for (currency, money) in account_ref.starting_balances() {
                     analyzer
                         .account_balances_starting
@@ -845,6 +855,7 @@ impl BacktestEngine {
                         .and_modify(|existing| *existing = *existing + money)
                         .or_insert(money);
                 }
+
                 for (currency, money) in account_ref.balances_total() {
                     analyzer
                         .account_balances
@@ -1009,7 +1020,7 @@ impl BacktestEngine {
 
     fn collect_all_clocks(&self) -> Vec<Rc<RefCell<dyn Clock>>> {
         let mut clocks = vec![self.kernel.clock.clone()];
-        clocks.extend(self.kernel.trader.get_component_clocks());
+        clocks.extend(self.kernel.trader.borrow().get_component_clocks());
         clocks
     }
 
@@ -1095,8 +1106,8 @@ impl BacktestEngine {
     }
 
     fn init_command_senders() {
-        init_data_cmd_sender(Arc::new(SyncDataCommandSender));
-        init_exec_cmd_sender(Arc::new(SyncTradingCommandSender));
+        replace_data_cmd_sender(Arc::new(SyncDataCommandSender));
+        replace_exec_cmd_sender(Arc::new(SyncTradingCommandSender));
     }
 
     fn advance_clock_on_accumulator(
@@ -1140,9 +1151,11 @@ impl BacktestEngine {
             if let Some(account) = cache.account_for_venue(&ex.id) {
                 log::info!("Balances starting:");
                 let account_ref: &dyn Account = match account {
-                    AccountAny::Cash(cash) => cash,
                     AccountAny::Margin(margin) => margin,
+                    AccountAny::Cash(cash) => cash,
+                    AccountAny::Betting(betting) => betting,
                 };
+
                 for balance in account_ref.starting_balances().values() {
                     log::info!("  {balance}");
                 }
@@ -1314,6 +1327,7 @@ fn log_portfolio_performance(analyzer: &PortfolioAnalyzer) {
 
     log::info!(" Returns Statistics");
     log_info!("-----------------------------------------------------------------", color = LogColor::Cyan);
+
     for line in &analyzer.get_stats_returns_formatted() {
         log::info!("{line}");
     }
@@ -1321,6 +1335,7 @@ fn log_portfolio_performance(analyzer: &PortfolioAnalyzer) {
 
     log::info!(" General Statistics");
     log_info!("-----------------------------------------------------------------", color = LogColor::Cyan);
+
     for line in &analyzer.get_stats_general_formatted() {
         log::info!("{line}");
     }

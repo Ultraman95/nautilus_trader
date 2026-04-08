@@ -55,7 +55,7 @@ pub const BINANCE_OPTIONS_HTTP_URL: &str = "https://eapi.binance.com";
 pub const BINANCE_SPOT_TESTNET_HTTP_URL: &str = "https://testnet.binance.vision";
 
 /// Binance USD-M Futures API base URL (testnet).
-pub const BINANCE_FUTURES_USD_TESTNET_HTTP_URL: &str = "https://testnet.binancefuture.com";
+pub const BINANCE_FUTURES_USD_TESTNET_HTTP_URL: &str = "https://demo-fapi.binance.com";
 
 /// Binance COIN-M Futures API base URL (testnet).
 pub const BINANCE_FUTURES_COIN_TESTNET_HTTP_URL: &str = "https://testnet.binancefuture.com";
@@ -86,7 +86,7 @@ pub const BINANCE_SPOT_SBE_WS_URL: &str = "wss://stream-sbe.binance.com/ws";
 
 /// Binance Spot SBE WebSocket API URL (mainnet).
 pub const BINANCE_SPOT_SBE_WS_API_URL: &str =
-    "wss://ws-api.binance.com:443/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=2";
+    "wss://ws-api.binance.com:443/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=3";
 
 /// Binance USD-M Futures WebSocket Trading API URL (mainnet).
 pub const BINANCE_FUTURES_USD_WS_API_URL: &str = "wss://ws-fapi.binance.com/ws-fapi/v1";
@@ -96,11 +96,11 @@ pub const BINANCE_FUTURES_USD_WS_API_TESTNET_URL: &str =
     "wss://testnet.binancefuture.com/ws-fapi/v1";
 
 /// Binance Spot SBE WebSocket API URL (testnet).
-pub const BINANCE_SPOT_SBE_WS_API_TESTNET_URL: &str = "wss://ws-api.testnet.binance.vision/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=2";
+pub const BINANCE_SPOT_SBE_WS_API_TESTNET_URL: &str = "wss://ws-api.testnet.binance.vision/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=3";
 
 /// Binance Spot SBE WebSocket API URL (demo).
 pub const BINANCE_SPOT_SBE_WS_API_DEMO_URL: &str =
-    "wss://demo-ws-api.binance.com/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=2";
+    "wss://demo-ws-api.binance.com/ws-api/v3?responseFormat=sbe&sbeSchemaId=3&sbeSchemaVersion=3";
 
 /// Binance Spot WebSocket base URL (testnet).
 pub const BINANCE_SPOT_TESTNET_WS_URL: &str = "wss://stream.testnet.binance.vision/ws";
@@ -109,10 +109,13 @@ pub const BINANCE_SPOT_TESTNET_WS_URL: &str = "wss://stream.testnet.binance.visi
 pub const BINANCE_SPOT_DEMO_WS_URL: &str = "wss://demo-stream.binance.com/ws";
 
 /// Binance USD-M Futures WebSocket base URL (testnet).
-pub const BINANCE_FUTURES_USD_TESTNET_WS_URL: &str = "wss://stream.binancefuture.com/ws";
+pub const BINANCE_FUTURES_USD_TESTNET_WS_URL: &str = "wss://fstream.binancefuture.com/ws";
 
 /// Binance COIN-M Futures WebSocket base URL (testnet).
 pub const BINANCE_FUTURES_COIN_TESTNET_WS_URL: &str = "wss://dstream.binancefuture.com/ws";
+
+/// HTTP header name for the Binance API key.
+pub const BINANCE_API_KEY_HEADER: &str = "X-MBX-APIKEY";
 
 /// Binance Spot API version path.
 pub const BINANCE_SPOT_API_PATH: &str = "/api/v3";

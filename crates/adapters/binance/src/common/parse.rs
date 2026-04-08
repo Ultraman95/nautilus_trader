@@ -43,7 +43,7 @@ use serde_json::Value;
 
 use crate::{
     common::{
-        consts::BINANCE_NAUTILUS_SPOT_BROKER_ID,
+        consts::BINANCE,
         encoder::decode_broker_id,
         enums::{BinanceContractStatus, BinanceKlineInterval, BinanceTradingStatus},
     },
@@ -59,8 +59,6 @@ use crate::{
         },
     },
 };
-
-const BINANCE_VENUE: &str = "BINANCE";
 const CONTRACT_TYPE_PERPETUAL: &str = "PERPETUAL";
 
 /// Returns a currency from the internal map or creates a new crypto currency.
@@ -136,7 +134,7 @@ pub fn parse_usdm_instrument(
 
     let instrument_id = InstrumentId::new(
         Symbol::from_str_unchecked(format!("{}-PERP", symbol.symbol)),
-        Venue::new(BINANCE_VENUE),
+        Venue::new(BINANCE),
     );
     let raw_symbol = Symbol::new(symbol.symbol.as_str());
 
@@ -235,7 +233,7 @@ pub fn parse_coinm_instrument(
 
     let instrument_id = InstrumentId::new(
         Symbol::from_str_unchecked(format!("{}-PERP", symbol.symbol)),
-        Venue::new(BINANCE_VENUE),
+        Venue::new(BINANCE),
     );
     let raw_symbol = Symbol::new(symbol.symbol.as_str());
 
@@ -317,6 +315,7 @@ fn sbe_mantissa_precision(mantissa: i64, exponent: i8) -> u8 {
     }
     let mut m = mantissa.abs();
     let mut trailing_zeros: i8 = 0;
+
     while m > 0 && m % 10 == 0 {
         m /= 10;
         trailing_zeros += 1;
@@ -412,7 +411,7 @@ pub fn parse_spot_instrument_sbe(
 
     let instrument_id = InstrumentId::new(
         Symbol::from_str_unchecked(&symbol.symbol),
-        Venue::new(BINANCE_VENUE),
+        Venue::new(BINANCE),
     );
     let raw_symbol = Symbol::new(&symbol.symbol);
 
@@ -581,6 +580,7 @@ pub fn parse_order_status_report_sbe(
     order: &BinanceOrderResponse,
     account_id: AccountId,
     instrument: &InstrumentAny,
+    broker_id: &str,
     ts_init: UnixNanos,
 ) -> anyhow::Result<OrderStatusReport> {
     let instrument_id = instrument.id();
@@ -675,7 +675,7 @@ pub fn parse_order_status_report_sbe(
         instrument_id,
         Some(ClientOrderId::new(decode_broker_id(
             &order.client_order_id,
-            BINANCE_NAUTILUS_SPOT_BROKER_ID,
+            broker_id,
         ))),
         VenueOrderId::new(order.order_id.to_string()),
         order_side,
@@ -727,6 +727,7 @@ pub fn parse_new_order_response_sbe(
     response: &BinanceNewOrderResponse,
     account_id: AccountId,
     instrument: &InstrumentAny,
+    broker_id: &str,
     ts_init: UnixNanos,
 ) -> anyhow::Result<OrderStatusReport> {
     let instrument_id = instrument.id();
@@ -816,7 +817,7 @@ pub fn parse_new_order_response_sbe(
         instrument_id,
         Some(ClientOrderId::new(decode_broker_id(
             &response.client_order_id,
-            BINANCE_NAUTILUS_SPOT_BROKER_ID,
+            broker_id,
         ))),
         VenueOrderId::new(response.order_id.to_string()),
         order_side,
@@ -957,7 +958,7 @@ pub fn parse_klines_to_bars(
             Decimal::from_i128_with_scale(volume_mantissa, (-klines.qty_exponent as i32) as u32);
         let volume = Quantity::new(volume_dec.to_f64().unwrap_or(0.0), size_precision);
 
-        let ts_event = UnixNanos::from_millis(kline.open_time as u64);
+        let ts_event = UnixNanos::from_micros(kline.open_time as u64);
 
         let bar = Bar::new(bar_type, open, high, low, close, volume, ts_event, ts_init);
         bars.push(bar);
@@ -1023,7 +1024,10 @@ mod tests {
     use ustr::Ustr;
 
     use super::*;
-    use crate::common::enums::{BinanceContractStatus, BinanceTradingStatus};
+    use crate::common::{
+        consts::BINANCE_NAUTILUS_SPOT_BROKER_ID,
+        enums::{BinanceContractStatus, BinanceTradingStatus},
+    };
 
     fn sample_usdm_symbol() -> BinanceFuturesUsdSymbol {
         BinanceFuturesUsdSymbol {
@@ -1331,9 +1335,14 @@ mod tests {
         };
         let ts_init = UnixNanos::from(1_700_000_001_000_000_000u64);
 
-        let report =
-            parse_order_status_report_sbe(&order, sample_account_id(), &instrument, ts_init)
-                .unwrap();
+        let report = parse_order_status_report_sbe(
+            &order,
+            sample_account_id(),
+            &instrument,
+            BINANCE_NAUTILUS_SPOT_BROKER_ID,
+            ts_init,
+        )
+        .unwrap();
 
         assert_eq!(report.account_id, sample_account_id());
         assert_eq!(report.instrument_id, instrument.id());
@@ -1389,9 +1398,14 @@ mod tests {
         };
         let ts_init = UnixNanos::from(1_700_000_001_000_000_000u64);
 
-        let report =
-            parse_new_order_response_sbe(&response, sample_account_id(), &instrument, ts_init)
-                .unwrap();
+        let report = parse_new_order_response_sbe(
+            &response,
+            sample_account_id(),
+            &instrument,
+            BINANCE_NAUTILUS_SPOT_BROKER_ID,
+            ts_init,
+        )
+        .unwrap();
 
         assert_eq!(report.account_id, sample_account_id());
         assert_eq!(report.instrument_id, instrument.id());
@@ -1484,13 +1498,13 @@ mod tests {
             price_exponent: -2,
             qty_exponent: -4,
             klines: vec![crate::spot::http::models::BinanceKline {
-                open_time: 1_700_000_000_000,
+                open_time: 1_700_000_000_000_000,
                 open_price: 12_000,
                 high_price: 12_500,
                 low_price: 11_900,
                 close_price: 12_345,
                 volume: 1_234_500_i128.to_le_bytes(),
-                close_time: 1_700_000_059_999,
+                close_time: 1_700_000_059_999_000,
                 quote_volume: 0_i128.to_le_bytes(),
                 num_trades: 100,
                 taker_buy_base_volume: 0_i128.to_le_bytes(),

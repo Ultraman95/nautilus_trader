@@ -73,7 +73,7 @@ pub(super) enum AssetContextDataType {
 )]
 #[cfg_attr(
     feature = "python",
-    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.hyperliquid")
+    pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.hyperliquid")
 )]
 pub struct HyperliquidWebSocketClient {
     url: String,
@@ -230,6 +230,7 @@ impl HyperliquidWebSocketClient {
                     "Resubscribing to {} active subscriptions after reconnection",
                     topics.len()
                 );
+
                 for topic in topics {
                     match subscription_from_topic(&topic) {
                         Ok(subscription) => {
@@ -247,6 +248,7 @@ impl HyperliquidWebSocketClient {
                     }
                 }
             };
+
             loop {
                 match handler.next().await {
                     Some(NautilusWsMessage::Reconnected) => {
@@ -283,6 +285,18 @@ impl HyperliquidWebSocketClient {
 
     pub fn set_task_handle(&mut self, handle: tokio::task::JoinHandle<()>) {
         self.task_handle = Some(handle);
+    }
+
+    /// Force-close fallback for the sync `stop()` path.
+    /// Prefer `disconnect()` for graceful shutdown.
+    pub(crate) fn abort(&mut self) {
+        self.signal.store(true, Ordering::Relaxed);
+        self.connection_mode
+            .store(Arc::new(AtomicU8::new(ConnectionMode::Closed as u8)));
+
+        if let Some(handle) = self.task_handle.take() {
+            handle.abort();
+        }
     }
 
     /// Disconnects the WebSocket connection.
@@ -340,6 +354,7 @@ impl HyperliquidWebSocketClient {
     /// - Spot uses @{pair_index} format (e.g., "@107") or slash format for PURR
     pub fn cache_instruments(&mut self, instruments: Vec<InstrumentAny>) {
         let mut map = AHashMap::new();
+
         for inst in instruments {
             let coin = inst.raw_symbol().inner();
             map.insert(coin, inst);
@@ -967,11 +982,11 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::common::enums::HyperliquidBarInterval;
+    use crate::{common::enums::HyperliquidBarInterval, websocket::handler::subscription_to_key};
 
     /// Generates a unique topic key for a subscription request.
     fn subscription_topic(sub: &SubscriptionRequest) -> String {
-        crate::websocket::handler::subscription_to_key(sub)
+        subscription_to_key(sub)
     }
 
     #[rstest]

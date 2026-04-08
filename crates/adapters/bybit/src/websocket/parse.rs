@@ -26,7 +26,7 @@ use nautilus_model::{
         option_chain::OptionGreeks,
     },
     enums::{
-        AccountType, AggressorSide, BookAction, LiquiditySide, OrderSide, OrderStatus, OrderType,
+        AccountType, AggressorSide, BookAction, LiquiditySide, OrderSide, OrderStatus,
         PositionSideSpecified, RecordFlag, TimeInForce, TriggerType,
     },
     events::account::state::AccountState,
@@ -48,13 +48,10 @@ use super::{
 };
 use crate::common::{
     consts::BYBIT_VENUE,
-    enums::{
-        BybitOrderStatus, BybitOrderType, BybitStopOrderType, BybitTimeInForce,
-        BybitTriggerDirection,
-    },
+    enums::{BybitOrderStatus, BybitPositionSide, BybitTimeInForce},
     parse::{
-        get_currency, parse_book_level, parse_millis_timestamp, parse_price_with_precision,
-        parse_quantity_with_precision,
+        get_currency, parse_book_level, parse_bybit_order_type, parse_millis_timestamp,
+        parse_price_with_precision, parse_quantity_with_precision,
     },
 };
 
@@ -296,6 +293,7 @@ pub fn parse_orderbook_deltas(
     for level in &depth.b {
         push_level(level, OrderSide::Buy)?;
     }
+
     for level in &depth.a {
         push_level(level, OrderSide::Sell)?;
     }
@@ -721,92 +719,16 @@ pub fn parse_ws_order_status_report(
     account_id: AccountId,
     ts_init: UnixNanos,
 ) -> anyhow::Result<OrderStatusReport> {
-    use crate::common::enums::BybitOrderSide;
-
     let instrument_id = instrument.id();
     let venue_order_id = VenueOrderId::new(order.order_id.as_str());
     let order_side: OrderSide = order.side.into();
 
-    // Bybit represents conditional orders using orderType + stopOrderType + triggerDirection + side
-    let order_type: OrderType = match (
+    let order_type = parse_bybit_order_type(
         order.order_type,
         order.stop_order_type,
         order.trigger_direction,
         order.side,
-    ) {
-        (BybitOrderType::Market, BybitStopOrderType::None | BybitStopOrderType::Unknown, _, _) => {
-            OrderType::Market
-        }
-        (BybitOrderType::Limit, BybitStopOrderType::None | BybitStopOrderType::Unknown, _, _) => {
-            OrderType::Limit
-        }
-
-        (
-            BybitOrderType::Market,
-            BybitStopOrderType::Stop,
-            BybitTriggerDirection::RisesTo,
-            BybitOrderSide::Buy,
-        ) => OrderType::StopMarket,
-        (
-            BybitOrderType::Market,
-            BybitStopOrderType::Stop,
-            BybitTriggerDirection::FallsTo,
-            BybitOrderSide::Buy,
-        ) => OrderType::MarketIfTouched,
-
-        (
-            BybitOrderType::Market,
-            BybitStopOrderType::Stop,
-            BybitTriggerDirection::FallsTo,
-            BybitOrderSide::Sell,
-        ) => OrderType::StopMarket,
-        (
-            BybitOrderType::Market,
-            BybitStopOrderType::Stop,
-            BybitTriggerDirection::RisesTo,
-            BybitOrderSide::Sell,
-        ) => OrderType::MarketIfTouched,
-
-        (
-            BybitOrderType::Limit,
-            BybitStopOrderType::Stop,
-            BybitTriggerDirection::RisesTo,
-            BybitOrderSide::Buy,
-        ) => OrderType::StopLimit,
-        (
-            BybitOrderType::Limit,
-            BybitStopOrderType::Stop,
-            BybitTriggerDirection::FallsTo,
-            BybitOrderSide::Buy,
-        ) => OrderType::LimitIfTouched,
-
-        (
-            BybitOrderType::Limit,
-            BybitStopOrderType::Stop,
-            BybitTriggerDirection::FallsTo,
-            BybitOrderSide::Sell,
-        ) => OrderType::StopLimit,
-        (
-            BybitOrderType::Limit,
-            BybitStopOrderType::Stop,
-            BybitTriggerDirection::RisesTo,
-            BybitOrderSide::Sell,
-        ) => OrderType::LimitIfTouched,
-
-        // triggerDirection=None means regular order with TP/SL attached, not a standalone conditional order
-        (BybitOrderType::Market, BybitStopOrderType::Stop, BybitTriggerDirection::None, _) => {
-            OrderType::Market
-        }
-        (BybitOrderType::Limit, BybitStopOrderType::Stop, BybitTriggerDirection::None, _) => {
-            OrderType::Limit
-        }
-
-        // TP/SL stopOrderTypes are attached to positions, not standalone conditional orders
-        (BybitOrderType::Market, _, _, _) => OrderType::Market,
-        (BybitOrderType::Limit, _, _, _) => OrderType::Limit,
-
-        (BybitOrderType::Unknown, _, _, _) => OrderType::Limit,
-    };
+    );
 
     let time_in_force: TimeInForce = match order.time_in_force {
         BybitTimeInForce::Gtc => TimeInForce::Gtc,
@@ -1007,13 +929,10 @@ pub fn parse_ws_position_status_report(
         "position.size",
     )?;
 
-    // Derive position side from the side field
-    let position_side = if position.side.eq_ignore_ascii_case("buy") {
-        PositionSideSpecified::Long
-    } else if position.side.eq_ignore_ascii_case("sell") {
-        PositionSideSpecified::Short
-    } else {
-        PositionSideSpecified::Flat
+    let position_side = match position.side {
+        BybitPositionSide::Buy => PositionSideSpecified::Long,
+        BybitPositionSide::Sell => PositionSideSpecified::Short,
+        BybitPositionSide::Flat => PositionSideSpecified::Flat,
     };
 
     let ts_last = parse_millis_timestamp(&position.updated_time, "position.updatedTime")?;
@@ -1097,7 +1016,9 @@ pub fn parse_ws_account_state(
 mod tests {
     use nautilus_model::{
         data::BarSpecification,
-        enums::{AggregationSource, BarAggregation, PositionSide, PriceType},
+        enums::{
+            AggregationSource, BarAggregation, OrderType, PositionSide, PriceType, TriggerType,
+        },
     };
     use rstest::rstest;
     use rust_decimal_macros::dec;
@@ -1147,7 +1068,7 @@ mod tests {
         let json = load_test_json("http_get_instruments_option.json");
         let response: BybitInstrumentOptionResponse = serde_json::from_str(&json).unwrap();
         let instrument = &response.result.list[0];
-        parse_option_instrument(instrument, TS, TS).unwrap()
+        parse_option_instrument(instrument, None, TS, TS).unwrap()
     }
 
     #[rstest]
@@ -1784,5 +1705,41 @@ mod tests {
         // Locked is capped at total to prevent negative free balance
         assert!((usdt_balance.locked.as_f64() - 100.0).abs() < 1e-6);
         assert_eq!(usdt_balance.free.as_f64(), 0.0);
+    }
+
+    #[rstest]
+    fn parse_ws_order_take_profit_maps_to_market_if_touched() {
+        let instrument = linear_instrument();
+        let json = load_test_json("ws_account_order_take_profit.json");
+        let msg: crate::websocket::messages::BybitWsAccountOrderMsg =
+            serde_json::from_str(&json).unwrap();
+        let order = &msg.data[0];
+        let account_id = AccountId::new("BYBIT-001");
+
+        let report = parse_ws_order_status_report(order, &instrument, account_id, TS).unwrap();
+
+        assert_eq!(report.order_type, OrderType::MarketIfTouched);
+        assert_eq!(report.order_side, OrderSide::Sell);
+        assert_eq!(report.trigger_price, Some(instrument.make_price(55000.00)));
+        assert_eq!(report.trigger_type, Some(TriggerType::LastPrice));
+        assert!(report.reduce_only);
+    }
+
+    #[rstest]
+    fn parse_ws_order_stop_loss_maps_to_stop_market() {
+        let instrument = linear_instrument();
+        let json = load_test_json("ws_account_order_stop_loss.json");
+        let msg: crate::websocket::messages::BybitWsAccountOrderMsg =
+            serde_json::from_str(&json).unwrap();
+        let order = &msg.data[0];
+        let account_id = AccountId::new("BYBIT-001");
+
+        let report = parse_ws_order_status_report(order, &instrument, account_id, TS).unwrap();
+
+        assert_eq!(report.order_type, OrderType::StopMarket);
+        assert_eq!(report.order_side, OrderSide::Sell);
+        assert_eq!(report.trigger_price, Some(instrument.make_price(48000.00)));
+        assert_eq!(report.trigger_type, Some(TriggerType::LastPrice));
+        assert!(report.reduce_only);
     }
 }

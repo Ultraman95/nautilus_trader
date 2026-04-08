@@ -386,12 +386,12 @@ fn create_test_config(addr: SocketAddr) -> BybitDataClientConfig {
         base_url_ws_private: None,
         http_proxy_url: None,
         ws_proxy_url: None,
-        http_timeout_secs: Some(10),
-        max_retries: Some(1),
-        retry_delay_initial_ms: Some(100),
-        retry_delay_max_ms: Some(1000),
-        heartbeat_interval_secs: Some(5),
-        recv_window_ms: Some(5000),
+        http_timeout_secs: 10,
+        max_retries: 1,
+        retry_delay_initial_ms: 100,
+        retry_delay_max_ms: 1000,
+        heartbeat_interval_secs: 5,
+        recv_window_ms: 5000,
         update_instruments_interval_mins: None,
         instrument_status_poll_secs: None,
     }
@@ -438,6 +438,7 @@ async fn test_data_client_subscribe_trades() {
         Duration::from_secs(5),
     )
     .await;
+
     while rx.try_recv().is_ok() {}
 
     let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
@@ -663,6 +664,7 @@ async fn test_data_client_request_book_snapshot() {
 
     // Drain instrument events from connect
     tokio::time::sleep(Duration::from_millis(500)).await;
+
     while rx.try_recv().is_ok() {}
 
     let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
@@ -702,6 +704,7 @@ async fn test_data_client_request_funding_rates() {
 
     // Drain instrument events from connect
     tokio::time::sleep(Duration::from_millis(500)).await;
+
     while rx.try_recv().is_ok() {}
 
     let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");
@@ -815,6 +818,7 @@ async fn test_data_client_request_instruments() {
 
     // Drain instrument events from connect
     tokio::time::sleep(Duration::from_millis(500)).await;
+
     while rx.try_recv().is_ok() {}
 
     let request = RequestInstruments::new(
@@ -854,6 +858,7 @@ async fn test_data_client_request_instrument() {
 
     // Drain instrument events from connect
     tokio::time::sleep(Duration::from_millis(500)).await;
+
     while rx.try_recv().is_ok() {}
 
     let instrument_id = InstrumentId::from("BTCUSDT-LINEAR.BYBIT");

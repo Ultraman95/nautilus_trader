@@ -48,7 +48,7 @@ use nautilus_common::{
         },
     },
     msgbus::{
-        self, MessagingSwitchboard, TypedIntoHandler, get_message_bus,
+        self, MessagingSwitchboard, ShareableMessageHandler, TypedIntoHandler, get_message_bus,
         switchboard::{self},
     },
     runner::try_get_trading_cmd_sender,
@@ -61,8 +61,8 @@ use nautilus_core::{
 use nautilus_model::{
     enums::{ContingencyType, OmsType, PositionSide},
     events::{
-        OrderDenied, OrderEvent, OrderEventAny, OrderFilled, PositionChanged, PositionClosed,
-        PositionEvent, PositionOpened,
+        OrderDenied, OrderEvent, OrderEventAny, OrderFilled, OrderInitialized, PositionChanged,
+        PositionClosed, PositionEvent, PositionOpened,
     },
     identifiers::{
         ClientId, ClientOrderId, InstrumentId, PositionId, StrategyId, Venue, VenueOrderId,
@@ -79,8 +79,8 @@ use rust_decimal::Decimal;
 use crate::{
     client::ExecutionClientAdapter,
     reconciliation::{
-        check_position_reconciliation, reconcile_fill_report as reconcile_fill,
-        reconcile_order_report,
+        check_position_reconciliation, generate_external_order_status_events,
+        generate_reconciliation_order_events, reconcile_fill_report as reconcile_fill,
     },
 };
 
@@ -189,6 +189,31 @@ impl ExecutionEngine {
                 }
             }),
         );
+    }
+
+    /// Subscribes to instrument updates for a venue via the message bus.
+    ///
+    /// When instruments are published by the `DataEngine`, the handler routes
+    /// them to the execution client registered for that venue.
+    pub fn subscribe_venue_instruments(engine: &Rc<RefCell<Self>>, venue: Venue) {
+        let weak = WeakCell::from(Rc::downgrade(engine));
+        let pattern = switchboard::get_instruments_pattern(venue);
+
+        let handler = ShareableMessageHandler::from_typed(move |instrument: &InstrumentAny| {
+            if let Some(rc) = weak.upgrade() {
+                let venue = instrument.id().venue;
+                let client_id = rc.borrow().routing_map.get(&venue).copied();
+                if let Some(client_id) = client_id {
+                    let mut engine = rc.borrow_mut();
+                    if let Some(adapter) = engine.get_client_adapter_mut(&client_id) {
+                        adapter.on_instrument(instrument.clone());
+                    }
+                }
+            }
+        });
+
+        msgbus::subscribe_any(pattern, handler, None);
+        log::info!("Subscribed to instrument updates for venue {venue}");
     }
 
     #[must_use]
@@ -856,6 +881,10 @@ impl ExecutionEngine {
     /// Handles order status transitions by generating appropriate events when the venue
     /// reports a different status than our local state. Supports all order states including
     /// fills with inferred fill generation when instruments are available.
+    ///
+    /// When the order is not found in cache, creates an external order from the report.
+    /// This handles exchange-generated orders (liquidation, ADL, settlement) that were
+    /// not submitted locally.
     pub fn reconcile_order_status_report(&mut self, report: &OrderStatusReport) {
         let cache = self.cache.borrow();
 
@@ -868,23 +897,135 @@ impl ExecutionEngine {
                     .and_then(|cid| cache.order(cid).cloned())
             });
 
-        let Some(order) = order else {
-            log::debug!(
-                "Order not found in cache for reconciliation: client_order_id={:?}, venue_order_id={}",
-                report.client_order_id,
-                report.venue_order_id
-            );
-            return;
-        };
-
         let instrument = cache.instrument(&report.instrument_id).cloned();
 
         drop(cache);
 
+        if let Some(order) = order {
+            let ts_now = self.clock.borrow().timestamp_ns();
+            let events =
+                generate_reconciliation_order_events(&order, report, instrument.as_ref(), ts_now);
+
+            for event in &events {
+                self.handle_event(event);
+            }
+        } else {
+            self.create_external_order(report, instrument.as_ref());
+        }
+    }
+
+    fn create_external_order(
+        &mut self,
+        report: &OrderStatusReport,
+        instrument: Option<&InstrumentAny>,
+    ) {
+        let Some(instrument) = instrument else {
+            log::warn!(
+                "Cannot create external order for venue_order_id={}: instrument {} not found",
+                report.venue_order_id,
+                report.instrument_id
+            );
+            return;
+        };
+
+        let strategy_id = self
+            .external_order_claims
+            .get(&report.instrument_id)
+            .copied()
+            .unwrap_or_else(|| StrategyId::from("EXTERNAL"));
+
+        let client_order_id = report
+            .client_order_id
+            .unwrap_or_else(|| ClientOrderId::from(report.venue_order_id.as_str()));
+
+        let trader_id = get_message_bus().borrow().trader_id;
         let ts_now = self.clock.borrow().timestamp_ns();
 
-        if let Some(event) = reconcile_order_report(&order, report, instrument.as_ref(), ts_now) {
-            self.handle_event(&event);
+        let initialized = OrderInitialized::new(
+            trader_id,
+            strategy_id,
+            report.instrument_id,
+            client_order_id,
+            report.order_side,
+            report.order_type,
+            report.quantity,
+            report.time_in_force,
+            report.post_only,
+            report.reduce_only,
+            false, // quote_quantity
+            true,  // reconciliation
+            UUID4::new(),
+            ts_now,
+            ts_now,
+            report.price,
+            report.trigger_price,
+            report.trigger_type,
+            report.limit_offset,
+            report.trailing_offset,
+            Some(report.trailing_offset_type),
+            report.expire_time,
+            report.display_qty,
+            None, // emulation_trigger
+            None, // trigger_instrument_id
+            Some(report.contingency_type),
+            report.order_list_id,
+            report.linked_order_ids.clone(),
+            report.parent_order_id,
+            None, // exec_algorithm_id
+            None, // exec_algorithm_params
+            None, // exec_spawn_id
+            None, // tags
+        );
+
+        let order = match OrderAny::from_events(vec![OrderEventAny::Initialized(initialized)]) {
+            Ok(order) => order,
+            Err(e) => {
+                log::error!("Failed to create external order from report: {e}");
+                return;
+            }
+        };
+
+        {
+            let mut cache = self.cache.borrow_mut();
+            if let Err(e) = cache.add_order(order.clone(), None, None, false) {
+                log::error!("Failed to add external order to cache: {e}");
+                return;
+            }
+
+            if let Err(e) =
+                cache.add_venue_order_id(&client_order_id, &report.venue_order_id, false)
+            {
+                log::warn!("Failed to add venue order ID index: {e}");
+            }
+        }
+
+        log::info!(
+            "Created external order {} ({}) for {} [{}]",
+            client_order_id,
+            report.venue_order_id,
+            report.instrument_id,
+            report.order_status
+        );
+
+        self.register_external_order(
+            client_order_id,
+            report.venue_order_id,
+            report.instrument_id,
+            strategy_id,
+            ts_now,
+        );
+
+        let ts_now = self.clock.borrow().timestamp_ns();
+        let events = generate_external_order_status_events(
+            &order,
+            report,
+            &report.account_id,
+            instrument,
+            ts_now,
+        );
+
+        for event in &events {
+            self.handle_event(event);
         }
     }
 
@@ -1022,7 +1163,8 @@ impl ExecutionEngine {
     /// Reconciles an execution mass status report.
     ///
     /// Processes all order reports, fill reports, and position reports contained
-    /// in the mass status.
+    /// in the mass status. Orders created as external during this pass already receive
+    /// inferred fills, so their companion fill reports are skipped to avoid double-fills.
     pub fn reconcile_execution_mass_status(&mut self, mass_status: &ExecutionMassStatus) {
         log::info!(
             "Reconciling mass status for client={}, account={}, venue={}",
@@ -1031,12 +1173,39 @@ impl ExecutionEngine {
             mass_status.venue
         );
 
+        let mut external_venue_ids = AHashSet::new();
+
         for order_report in mass_status.order_reports().values() {
+            let existed = {
+                let cache = self.cache.borrow();
+                order_report
+                    .client_order_id
+                    .and_then(|id| cache.order(&id).cloned())
+                    .or_else(|| {
+                        cache
+                            .client_order_id(&order_report.venue_order_id)
+                            .and_then(|cid| cache.order(cid).cloned())
+                    })
+                    .is_some()
+            };
+
             self.reconcile_order_status_report(order_report);
+
+            if !existed {
+                external_venue_ids.insert(order_report.venue_order_id);
+            }
         }
 
         for fill_reports in mass_status.fill_reports().values() {
             for fill_report in fill_reports {
+                if external_venue_ids.contains(&fill_report.venue_order_id) {
+                    log::debug!(
+                        "Skipping fill report for external order {}: covered by inferred fill",
+                        fill_report.venue_order_id
+                    );
+                    continue;
+                }
+
                 self.reconcile_fill_report(fill_report);
             }
         }
@@ -1153,6 +1322,7 @@ impl ExecutionEngine {
                         .cache
                         .borrow()
                         .orders_for_ids(&cmd.order_list.client_order_ids, cmd);
+
                     for order in &orders {
                         self.deny_order(order, &reason);
                     }
@@ -1274,6 +1444,7 @@ impl ExecutionEngine {
 
         if self.config.manage_own_order_books {
             let mut own_book = self.get_or_init_own_order_book(&cmd.instrument_id);
+
             for order in &orders {
                 if should_handle_own_book_order(order) {
                     own_book.add(order.to_own_book_order());
@@ -1648,6 +1819,7 @@ impl ExecutionEngine {
                 && pos.is_open()
             {
                 let position_id = pos.id;
+
                 for client_order_id in order.linked_order_ids().unwrap_or_default() {
                     let mut cache = self.cache.borrow_mut();
                     let contingent_order = cache.mut_order(client_order_id);

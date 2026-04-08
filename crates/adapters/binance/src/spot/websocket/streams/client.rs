@@ -53,8 +53,8 @@ use super::{
 };
 use crate::common::{
     consts::{
-        BINANCE_RATE_LIMIT_KEY_SUBSCRIPTION, BINANCE_SPOT_SBE_WS_URL, BINANCE_WS_CONNECTION_QUOTA,
-        BINANCE_WS_SUBSCRIPTION_QUOTA,
+        BINANCE_API_KEY_HEADER, BINANCE_RATE_LIMIT_KEY_SUBSCRIPTION, BINANCE_SPOT_SBE_WS_URL,
+        BINANCE_WS_CONNECTION_QUOTA, BINANCE_WS_SUBSCRIPTION_QUOTA,
     },
     credential::Ed25519Credential,
 };
@@ -340,6 +340,7 @@ impl BinanceSpotWebSocketClient {
                         "Handler not available for pool slot {slot_idx}: {e}"
                     ))
                 })?;
+
             for stream in batch {
                 slots[*slot_idx].streams.retain(|s| s != stream);
             }
@@ -408,7 +409,10 @@ impl BinanceSpotWebSocketClient {
         let ping_handler: PingHandler = Arc::new(move |_| {});
 
         let headers = if let Some(ref cred) = self.credential {
-            vec![("X-MBX-APIKEY".to_string(), cred.api_key().to_string())]
+            vec![(
+                BINANCE_API_KEY_HEADER.to_string(),
+                cred.api_key().to_string(),
+            )]
         } else {
             vec![]
         };

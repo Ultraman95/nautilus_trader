@@ -30,7 +30,7 @@ use nautilus_model::{
     },
     identifiers::{AccountId, InstrumentId, TradeId, VenueOrderId},
     instruments::{Instrument, InstrumentAny},
-    orders::{Order, OrderAny},
+    orders::{Order, OrderAny, TRIGGERABLE_ORDER_TYPES},
     reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
     types::{Money, Price, Quantity},
 };
@@ -1252,7 +1252,18 @@ pub fn reconcile_order_report(
         OrderStatus::Rejected => {
             create_reconciliation_rejected(order, report.cancel_reason.as_deref(), ts_now)
         }
-        OrderStatus::Triggered => Some(create_reconciliation_triggered(order, report, ts_now)),
+        OrderStatus::Triggered => {
+            if TRIGGERABLE_ORDER_TYPES.contains(&order.order_type()) {
+                Some(create_reconciliation_triggered(order, report, ts_now))
+            } else {
+                log::debug!(
+                    "Skipping OrderTriggered for {} order {}: market-style stops have no TRIGGERED state",
+                    order.order_type(),
+                    order.client_order_id(),
+                );
+                None
+            }
+        }
         OrderStatus::Canceled => Some(create_reconciliation_canceled(order, report, ts_now)),
         OrderStatus::Expired => Some(create_reconciliation_expired(order, report, ts_now)),
 
@@ -1284,6 +1295,49 @@ pub fn reconcile_order_report(
             None
         }
     }
+}
+
+/// Generates reconciliation events for a live order status report.
+///
+/// If a venue report advances a locally submitted order beyond `Submitted`,
+/// this synthesizes the missing `Accepted` event first so downstream order
+/// state transitions stay valid.
+#[must_use]
+pub fn generate_reconciliation_order_events(
+    order: &OrderAny,
+    report: &OrderStatusReport,
+    instrument: Option<&InstrumentAny>,
+    ts_now: UnixNanos,
+) -> Vec<OrderEventAny> {
+    if should_accept_before_reconciliation(order, report) {
+        let accepted = create_reconciliation_accepted(order, report, ts_now);
+        let mut accepted_order = order.clone();
+
+        if let Err(e) = accepted_order.apply(accepted.clone()) {
+            log::warn!(
+                "Failed to pre-apply reconciliation acceptance for {}: {e}",
+                order.client_order_id(),
+            );
+            return reconcile_order_report(order, report, instrument, ts_now)
+                .into_iter()
+                .collect();
+        }
+
+        let mut events = vec![accepted];
+
+        if let Some(event) = reconcile_order_report(&accepted_order, report, instrument, ts_now) {
+            events.push(event);
+        }
+        return events;
+    }
+
+    reconcile_order_report(order, report, instrument, ts_now)
+        .into_iter()
+        .collect()
+}
+
+fn should_accept_before_reconciliation(order: &OrderAny, report: &OrderStatusReport) -> bool {
+    order.status() == OrderStatus::Submitted && report.order_status != OrderStatus::Rejected
 }
 
 /// Handles fill quantity mismatch between cached order and venue report.
@@ -3590,6 +3644,150 @@ mod tests {
             reconcile_order_report(&order, &report, Some(&instrument), UnixNanos::default());
         assert!(result.is_some());
         assert!(matches!(result.unwrap(), OrderEventAny::Canceled(_)));
+    }
+
+    #[rstest]
+    fn test_generate_reconciliation_order_events_accepts_before_cancel(instrument: InstrumentAny) {
+        let client_order_id = ClientOrderId::from("O-001");
+        let venue_order_id = VenueOrderId::from("V-001");
+
+        let mut order = OrderTestBuilder::new(OrderType::Limit)
+            .instrument_id(instrument.id())
+            .client_order_id(client_order_id)
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from(100))
+            .price(Price::from("1.00000"))
+            .build();
+
+        let submitted = OrderSubmitted::new(
+            order.trader_id(),
+            order.strategy_id(),
+            order.instrument_id(),
+            order.client_order_id(),
+            AccountId::from("SIM-001"),
+            UUID4::new(),
+            UnixNanos::default(),
+            UnixNanos::default(),
+        );
+        order.apply(OrderEventAny::Submitted(submitted)).unwrap();
+
+        let report = create_test_order_status_report(
+            client_order_id,
+            venue_order_id,
+            instrument.id(),
+            OrderType::Limit,
+            OrderStatus::Canceled,
+            Quantity::from(100),
+            Quantity::from(0),
+        );
+
+        let events = generate_reconciliation_order_events(
+            &order,
+            &report,
+            Some(&instrument),
+            UnixNanos::default(),
+        );
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], OrderEventAny::Accepted(_)));
+        assert!(matches!(events[1], OrderEventAny::Canceled(_)));
+    }
+
+    #[rstest]
+    fn test_generate_reconciliation_order_events_accepts_before_fill(instrument: InstrumentAny) {
+        let client_order_id = ClientOrderId::from("O-001");
+        let venue_order_id = VenueOrderId::from("V-001");
+
+        let mut order = OrderTestBuilder::new(OrderType::Limit)
+            .instrument_id(instrument.id())
+            .client_order_id(client_order_id)
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from(100))
+            .price(Price::from("1.00000"))
+            .build();
+
+        let submitted = OrderSubmitted::new(
+            order.trader_id(),
+            order.strategy_id(),
+            order.instrument_id(),
+            order.client_order_id(),
+            AccountId::from("SIM-001"),
+            UUID4::new(),
+            UnixNanos::default(),
+            UnixNanos::default(),
+        );
+        order.apply(OrderEventAny::Submitted(submitted)).unwrap();
+
+        let mut report = create_test_order_status_report(
+            client_order_id,
+            venue_order_id,
+            instrument.id(),
+            OrderType::Limit,
+            OrderStatus::Filled,
+            Quantity::from(100),
+            Quantity::from(100),
+        );
+        report.avg_px = Some(dec!(1.0));
+
+        let events = generate_reconciliation_order_events(
+            &order,
+            &report,
+            Some(&instrument),
+            UnixNanos::default(),
+        );
+
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], OrderEventAny::Accepted(_)));
+        assert!(matches!(events[1], OrderEventAny::Filled(_)));
+    }
+
+    #[rstest]
+    fn test_generate_reconciliation_order_events_does_not_accept_before_reject(
+        instrument: InstrumentAny,
+    ) {
+        let client_order_id = ClientOrderId::from("O-001");
+        let venue_order_id = VenueOrderId::from("V-001");
+
+        let mut order = OrderTestBuilder::new(OrderType::Limit)
+            .instrument_id(instrument.id())
+            .client_order_id(client_order_id)
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from(100))
+            .price(Price::from("1.00000"))
+            .build();
+
+        let submitted = OrderSubmitted::new(
+            order.trader_id(),
+            order.strategy_id(),
+            order.instrument_id(),
+            order.client_order_id(),
+            AccountId::from("SIM-001"),
+            UUID4::new(),
+            UnixNanos::default(),
+            UnixNanos::default(),
+        );
+        order.apply(OrderEventAny::Submitted(submitted)).unwrap();
+
+        let mut report = create_test_order_status_report(
+            client_order_id,
+            venue_order_id,
+            instrument.id(),
+            OrderType::Limit,
+            OrderStatus::Rejected,
+            Quantity::from(100),
+            Quantity::from(0),
+        );
+        report.cancel_reason = Some("INSUFFICIENT_MARGIN".to_string());
+
+        let events = generate_reconciliation_order_events(
+            &order,
+            &report,
+            Some(&instrument),
+            UnixNanos::default(),
+        );
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], OrderEventAny::Rejected(_)));
     }
 
     #[rstest]

@@ -16,7 +16,10 @@
 use nautilus_model::identifiers::{AccountId, TraderId};
 use pyo3::pymethods;
 
-use crate::config::{AxDataClientConfig, AxExecClientConfig};
+use crate::{
+    common::enums::AxEnvironment,
+    config::{AxDataClientConfig, AxExecClientConfig},
+};
 
 #[pymethods]
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
@@ -24,11 +27,11 @@ impl AxDataClientConfig {
     /// Configuration for the AX Exchange live data client.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (api_key=None, api_secret=None, is_sandbox=None, base_url_http=None, base_url_ws_public=None, base_url_ws_private=None, http_proxy_url=None, ws_proxy_url=None, http_timeout_secs=None, max_retries=None, retry_delay_initial_ms=None, retry_delay_max_ms=None, heartbeat_interval_secs=None, recv_window_ms=None, update_instruments_interval_mins=None, funding_rate_poll_interval_mins=None))]
+    #[pyo3(signature = (api_key=None, api_secret=None, environment=None, base_url_http=None, base_url_ws_public=None, base_url_ws_private=None, http_proxy_url=None, ws_proxy_url=None, http_timeout_secs=None, max_retries=None, retry_delay_initial_ms=None, retry_delay_max_ms=None, heartbeat_interval_secs=None, recv_window_ms=None, update_instruments_interval_mins=None, funding_rate_poll_interval_mins=None))]
     fn py_new(
         api_key: Option<String>,
         api_secret: Option<String>,
-        is_sandbox: Option<bool>,
+        environment: Option<AxEnvironment>,
         base_url_http: Option<String>,
         base_url_ws_public: Option<String>,
         base_url_ws_private: Option<String>,
@@ -47,22 +50,24 @@ impl AxDataClientConfig {
         Self {
             api_key,
             api_secret,
-            is_sandbox: is_sandbox.unwrap_or(default.is_sandbox),
+            environment: environment.unwrap_or(default.environment),
             base_url_http,
             base_url_ws_public,
             base_url_ws_private,
             http_proxy_url,
             ws_proxy_url,
-            http_timeout_secs: http_timeout_secs.or(default.http_timeout_secs),
-            max_retries: max_retries.or(default.max_retries),
-            retry_delay_initial_ms: retry_delay_initial_ms.or(default.retry_delay_initial_ms),
-            retry_delay_max_ms: retry_delay_max_ms.or(default.retry_delay_max_ms),
-            heartbeat_interval_secs: heartbeat_interval_secs.or(default.heartbeat_interval_secs),
-            recv_window_ms: recv_window_ms.or(default.recv_window_ms),
+            http_timeout_secs: http_timeout_secs.unwrap_or(default.http_timeout_secs),
+            max_retries: max_retries.unwrap_or(default.max_retries),
+            retry_delay_initial_ms: retry_delay_initial_ms
+                .unwrap_or(default.retry_delay_initial_ms),
+            retry_delay_max_ms: retry_delay_max_ms.unwrap_or(default.retry_delay_max_ms),
+            heartbeat_interval_secs: heartbeat_interval_secs
+                .unwrap_or(default.heartbeat_interval_secs),
+            recv_window_ms: recv_window_ms.unwrap_or(default.recv_window_ms),
             update_instruments_interval_mins: update_instruments_interval_mins
-                .or(default.update_instruments_interval_mins),
+                .unwrap_or(default.update_instruments_interval_mins),
             funding_rate_poll_interval_mins: funding_rate_poll_interval_mins
-                .or(default.funding_rate_poll_interval_mins),
+                .unwrap_or(default.funding_rate_poll_interval_mins),
         }
     }
 
@@ -81,13 +86,13 @@ impl AxExecClientConfig {
     /// Configuration for the AX Exchange live execution client.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (trader_id=None, account_id=None, api_key=None, api_secret=None, is_sandbox=None, base_url_http=None, base_url_orders=None, base_url_ws_private=None, http_proxy_url=None, ws_proxy_url=None, http_timeout_secs=None, max_retries=None, retry_delay_initial_ms=None, retry_delay_max_ms=None, heartbeat_interval_secs=None, recv_window_ms=None))]
+    #[pyo3(signature = (trader_id=None, account_id=None, api_key=None, api_secret=None, environment=None, base_url_http=None, base_url_orders=None, base_url_ws_private=None, http_proxy_url=None, ws_proxy_url=None, http_timeout_secs=None, max_retries=None, retry_delay_initial_ms=None, retry_delay_max_ms=None, heartbeat_interval_secs=None, recv_window_ms=None, cancel_on_disconnect=None))]
     fn py_new(
         trader_id: Option<TraderId>,
         account_id: Option<AccountId>,
         api_key: Option<String>,
         api_secret: Option<String>,
-        is_sandbox: Option<bool>,
+        environment: Option<AxEnvironment>,
         base_url_http: Option<String>,
         base_url_orders: Option<String>,
         base_url_ws_private: Option<String>,
@@ -99,6 +104,7 @@ impl AxExecClientConfig {
         retry_delay_max_ms: Option<u64>,
         heartbeat_interval_secs: Option<u64>,
         recv_window_ms: Option<u64>,
+        cancel_on_disconnect: Option<bool>,
     ) -> Self {
         let default = Self::default();
         Self {
@@ -106,18 +112,21 @@ impl AxExecClientConfig {
             account_id: account_id.unwrap_or(default.account_id),
             api_key,
             api_secret,
-            is_sandbox: is_sandbox.unwrap_or(default.is_sandbox),
+            environment: environment.unwrap_or(default.environment),
             base_url_http,
             base_url_orders,
             base_url_ws_private,
             http_proxy_url,
             ws_proxy_url,
-            http_timeout_secs: http_timeout_secs.or(default.http_timeout_secs),
-            max_retries: max_retries.or(default.max_retries),
-            retry_delay_initial_ms: retry_delay_initial_ms.or(default.retry_delay_initial_ms),
-            retry_delay_max_ms: retry_delay_max_ms.or(default.retry_delay_max_ms),
-            heartbeat_interval_secs: heartbeat_interval_secs.or(default.heartbeat_interval_secs),
-            recv_window_ms: recv_window_ms.or(default.recv_window_ms),
+            http_timeout_secs: http_timeout_secs.unwrap_or(default.http_timeout_secs),
+            max_retries: max_retries.unwrap_or(default.max_retries),
+            retry_delay_initial_ms: retry_delay_initial_ms
+                .unwrap_or(default.retry_delay_initial_ms),
+            retry_delay_max_ms: retry_delay_max_ms.unwrap_or(default.retry_delay_max_ms),
+            heartbeat_interval_secs: heartbeat_interval_secs
+                .unwrap_or(default.heartbeat_interval_secs),
+            recv_window_ms: recv_window_ms.unwrap_or(default.recv_window_ms),
+            cancel_on_disconnect: cancel_on_disconnect.unwrap_or(default.cancel_on_disconnect),
         }
     }
 

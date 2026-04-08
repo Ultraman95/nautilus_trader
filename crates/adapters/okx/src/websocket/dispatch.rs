@@ -36,6 +36,7 @@ use nautilus_model::{
         AccountId, ClientOrderId, InstrumentId, StrategyId, TradeId, TraderId, VenueOrderId,
     },
     instruments::{Instrument, InstrumentAny},
+    orders::TRIGGERABLE_ORDER_TYPES,
     reports::FillReport,
     types::{Currency, Money, Quantity},
 };
@@ -43,6 +44,7 @@ use ustr::Ustr;
 
 use crate::{
     common::{
+        consts::{OKX_FIELD_CLORDID, OKX_FIELD_SCODE, OKX_FIELD_SMSG, OKX_SUCCESS_CODE},
         enums::OKXOrderStatus,
         parse::{
             is_market_price, parse_client_order_id, parse_millisecond_timestamp, parse_price,
@@ -214,6 +216,7 @@ pub fn dispatch_ws_message(
         OKXWsMessage::AlgoOrders(algo_msgs) => {
             let ts_init = clock.get_time_ns();
             let mut reports = Vec::new();
+
             for msg in algo_msgs {
                 match parse_algo_order_msg(&msg, account_id, instruments, ts_init) {
                     Ok(Some(report)) => reports.push(report),
@@ -225,6 +228,7 @@ pub fn dispatch_ws_message(
         }
         OKXWsMessage::Account(data) => {
             let ts_init = clock.get_time_ns();
+
             match serde_json::from_value::<Vec<OKXAccount>>(data) {
                 Ok(accounts) => {
                     for account in &accounts {
@@ -241,6 +245,7 @@ pub fn dispatch_ws_message(
         }
         OKXWsMessage::Positions(data) => {
             let ts_init = clock.get_time_ns();
+
             match serde_json::from_value::<Vec<OKXPosition>>(data) {
                 Ok(positions) => {
                     for position in positions {
@@ -250,6 +255,7 @@ pub fn dispatch_ws_message(
                         };
                         let instrument_id = instrument.id();
                         let size_precision = instrument.size_precision();
+
                         match crate::common::parse::parse_position_status_report(
                             &position,
                             account_id,
@@ -273,12 +279,22 @@ pub fn dispatch_ws_message(
             data,
         } => {
             let ts_init = clock.get_time_ns();
-            for item in &data {
-                let s_code = item.get("sCode").and_then(|v| v.as_str()).unwrap_or("");
-                let s_msg = item.get("sMsg").and_then(|v| v.as_str()).unwrap_or("");
-                let cl_ord_id = item.get("clOrdId").and_then(|v| v.as_str()).unwrap_or("");
 
-                if s_code == "0" {
+            for item in &data {
+                let s_code = item
+                    .get(OKX_FIELD_SCODE)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let s_msg = item
+                    .get(OKX_FIELD_SMSG)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let cl_ord_id = item
+                    .get(OKX_FIELD_CLORDID)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if s_code == OKX_SUCCESS_CODE {
                     log::debug!("Order response ok: op={op:?} cl_ord_id={cl_ord_id}");
                     match op {
                         OKXWsOperation::Order
@@ -384,6 +400,7 @@ pub fn dispatch_ws_message(
 
             if let Some(client_order_id) = client_order_id {
                 let ts_init = clock.get_time_ns();
+
                 match op {
                     Some(
                         OKXWsOperation::Order
@@ -657,6 +674,16 @@ fn dispatch_parsed_order_event(
                 log::debug!("Skipping stale Triggered for {client_order_id} (already filled)");
                 return;
             }
+
+            if !TRIGGERABLE_ORDER_TYPES.contains(&identity.order_type) {
+                log::debug!(
+                    "Skipping OrderTriggered for {} order {client_order_id}: market-style stops have no TRIGGERED state",
+                    identity.order_type,
+                );
+                state.insert_triggered(client_order_id);
+                return;
+            }
+
             ensure_accepted_emitted(
                 client_order_id,
                 account_id,
@@ -750,6 +777,7 @@ fn dispatch_parsed_order_event(
             );
             emitter.send_order_status_report(*report);
         }
+        ParsedOrderEvent::Skipped => return,
     }
 
     if is_terminal {
@@ -966,8 +994,8 @@ pub fn emit_algo_cancel_rejections(
     clock: &'static AtomicTime,
 ) {
     for (i, item) in responses.iter().enumerate() {
-        let code = item.s_code.as_deref().unwrap_or("0");
-        if code == "0" {
+        let code = item.s_code.as_deref().unwrap_or(OKX_SUCCESS_CODE);
+        if code == OKX_SUCCESS_CODE {
             continue;
         }
 

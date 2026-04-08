@@ -39,6 +39,7 @@ use nautilus_core::{
 use nautilus_model::{
     data::bar::BarType,
     identifiers::{AccountId, InstrumentId},
+    instruments::{Instrument, InstrumentAny},
 };
 use nautilus_network::{
     http::USER_AGENT,
@@ -84,6 +85,7 @@ pub struct BitmexWebSocketClient {
     task_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
     subscriptions: SubscriptionState,
     tracked_subscriptions: Arc<DashMap<String, ()>>,
+    instruments: Arc<DashMap<Ustr, InstrumentAny>>,
 }
 
 impl BitmexWebSocketClient {
@@ -97,7 +99,7 @@ impl BitmexWebSocketClient {
         api_key: Option<String>,
         api_secret: Option<String>,
         account_id: Option<AccountId>,
-        heartbeat: Option<u64>,
+        heartbeat: u64,
     ) -> anyhow::Result<Self> {
         let credential = match (api_key, api_secret) {
             (Some(key), Some(secret)) => Some(Credential::new(key, secret)),
@@ -116,7 +118,7 @@ impl BitmexWebSocketClient {
         Ok(Self {
             url: url.unwrap_or(BITMEX_WS_URL.to_string()),
             credential,
-            heartbeat,
+            heartbeat: Some(heartbeat),
             account_id,
             auth_tracker: AuthTracker::new(),
             signal: Arc::new(AtomicBool::new(false)),
@@ -126,6 +128,7 @@ impl BitmexWebSocketClient {
             task_handle: None,
             subscriptions: SubscriptionState::new(BITMEX_WS_TOPIC_DELIMITER),
             tracked_subscriptions: Arc::new(DashMap::new()),
+            instruments: Arc::new(DashMap::new()),
         })
     }
 
@@ -144,7 +147,7 @@ impl BitmexWebSocketClient {
         api_key: Option<String>,
         api_secret: Option<String>,
         account_id: Option<AccountId>,
-        heartbeat: Option<u64>,
+        heartbeat: u64,
         testnet: bool,
     ) -> anyhow::Result<Self> {
         let (api_key_env, api_secret_env) = credential_env_vars(testnet);
@@ -166,7 +169,7 @@ impl BitmexWebSocketClient {
         let api_key = get_env_var(key_var)?;
         let api_secret = get_env_var(secret_var)?;
 
-        Self::new(Some(url), Some(api_key), Some(api_secret), None, None)
+        Self::new(Some(url), Some(api_key), Some(api_secret), None, 5)
     }
 
     /// Returns the websocket url being used by the client.
@@ -212,6 +215,29 @@ impl BitmexWebSocketClient {
     /// Sets the account ID.
     pub fn set_account_id(&mut self, account_id: AccountId) {
         self.account_id = account_id;
+    }
+
+    /// Bulk-replaces the instrument cache with the given instruments.
+    pub fn cache_instruments(&self, instruments: &[InstrumentAny]) {
+        self.instruments.clear();
+        for inst in instruments {
+            self.instruments
+                .insert(inst.raw_symbol().inner(), inst.clone());
+        }
+    }
+
+    /// Upserts a single instrument into the cache.
+    pub fn cache_instrument(&self, instrument: InstrumentAny) {
+        self.instruments
+            .insert(instrument.raw_symbol().inner(), instrument);
+    }
+
+    /// Retrieves an instrument from the cache by symbol.
+    #[must_use]
+    pub fn get_instrument(&self, symbol: &Ustr) -> Option<InstrumentAny> {
+        self.instruments
+            .get(symbol)
+            .map(|entry| entry.value().clone())
     }
 
     /// Connect to the BitMEX WebSocket server.
@@ -335,6 +361,7 @@ impl BitmexWebSocketClient {
                                 "Marking confirmed subscriptions as pending for replay: count={}",
                                 confirmed_topics.len()
                             );
+
                             for topic in confirmed_topics {
                                 subscriptions.mark_failure(&topic);
                             }
@@ -1204,7 +1231,7 @@ mod tests {
             Some("test_key".to_string()),
             Some("test_secret".to_string()),
             Some(AccountId::new("BITMEX-TEST")),
-            None,
+            5,
         )
         .unwrap();
 
@@ -1237,6 +1264,7 @@ mod tests {
 
         // Test the actual reconnection topic building logic
         let mut topics_to_restore = Vec::new();
+
         for entry in subs.iter() {
             let (channel, symbols) = entry.pair();
             for symbol in symbols {
@@ -1267,7 +1295,7 @@ mod tests {
             Some("test_key".to_string()),
             Some("test_secret".to_string()),
             Some(AccountId::new("BITMEX-TEST")),
-            None,
+            5,
         )
         .unwrap();
 
@@ -1296,7 +1324,7 @@ mod tests {
             None,
             None,
             Some(AccountId::new("BITMEX-TEST")),
-            None,
+            5,
         )
         .unwrap();
 
@@ -1310,7 +1338,7 @@ mod tests {
             Some("test_key".to_string()),
             Some("test_secret".to_string()),
             Some(AccountId::new("BITMEX-TEST")),
-            None,
+            5,
         )
         .unwrap();
 
@@ -1343,6 +1371,7 @@ mod tests {
 
         // Build restoration topics after unsubscribe
         let mut topics_to_restore = Vec::new();
+
         for entry in subs.iter() {
             let (channel, symbols) = entry.pair();
             for symbol in symbols {
@@ -1377,7 +1406,7 @@ mod tests {
             None,
             None,
             Some(AccountId::new("BITMEX-TEST")),
-            None,
+            5,
         )
         .unwrap();
 
@@ -1423,7 +1452,7 @@ mod tests {
             None,
             None,
             Some(AccountId::new("BITMEX-TEST")),
-            None,
+            5,
         )
         .unwrap();
 
@@ -1476,7 +1505,7 @@ mod tests {
             Some("test_key".to_string()),
             Some("test_secret".to_string()),
             Some(AccountId::new("BITMEX-TEST")),
-            None,
+            5,
         )
         .unwrap();
 

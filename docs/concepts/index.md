@@ -23,6 +23,10 @@ How to implement trading strategies using the `Strategy` component.
 
 Instrument definitions for tradable assets and contracts.
 
+## Synthetics
+
+User-defined instruments whose prices are computed by evaluating a numeric expression over component instrument prices.
+
 ## Value types
 
 The immutable numeric types (`Price`, `Quantity`, `Money`) used throughout the platform,
@@ -104,6 +108,11 @@ Running simulated trading on historical data using a specific system implementat
 Interactive tearsheets for analyzing backtest results, including charts, themes,
 customization options, and custom visualizations via the extensible chart registry.
 
+## Configuration
+
+How config structs work across Python and Rust: default resolution, the `T` vs `Option<T>`
+convention, builder patterns, and common fields shared across adapters and engines.
+
 ## Live trading
 
 Deploying backtested strategies in real-time without code changes, and the key differences
@@ -119,6 +128,5 @@ Writing actors, strategies, and running backtests and live trading in pure Rust
 using the `crates/` implementation directly.
 
 :::note
-The Python API reference (linked in the sidebar) is the source of truth for the platform.
 If there are discrepancies between these guides and the API reference, the API reference is correct.
 :::

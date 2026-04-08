@@ -98,7 +98,7 @@ flowchart TD
 | `FuturesSpread`      | Deliverable futures spread.                                                      |
 | `CryptoFuture`       | Deliverable futures with crypto assets as underlying and settlement.             |
 | `CryptoPerpetual`    | Crypto perpetual futures (perpetual swap).                                       |
-| `PerpetualContract`  | Asset-class agnostic perpetual swap (any underlying).                            |
+| `PerpetualContract`  | Asset‑class agnostic perpetual swap (any underlying).                            |
 | `OptionContract`     | Generic option contract.                                                         |
 | `OptionSpread`       | Generic option spread.                                                           |
 | `CryptoOption`       | Crypto option contract.                                                          |
@@ -454,7 +454,7 @@ apply to all time-based aggregation (millisecond through year):
 |:------------------------------------|:-------|:--------------|:------------------------------------------------------------------------------------------------------------------------------------------------|
 | `time_bars_interval_type`           | `str`  | `"left-open"` | `"left-open"`: start excluded, end included. `"right-open"`: start included, end excluded.                                                      |
 | `time_bars_timestamp_on_close`      | `bool` | `True`        | When `True`, `ts_event` is the bar close time. When `False`, `ts_event` is the bar open time.                                                   |
-| `time_bars_skip_first_non_full_bar` | `bool` | `False`       | Skip emitting a bar when aggregation starts mid-interval, avoiding partial bars on startup.                                                     |
+| `time_bars_skip_first_non_full_bar` | `bool` | `False`       | Skip emitting a bar when aggregation starts mid‑interval, avoiding partial bars on startup.                                                     |
 | `time_bars_build_with_no_updates`   | `bool` | `True`        | When `True`, bars are emitted even if no market updates arrived during the interval.                                                            |
 | `time_bars_origin_offset`           | `dict` | `None`        | Maps `BarAggregation` types to `pd.Timedelta` offsets for shifting bar alignment (e.g., align to 09:30 market open).                            |
 | `time_bars_build_delay`             | `int`  | `0`           | Delay in microseconds before building a bar. Useful in backtests to ensure data at bar boundary timestamps is processed before the timer fires. |
@@ -584,7 +584,7 @@ There are a number of **DataWrangler v2** components, which will take a `pd.Data
 with a different fixed width Nautilus Arrow v2 schema, and output PyO3 Nautilus objects which are only compatible with the new version
 of the Nautilus core, currently in development.
 
-**These PyO3 provided data objects are not compatible where the legacy Cython objects are currently used (e.g., adding directly to a `BacktestEngine`).**
+**These PyO3 data objects are not compatible where v1 legacy Cython objects are expected (e.g., adding directly to a `BacktestEngine`).**
 :::
 
 ### Fixed-point precision and raw values
@@ -603,26 +603,25 @@ When constructing `Price` or `Quantity` using `from_raw()`, the raw value **must
 Raw values that are not valid multiples will cause a panic. The raw value must be divisible by `10^(FIXED_PRECISION - precision)` where `FIXED_PRECISION` is 9 (standard mode) or 16 (high-precision mode).
 :::
 
-#### Legacy catalog data and floating-point errors
+#### Automatic raw value correction
 
-Data written to catalogs using V2 wranglers before 16th December 2025 may contain raw values with floating-point precision errors. This occurred because the wranglers used:
-
-```python
-int(value * FIXED_SCALAR)  # Introduces floating-point errors
-```
-
-For example, `int(0.67068 * 1e9)` produces `670680000000001` instead of the expected `670680000000000`. The correct approach is:
+Catalog data can contain raw values with floating-point precision errors.
+This happens when raw values are produced with `int(value * FIXED_SCALAR)`
+instead of precision-aware conversion:
 
 ```python
+int(value * FIXED_SCALAR)             # Introduces floating-point errors
 round(value * 10**precision) * scale  # Correct precision-aware conversion
 ```
 
-#### Automatic correction during catalog reads
+For example, `int(0.67068 * 1e9)` produces `670680000000001` instead of
+the expected `670680000000000`.
 
-To maintain backward compatibility with existing catalog data, the Arrow decode path automatically corrects raw values by rounding them to the nearest valid multiple. This ensures that legacy catalogs continue to work without requiring data migration.
+The Arrow decode path automatically corrects these values by rounding to
+the nearest valid multiple, so affected catalogs work without data migration.
 
 :::note
-This automatic correction adds a small amount of overhead during data decoding. In a future version, once catalogs have been repaired or migrated, this correction will become opt-in. A catalog repair/migration script may be provided to permanently fix legacy data.
+This correction adds a small amount of overhead during data decoding.
 :::
 
 ### Transformation pipeline
@@ -704,11 +703,7 @@ The NautilusTrader data catalog is built on a dual-backend architecture that com
 - Schema evolution support for data model changes.
 - Cross-language compatibility (Python, Rust, Java, C++, etc.).
 
-The Arrow schemas used for the Parquet format are primarily single-sourced in the core `persistence` Rust crate, with some legacy schemas available from the `/serialization/arrow/schema.py` module.
-
-:::note
-The current plan is to eventually phase out the Python schemas module, so that all schemas are single sourced in the Rust core for consistency and performance.
-:::
+The Arrow schemas used for the Parquet format are defined in two places: the Rust `model` and `persistence` crates for core market data types, and the Python `serialization/arrow/schema.py` module for additional types.
 
 ### Initializing
 
@@ -1832,13 +1827,13 @@ GreeksTestData(
 
 #### Python-only custom data with the PyO3 catalog
 
-To use custom data with the Rust-backed catalog (`ParquetDataCatalogV2` from `nautilus_pyo3`), use the
+To use custom data with the Rust-backed catalog (`ParquetDataCatalog` from `nautilus_pyo3`), use the
 `@customdataclass_pyo3()` decorator instead of `@customdataclass`. This adds the methods the Rust catalog
 expects (JSON and Arrow IPC serialization). After defining your class, register it once. You can pass either
 the **type** (recommended) or a **sample instance**:
 
 ```python
-from nautilus_trader.core.nautilus_pyo3 import ParquetDataCatalogV2
+from nautilus_trader.core.nautilus_pyo3 import ParquetDataCatalog
 from nautilus_trader.core.nautilus_pyo3.model import register_custom_data_class
 from nautilus_trader.model.custom import customdataclass_pyo3
 
@@ -1853,7 +1848,7 @@ class MarketTickPython:
 # Register by type (no instance needed; call once, e.g. at startup)
 register_custom_data_class(MarketTickPython)
 
-catalog = ParquetDataCatalogV2("/path/to/catalog")
+catalog = ParquetDataCatalog("/path/to/catalog")
 catalog.write_custom_data([MarketTickPython(1, 1, "AAPL", 150.5, 1000)])
 result = catalog.query("MarketTickPython", None, None, None, None, None, True)
 ```

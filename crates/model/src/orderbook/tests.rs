@@ -693,6 +693,7 @@ fn test_book_apply_depth_all_levels(stub_depth10: OrderBookDepth10) {
         Price::from("91.0"),
         Price::from("90.0"),
     ];
+
     for (i, level) in bid_levels.iter().enumerate() {
         assert_eq!(
             level.price.value, expected_bid_prices[i],
@@ -714,6 +715,7 @@ fn test_book_apply_depth_all_levels(stub_depth10: OrderBookDepth10) {
         Price::from("108.0"),
         Price::from("109.0"),
     ];
+
     for (i, level) in ask_levels.iter().enumerate() {
         assert_eq!(
             level.price.value, expected_ask_prices[i],
@@ -726,6 +728,7 @@ fn test_book_apply_depth_all_levels(stub_depth10: OrderBookDepth10) {
     let expected_sizes = [
         100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0, 900.0, 1000.0,
     ];
+
     for (i, level) in bid_levels.iter().enumerate() {
         assert_eq!(
             level.size(),
@@ -733,6 +736,7 @@ fn test_book_apply_depth_all_levels(stub_depth10: OrderBookDepth10) {
             "Bid level {i} size mismatch"
         );
     }
+
     for (i, level) in ask_levels.iter().enumerate() {
         assert_eq!(
             level.size(),
@@ -882,6 +886,7 @@ fn test_book_apply_depth_partial_snapshot() {
         );
         assert!(level.size() > 0.0, "No zero-size bid levels");
     }
+
     for level in &ask_levels {
         assert!(
             level.price.value > Price::from("0.0"),
@@ -1109,6 +1114,80 @@ fn test_book_update_trade_tick_advances_sequence() {
 }
 
 #[rstest]
+fn test_book_update_stale_trade_tick_does_not_mutate_l1() {
+    let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
+    let mut book = OrderBook::new(instrument_id, BookType::L1_MBP);
+
+    let quote = QuoteTick::new(
+        instrument_id,
+        Price::from("10.000"),
+        Price::from("10.000"),
+        Quantity::from("1.00000000"),
+        Quantity::from("1.00000000"),
+        UnixNanos::from(2),
+        UnixNanos::from(2),
+    );
+    book.update_quote_tick(&quote).unwrap();
+
+    assert_eq!(book.ts_last, UnixNanos::from(2));
+    assert_eq!(book.best_bid_price().unwrap(), Price::from("10.000"));
+    assert_eq!(book.best_ask_price().unwrap(), Price::from("10.000"));
+
+    // Stale trade with older ts_event should not mutate the book
+    let stale_trade = TradeTick::new(
+        instrument_id,
+        Price::from("11.000"),
+        Quantity::from("1.00000000"),
+        AggressorSide::Buyer,
+        TradeId::new("1"),
+        UnixNanos::from(1),
+        UnixNanos::from(1),
+    );
+    book.update_trade_tick(&stale_trade).unwrap();
+
+    assert_eq!(book.ts_last, UnixNanos::from(2));
+    assert_eq!(book.best_bid_price().unwrap(), Price::from("10.000"));
+    assert_eq!(book.best_ask_price().unwrap(), Price::from("10.000"));
+}
+
+#[rstest]
+fn test_book_update_stale_quote_tick_does_not_mutate_l1() {
+    let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
+    let mut book = OrderBook::new(instrument_id, BookType::L1_MBP);
+
+    let trade = TradeTick::new(
+        instrument_id,
+        Price::from("10.000"),
+        Quantity::from("1.00000000"),
+        AggressorSide::Buyer,
+        TradeId::new("1"),
+        UnixNanos::from(2),
+        UnixNanos::from(2),
+    );
+    book.update_trade_tick(&trade).unwrap();
+
+    assert_eq!(book.ts_last, UnixNanos::from(2));
+    assert_eq!(book.best_bid_price().unwrap(), Price::from("10.000"));
+    assert_eq!(book.best_ask_price().unwrap(), Price::from("10.000"));
+
+    // Stale quote with older ts_event should not mutate the book
+    let stale_quote = QuoteTick::new(
+        instrument_id,
+        Price::from("11.000"),
+        Price::from("12.000"),
+        Quantity::from("1.00000000"),
+        Quantity::from("1.00000000"),
+        UnixNanos::from(1),
+        UnixNanos::from(1),
+    );
+    book.update_quote_tick(&stale_quote).unwrap();
+
+    assert_eq!(book.ts_last, UnixNanos::from(2));
+    assert_eq!(book.best_bid_price().unwrap(), Price::from("10.000"));
+    assert_eq!(book.best_ask_price().unwrap(), Price::from("10.000"));
+}
+
+#[rstest]
 fn test_book_pprint() {
     let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
     let mut book = OrderBook::new(instrument_id, BookType::L3_MBO);
@@ -1203,6 +1282,7 @@ fn test_book_group_price_levels() {
         BookOrder::new(OrderSide::Sell, Price::from("2.2"), Quantity::from(2), 5),
         BookOrder::new(OrderSide::Sell, Price::from("2.8"), Quantity::from(3), 6),
     ];
+
     for (i, order) in orders.into_iter().enumerate() {
         book.add(order, 0, i as u64, 100.into());
     }
@@ -1289,6 +1369,7 @@ fn test_book_group_price_realistic() {
             6,
         ),
     ];
+
     for (i, order) in orders.into_iter().enumerate() {
         book.add(order, 0, i as u64, 100.into());
     }
@@ -6639,6 +6720,7 @@ fn test_l1_consecutive_snapshots_clear_between() {
             0.into(),
         ));
     }
+
     for (i, price) in ["103.00", "102.00"].iter().enumerate() {
         let flags = if i == 1 {
             RecordFlag::F_SNAPSHOT as u8 | RecordFlag::F_LAST as u8
@@ -6680,6 +6762,7 @@ fn test_l1_consecutive_snapshots_clear_between() {
             1.into(),
         ));
     }
+
     for (i, price) in ["108.00", "107.00"].iter().enumerate() {
         let flags = if i == 1 {
             RecordFlag::F_SNAPSHOT as u8 | RecordFlag::F_LAST as u8
@@ -7408,4 +7491,177 @@ fn test_asks_range_up_to_single_exact_bottom() {
 
     assert_eq!(levels.len(), 1);
     assert_eq!(levels[0].0.value, Price::from("101.00"));
+}
+
+#[rstest]
+fn test_book_get_levels_for_price_buy_crosses_two_levels() {
+    let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
+    let mut book = OrderBook::new(instrument_id, BookType::L2_MBP);
+
+    let ask1 = BookOrder::new(
+        OrderSide::Sell,
+        Price::from("1.001"),
+        Quantity::from("10.0"),
+        0,
+    );
+    let ask2 = BookOrder::new(
+        OrderSide::Sell,
+        Price::from("1.002"),
+        Quantity::from("20.0"),
+        0,
+    );
+    let ask3 = BookOrder::new(
+        OrderSide::Sell,
+        Price::from("1.003"),
+        Quantity::from("30.0"),
+        0,
+    );
+    book.add(ask1, 0, 1, 1.into());
+    book.add(ask2, 0, 2, 2.into());
+    book.add(ask3, 0, 3, 3.into());
+
+    let result = book.get_all_crossed_levels(OrderSide::Buy, Price::from("1.002"), 1);
+
+    assert_eq!(
+        result,
+        vec![
+            (Price::from("1.001"), Quantity::from("10.0")),
+            (Price::from("1.002"), Quantity::from("20.0")),
+        ]
+    );
+}
+
+#[rstest]
+fn test_book_get_levels_for_price_sell_crosses_two_levels() {
+    let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
+    let mut book = OrderBook::new(instrument_id, BookType::L2_MBP);
+
+    let bid1 = BookOrder::new(
+        OrderSide::Buy,
+        Price::from("1.003"),
+        Quantity::from("10.0"),
+        0,
+    );
+    let bid2 = BookOrder::new(
+        OrderSide::Buy,
+        Price::from("1.002"),
+        Quantity::from("20.0"),
+        0,
+    );
+    let bid3 = BookOrder::new(
+        OrderSide::Buy,
+        Price::from("1.001"),
+        Quantity::from("30.0"),
+        0,
+    );
+    book.add(bid1, 0, 1, 1.into());
+    book.add(bid2, 0, 2, 2.into());
+    book.add(bid3, 0, 3, 3.into());
+
+    let result = book.get_all_crossed_levels(OrderSide::Sell, Price::from("1.002"), 1);
+
+    assert_eq!(
+        result,
+        vec![
+            (Price::from("1.003"), Quantity::from("10.0")),
+            (Price::from("1.002"), Quantity::from("20.0")),
+        ]
+    );
+}
+
+#[rstest]
+fn test_book_get_levels_for_price_no_levels_crossed() {
+    let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
+    let mut book = OrderBook::new(instrument_id, BookType::L2_MBP);
+
+    let ask1 = BookOrder::new(
+        OrderSide::Sell,
+        Price::from("1.001"),
+        Quantity::from("10.0"),
+        0,
+    );
+    let ask2 = BookOrder::new(
+        OrderSide::Sell,
+        Price::from("1.002"),
+        Quantity::from("20.0"),
+        0,
+    );
+    book.add(ask1, 0, 1, 1.into());
+    book.add(ask2, 0, 2, 2.into());
+
+    let result = book.get_all_crossed_levels(OrderSide::Buy, Price::from("0.999"), 1);
+
+    assert!(result.is_empty());
+}
+
+#[rstest]
+fn test_book_get_levels_for_price_all_levels_crossed() {
+    let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
+    let mut book = OrderBook::new(instrument_id, BookType::L2_MBP);
+
+    let ask1 = BookOrder::new(
+        OrderSide::Sell,
+        Price::from("1.001"),
+        Quantity::from("10.0"),
+        0,
+    );
+    let ask2 = BookOrder::new(
+        OrderSide::Sell,
+        Price::from("1.002"),
+        Quantity::from("20.0"),
+        0,
+    );
+    let ask3 = BookOrder::new(
+        OrderSide::Sell,
+        Price::from("1.003"),
+        Quantity::from("30.0"),
+        0,
+    );
+    book.add(ask1, 0, 1, 1.into());
+    book.add(ask2, 0, 2, 2.into());
+    book.add(ask3, 0, 3, 3.into());
+
+    let result = book.get_all_crossed_levels(OrderSide::Buy, Price::from("2.000"), 1);
+
+    assert_eq!(
+        result,
+        vec![
+            (Price::from("1.001"), Quantity::from("10.0")),
+            (Price::from("1.002"), Quantity::from("20.0")),
+            (Price::from("1.003"), Quantity::from("30.0")),
+        ]
+    );
+}
+
+#[rstest]
+fn test_book_get_levels_for_price_empty_book() {
+    let instrument_id = InstrumentId::from("ETHUSDT-PERP.BINANCE");
+    let book = OrderBook::new(instrument_id, BookType::L2_MBP);
+
+    let result = book.get_all_crossed_levels(OrderSide::Buy, Price::from("1.000"), 1);
+
+    assert!(result.is_empty());
+}
+
+#[rstest]
+fn test_book_integrity_locked_market_is_valid() {
+    let instrument_id = InstrumentId::from("AAPL.XNAS");
+    let mut book = OrderBook::new(instrument_id, BookType::L2_MBP);
+
+    let bid = BookOrder::new(
+        OrderSide::Buy,
+        Price::from("100.00"),
+        Quantity::from(100),
+        1,
+    );
+    let ask = BookOrder::new(
+        OrderSide::Sell,
+        Price::from("100.00"),
+        Quantity::from(100),
+        2,
+    );
+    book.add(bid, 0, 1, 1.into());
+    book.add(ask, 0, 2, 2.into());
+
+    assert_eq!(book_check_integrity(&book), Ok(()));
 }

@@ -70,6 +70,12 @@ impl PyCache {
     pub fn from_rc(rc: Rc<RefCell<Cache>>) -> Self {
         Self(rc)
     }
+
+    /// Gets the inner `Rc<RefCell<Cache>>` for use in Rust code.
+    #[must_use]
+    pub fn cache_rc(&self) -> Rc<RefCell<Cache>> {
+        self.0.clone()
+    }
 }
 
 #[pymethods]
@@ -287,6 +293,7 @@ impl PyCache {
     fn py_instruments(&self, py: Python, venue: Option<Venue>) -> PyResult<Vec<Py<PyAny>>> {
         let cache = self.0.borrow();
         let mut py_instruments = Vec::new();
+
         match venue {
             Some(venue) => {
                 for instrument in cache.instruments(&venue, None) {

@@ -18,7 +18,7 @@
 use std::{
     future::Future,
     sync::{
-        Arc, RwLock,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -45,7 +45,7 @@ use nautilus_common::{
     },
 };
 use nautilus_core::{
-    AtomicMap, AtomicSet, MUTEX_POISONED,
+    AtomicMap, AtomicSet,
     datetime::datetime_to_unix_nanos,
     time::{AtomicTime, get_atomic_clock_realtime},
 };
@@ -95,13 +95,14 @@ pub struct BybitDataClient {
     cancellation_token: CancellationToken,
     tasks: Vec<JoinHandle<()>>,
     data_sender: tokio::sync::mpsc::UnboundedSender<DataEvent>,
-    instruments: Arc<RwLock<AHashMap<InstrumentId, InstrumentAny>>>,
-    book_depths: Arc<RwLock<AHashMap<InstrumentId, u32>>>,
-    quote_depths: Arc<RwLock<AHashMap<InstrumentId, u32>>>,
-    ticker_subs: Arc<RwLock<AHashMap<InstrumentId, AHashSet<&'static str>>>>,
+    instruments: Arc<AtomicMap<InstrumentId, InstrumentAny>>,
+    book_depths: Arc<AtomicMap<InstrumentId, u32>>,
+    quote_depths: Arc<AtomicMap<InstrumentId, u32>>,
+    ticker_subs: Arc<AtomicMap<InstrumentId, AHashSet<&'static str>>>,
+    trade_subs: Arc<AtomicSet<InstrumentId>>,
     option_greeks_subs: Arc<AtomicSet<InstrumentId>>,
     instrument_status_subs: Arc<AtomicSet<InstrumentId>>,
-    status_cache: Arc<RwLock<AHashMap<InstrumentId, MarketStatusAction>>>,
+    status_cache: Arc<AtomicMap<InstrumentId, MarketStatusAction>>,
     clock: &'static AtomicTime,
 }
 
@@ -169,13 +170,14 @@ impl BybitDataClient {
             cancellation_token: CancellationToken::new(),
             tasks: Vec::new(),
             data_sender,
-            instruments: Arc::new(RwLock::new(AHashMap::new())),
-            book_depths: Arc::new(RwLock::new(AHashMap::new())),
-            quote_depths: Arc::new(RwLock::new(AHashMap::new())),
-            ticker_subs: Arc::new(RwLock::new(AHashMap::new())),
+            instruments: Arc::new(AtomicMap::new()),
+            book_depths: Arc::new(AtomicMap::new()),
+            quote_depths: Arc::new(AtomicMap::new()),
+            ticker_subs: Arc::new(AtomicMap::new()),
+            trade_subs: Arc::new(AtomicSet::new()),
             option_greeks_subs: Arc::new(AtomicSet::new()),
             instrument_status_subs: Arc::new(AtomicSet::new()),
-            status_cache: Arc::new(RwLock::new(AHashMap::new())),
+            status_cache: Arc::new(AtomicMap::new()),
             clock,
         })
     }
@@ -197,7 +199,7 @@ impl BybitDataClient {
         &self,
         instrument_id: InstrumentId,
     ) -> Option<BybitProductType> {
-        let guard = self.instruments.read().expect(MUTEX_POISONED);
+        let guard = self.instruments.load();
         guard
             .get(&instrument_id)
             .and_then(|_| BybitProductType::from_suffix(instrument_id.symbol.as_str()))
@@ -241,11 +243,11 @@ impl BybitDataClient {
 
                         // Accumulate statuses from all product types before diffing
                         let mut all_statuses = AHashMap::new();
+
                         for &pt in &product_types {
                             match http.request_instrument_statuses(pt).await {
                                 Ok(new_statuses) => {
-                                    let inst_guard = instruments.read()
-                                        .expect(MUTEX_POISONED);
+                                    let inst_guard = instruments.load();
                                     for (id, action) in new_statuses {
                                         if inst_guard.contains_key(&id) {
                                             all_statuses.insert(id, action);
@@ -259,12 +261,12 @@ impl BybitDataClient {
                         }
 
                         let ts = clock.get_time_ns();
-                        let mut cache = status_cache.write()
-                            .expect(MUTEX_POISONED);
+                        let mut cache = (**status_cache.load()).clone();
                         let subs_guard = status_subs.load();
                         diff_and_emit_statuses(
                             &all_statuses, &mut cache, Some(&subs_guard), &sender, ts, ts,
                         );
+                        status_cache.store(cache);
                     }
                     () = cancel.cancelled() => {
                         log::debug!("Bybit instrument status polling task cancelled");
@@ -294,9 +296,10 @@ fn handle_ws_message(
     data_sender: &tokio::sync::mpsc::UnboundedSender<DataEvent>,
     instruments: &AHashMap<Ustr, InstrumentAny>,
     product_type: Option<BybitProductType>,
-    ticker_subs: &Arc<RwLock<AHashMap<InstrumentId, AHashSet<&'static str>>>>,
-    quote_depths: &Arc<RwLock<AHashMap<InstrumentId, u32>>>,
-    book_depths: &Arc<RwLock<AHashMap<InstrumentId, u32>>>,
+    trade_subs: &Arc<AtomicSet<InstrumentId>>,
+    ticker_subs: &Arc<AtomicMap<InstrumentId, AHashSet<&'static str>>>,
+    quote_depths: &Arc<AtomicMap<InstrumentId, u32>>,
+    book_depths: &Arc<AtomicMap<InstrumentId, u32>>,
     option_greeks_subs: &Arc<AtomicSet<InstrumentId>>,
     bar_types_cache: &Arc<AtomicMap<String, BarType>>,
     quote_cache: &mut AHashMap<InstrumentId, QuoteTick>,
@@ -318,10 +321,7 @@ fn handle_ws_message(
             let instrument_id = instrument.id();
 
             // Emit deltas if subscribed to book
-            let has_book_sub = book_depths
-                .read()
-                .expect(MUTEX_POISONED)
-                .contains_key(&instrument_id);
+            let has_book_sub = book_depths.contains_key(&instrument_id);
 
             if has_book_sub {
                 match parse_orderbook_deltas(msg, instrument, ts_init) {
@@ -333,13 +333,9 @@ fn handle_ws_message(
             }
 
             // Emit quote from best bid/ask if subscribed
-            let has_quote_sub = quote_depths
-                .read()
-                .expect(MUTEX_POISONED)
-                .contains_key(&instrument_id);
+            let has_quote_sub = quote_depths.contains_key(&instrument_id);
             let has_ticker_quote_sub = ticker_subs
-                .read()
-                .expect(MUTEX_POISONED)
+                .load()
                 .get(&instrument_id)
                 .is_some_and(|s| s.contains("quotes"));
 
@@ -357,9 +353,13 @@ fn handle_ws_message(
         BybitWsMessage::Trade(msg) => {
             for trade in &msg.data {
                 let Some(instrument) = resolve(&trade.s) else {
-                    log::warn!("Unknown symbol in trade update: {}", trade.s);
                     continue;
                 };
+                let instrument_id = instrument.id();
+                if !trade_subs.contains(&instrument_id) {
+                    continue;
+                }
+
                 match parse_ws_trade_tick(trade, instrument, ts_init) {
                     Ok(tick) => send_data(data_sender, Data::Trade(tick)),
                     Err(e) => log::error!("Failed to parse trade tick: {e}"),
@@ -381,10 +381,12 @@ fn handle_ws_message(
                 log::warn!("No bar type cached for kline topic: {topic_key}");
                 return;
             };
+
             for kline in &msg.data {
                 if !kline.confirm {
                     continue;
                 }
+
                 match parse_ws_kline_bar(kline, instrument, bar_type, true, ts_init) {
                     Ok(bar) => send_data(data_sender, Data::Bar(bar)),
                     Err(e) => log::error!("Failed to parse kline bar: {e}"),
@@ -397,7 +399,7 @@ fn handle_ws_message(
                 return;
             };
             let instrument_id = instrument.id();
-            let subs = ticker_subs.read().expect(MUTEX_POISONED);
+            let subs = ticker_subs.load();
             let sub_set = subs.get(&instrument_id);
 
             if sub_set.is_some_and(|s| s.contains("quotes")) && msg.data.bid1_price.is_some() {
@@ -495,7 +497,7 @@ fn handle_ws_message(
                 return;
             };
             let instrument_id = instrument.id();
-            let subs = ticker_subs.read().expect(MUTEX_POISONED);
+            let subs = ticker_subs.load();
             let sub_set = subs.get(&instrument_id);
 
             if sub_set.is_some_and(|s| s.contains("quotes")) {
@@ -558,11 +560,10 @@ fn handle_ws_message(
 }
 
 fn upsert_instrument(
-    cache: &Arc<RwLock<AHashMap<InstrumentId, InstrumentAny>>>,
+    cache: &Arc<AtomicMap<InstrumentId, InstrumentAny>>,
     instrument: InstrumentAny,
 ) {
-    let mut guard = cache.write().expect(MUTEX_POISONED);
-    guard.insert(instrument.id(), instrument);
+    cache.insert(instrument.id(), instrument);
 }
 
 #[async_trait::async_trait(?Send)]
@@ -599,12 +600,12 @@ impl DataClient for BybitDataClient {
         self.is_connected.store(false, Ordering::Relaxed);
         self.cancellation_token = CancellationToken::new();
         self.tasks.clear();
-        self.book_depths.write().expect(MUTEX_POISONED).clear();
-        self.quote_depths.write().expect(MUTEX_POISONED).clear();
-        self.ticker_subs.write().expect(MUTEX_POISONED).clear();
+        self.book_depths.store(AHashMap::new());
+        self.quote_depths.store(AHashMap::new());
+        self.ticker_subs.store(AHashMap::new());
         self.option_greeks_subs.store(AHashSet::new());
         self.instrument_status_subs.store(AHashSet::new());
-        self.status_cache.write().expect(MUTEX_POISONED).clear();
+        self.status_cache.store(AHashMap::new());
         Ok(())
     }
 
@@ -625,6 +626,7 @@ impl DataClient for BybitDataClient {
         };
 
         let mut all_instruments = Vec::new();
+
         for product_type in &product_types {
             let fetched = self
                 .http_client
@@ -636,11 +638,11 @@ impl DataClient for BybitDataClient {
 
             self.http_client.cache_instruments(&fetched);
 
-            let mut guard = self.instruments.write().expect(MUTEX_POISONED);
-            for instrument in &fetched {
-                guard.insert(instrument.id(), instrument.clone());
-            }
-            drop(guard);
+            self.instruments.rcu(|m| {
+                for instrument in &fetched {
+                    m.insert(instrument.id(), instrument.clone());
+                }
+            });
 
             all_instruments.extend(fetched);
         }
@@ -653,6 +655,7 @@ impl DataClient for BybitDataClient {
         {
             // Collect all statuses first (without holding the lock across await)
             let mut collected_statuses = Vec::new();
+
             for product_type in &product_types {
                 match self
                     .http_client
@@ -668,20 +671,21 @@ impl DataClient for BybitDataClient {
                 }
             }
 
-            // Now acquire locks and insert
-            let mut status_guard = self.status_cache.write().expect(MUTEX_POISONED);
-            let inst_guard = self.instruments.read().expect(MUTEX_POISONED);
+            let inst_guard = self.instruments.load();
+            let mut status_map = AHashMap::new();
+
             for statuses in collected_statuses {
                 for (id, action) in statuses {
                     if inst_guard.contains_key(&id) {
-                        status_guard.insert(id, action);
+                        status_map.insert(id, action);
                     }
                 }
             }
             log::info!(
                 "Seeded instrument status cache with {} entries",
-                status_guard.len()
+                status_map.len()
             );
+            self.status_cache.store(status_map);
         }
 
         for instrument in all_instruments {
@@ -692,7 +696,7 @@ impl DataClient for BybitDataClient {
 
         // Build instruments map keyed by full Nautilus symbol for parsing
         let instruments_by_symbol: Arc<AHashMap<Ustr, InstrumentAny>> = {
-            let guard = self.instruments.read().expect(MUTEX_POISONED);
+            let guard = self.instruments.load();
             let mut map = AHashMap::new();
             for instrument in guard.values() {
                 map.insert(instrument.id().symbol.inner(), instrument.clone());
@@ -713,6 +717,7 @@ impl DataClient for BybitDataClient {
             let stream = ws_client.stream();
             let product_type = ws_client.product_type();
             let sender = self.data_sender.clone();
+            let trade_subs = self.trade_subs.clone();
             let ticker_subs = self.ticker_subs.clone();
             let quote_depths = self.quote_depths.clone();
             let book_depths = self.book_depths.clone();
@@ -721,11 +726,13 @@ impl DataClient for BybitDataClient {
             let instruments = Arc::clone(&instruments_by_symbol);
             let clock = self.clock;
             let cancel = self.cancellation_token.clone();
+
             let handle = get_runtime().spawn(async move {
                 let mut quote_cache: AHashMap<InstrumentId, QuoteTick> = AHashMap::new();
                 let mut funding_cache: AHashMap<Ustr, FundingCacheEntry> = AHashMap::new();
 
                 pin_mut!(stream);
+
                 loop {
                     tokio::select! {
                         Some(message) = stream.next() => {
@@ -734,6 +741,7 @@ impl DataClient for BybitDataClient {
                                 &sender,
                                 &instruments,
                                 product_type,
+                                &trade_subs,
                                 &ticker_subs,
                                 &quote_depths,
                                 &book_depths,
@@ -792,12 +800,13 @@ impl DataClient for BybitDataClient {
             }
         }
 
-        self.book_depths.write().expect(MUTEX_POISONED).clear();
-        self.quote_depths.write().expect(MUTEX_POISONED).clear();
-        self.ticker_subs.write().expect(MUTEX_POISONED).clear();
+        self.book_depths.store(AHashMap::new());
+        self.quote_depths.store(AHashMap::new());
+        self.ticker_subs.store(AHashMap::new());
+        self.trade_subs.store(AHashSet::new());
         self.option_greeks_subs.store(AHashSet::new());
         self.instrument_status_subs.store(AHashSet::new());
-        self.status_cache.write().expect(MUTEX_POISONED).clear();
+        self.status_cache.store(AHashMap::new());
         self.is_connected.store(false, Ordering::Release);
         log::info!("Disconnected: client_id={}", self.client_id);
         Ok(())
@@ -841,10 +850,7 @@ impl DataClient for BybitDataClient {
                 ws.subscribe_orderbook(instrument_id, depth)
                     .await
                     .context("orderbook subscription")?;
-                book_depths
-                    .write()
-                    .expect("book depths cache lock poisoned")
-                    .insert(instrument_id, depth);
+                book_depths.insert(instrument_id, depth);
                 Ok(())
             },
             "order book delta subscription",
@@ -867,10 +873,7 @@ impl DataClient for BybitDataClient {
         // SPOT ticker channel doesn't include bid/ask, use orderbook depth=1
         if product_type == BybitProductType::Spot {
             let depth = 1;
-            self.quote_depths
-                .write()
-                .expect(MUTEX_POISONED)
-                .insert(instrument_id, depth);
+            self.quote_depths.insert(instrument_id, depth);
 
             self.spawn_ws(
                 async move {
@@ -881,13 +884,12 @@ impl DataClient for BybitDataClient {
                 "quote subscription (spot orderbook)",
             );
         } else {
-            let should_subscribe = {
-                let mut subs = self.ticker_subs.write().expect(MUTEX_POISONED);
-                let entry = subs.entry(instrument_id).or_default();
-                let is_first = entry.is_empty();
+            let mut should_subscribe = false;
+            self.ticker_subs.rcu(|m| {
+                let entry = m.entry(instrument_id).or_default();
+                should_subscribe = entry.is_empty();
                 entry.insert("quotes");
-                is_first
-            };
+            });
 
             if should_subscribe {
                 self.spawn_ws(
@@ -908,6 +910,8 @@ impl DataClient for BybitDataClient {
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
             .unwrap_or(BybitProductType::Linear);
+
+        self.trade_subs.insert(instrument_id);
 
         let ws = self
             .get_ws_client_for_product(product_type)
@@ -931,17 +935,16 @@ impl DataClient for BybitDataClient {
             .get_product_type_for_instrument(instrument_id)
             .unwrap_or(BybitProductType::Linear);
 
-        if product_type == BybitProductType::Spot {
-            anyhow::bail!("Funding rates not available for Spot instruments");
+        if product_type == BybitProductType::Spot || product_type == BybitProductType::Option {
+            anyhow::bail!("Funding rates not available for {product_type:?} instruments");
         }
 
-        let should_subscribe = {
-            let mut subs = self.ticker_subs.write().expect(MUTEX_POISONED);
-            let entry = subs.entry(instrument_id).or_default();
-            let first = entry.is_empty();
+        let mut should_subscribe = false;
+        self.ticker_subs.rcu(|m| {
+            let entry = m.entry(instrument_id).or_default();
+            should_subscribe = entry.is_empty();
             entry.insert("funding");
-            first
-        };
+        });
 
         if should_subscribe {
             let ws = self
@@ -971,13 +974,12 @@ impl DataClient for BybitDataClient {
             anyhow::bail!("Mark prices not available for Spot instruments");
         }
 
-        let should_subscribe = {
-            let mut subs = self.ticker_subs.write().expect(MUTEX_POISONED);
-            let entry = subs.entry(instrument_id).or_default();
-            let first = entry.is_empty();
+        let mut should_subscribe = false;
+        self.ticker_subs.rcu(|m| {
+            let entry = m.entry(instrument_id).or_default();
+            should_subscribe = entry.is_empty();
             entry.insert("mark_prices");
-            first
-        };
+        });
 
         if should_subscribe {
             let ws = self
@@ -1007,13 +1009,12 @@ impl DataClient for BybitDataClient {
             anyhow::bail!("Index prices not available for Spot instruments");
         }
 
-        let should_subscribe = {
-            let mut subs = self.ticker_subs.write().expect(MUTEX_POISONED);
-            let entry = subs.entry(instrument_id).or_default();
-            let first = entry.is_empty();
+        let mut should_subscribe = false;
+        self.ticker_subs.rcu(|m| {
+            let entry = m.entry(instrument_id).or_default();
+            should_subscribe = entry.is_empty();
             entry.insert("index_prices");
-            first
-        };
+        });
 
         if should_subscribe {
             let ws = self
@@ -1040,6 +1041,10 @@ impl DataClient for BybitDataClient {
             .get_product_type_for_instrument(instrument_id)
             .unwrap_or(BybitProductType::Linear);
 
+        if product_type == BybitProductType::Option {
+            anyhow::bail!("Bybit does not support kline/bar data for options");
+        }
+
         let ws = self
             .get_ws_client_for_product(product_type)
             .context("no WebSocket client for product type")?
@@ -1060,10 +1065,11 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         let depth = self
             .book_depths
-            .write()
-            .expect(MUTEX_POISONED)
-            .remove(&instrument_id)
+            .load()
+            .get(&instrument_id)
+            .copied()
             .unwrap_or(BYBIT_DEFAULT_ORDERBOOK_DEPTH);
+        self.book_depths.remove(&instrument_id);
 
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
@@ -1072,8 +1078,7 @@ impl DataClient for BybitDataClient {
         // Check if spot quote subscription is using the same depth
         let quote_using_same_depth = self
             .quote_depths
-            .read()
-            .expect(MUTEX_POISONED)
+            .load()
             .get(&instrument_id)
             .is_some_and(|&d| d == depth);
 
@@ -1111,16 +1116,16 @@ impl DataClient for BybitDataClient {
         if product_type == BybitProductType::Spot {
             let depth = self
                 .quote_depths
-                .write()
-                .expect(MUTEX_POISONED)
-                .remove(&instrument_id)
+                .load()
+                .get(&instrument_id)
+                .copied()
                 .unwrap_or(1);
+            self.quote_depths.remove(&instrument_id);
 
             // Check if book deltas subscription is using the same depth
             let book_using_same_depth = self
                 .book_depths
-                .read()
-                .expect(MUTEX_POISONED)
+                .load()
                 .get(&instrument_id)
                 .is_some_and(|&d| d == depth);
 
@@ -1135,20 +1140,20 @@ impl DataClient for BybitDataClient {
                 );
             }
         } else {
-            let should_unsubscribe = {
-                let mut subs = self.ticker_subs.write().expect(MUTEX_POISONED);
-                if let Some(entry) = subs.get_mut(&instrument_id) {
+            let mut should_unsubscribe = false;
+            self.ticker_subs.rcu(|m| {
+                if let Some(entry) = m.get_mut(&instrument_id) {
                     entry.remove("quotes");
                     if entry.is_empty() {
-                        subs.remove(&instrument_id);
-                        true
+                        m.remove(&instrument_id);
+                        should_unsubscribe = true;
                     } else {
-                        false
+                        should_unsubscribe = false;
                     }
                 } else {
-                    false
+                    should_unsubscribe = false;
                 }
-            };
+            });
 
             if should_unsubscribe {
                 self.spawn_ws(
@@ -1169,6 +1174,8 @@ impl DataClient for BybitDataClient {
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
             .unwrap_or(BybitProductType::Linear);
+
+        self.trade_subs.remove(&instrument_id);
 
         let ws = self
             .get_ws_client_for_product(product_type)
@@ -1192,20 +1199,20 @@ impl DataClient for BybitDataClient {
             .get_product_type_for_instrument(instrument_id)
             .unwrap_or(BybitProductType::Linear);
 
-        let should_unsubscribe = {
-            let mut subs = self.ticker_subs.write().expect(MUTEX_POISONED);
-            if let Some(entry) = subs.get_mut(&instrument_id) {
+        let mut should_unsubscribe = false;
+        self.ticker_subs.rcu(|m| {
+            if let Some(entry) = m.get_mut(&instrument_id) {
                 entry.remove("funding");
                 if entry.is_empty() {
-                    subs.remove(&instrument_id);
-                    true
+                    m.remove(&instrument_id);
+                    should_unsubscribe = true;
                 } else {
-                    false
+                    should_unsubscribe = false;
                 }
             } else {
-                false
+                should_unsubscribe = false;
             }
-        };
+        });
 
         if should_unsubscribe {
             let ws = self
@@ -1231,20 +1238,20 @@ impl DataClient for BybitDataClient {
             .get_product_type_for_instrument(instrument_id)
             .unwrap_or(BybitProductType::Linear);
 
-        let should_unsubscribe = {
-            let mut subs = self.ticker_subs.write().expect(MUTEX_POISONED);
-            if let Some(entry) = subs.get_mut(&instrument_id) {
+        let mut should_unsubscribe = false;
+        self.ticker_subs.rcu(|m| {
+            if let Some(entry) = m.get_mut(&instrument_id) {
                 entry.remove("mark_prices");
                 if entry.is_empty() {
-                    subs.remove(&instrument_id);
-                    true
+                    m.remove(&instrument_id);
+                    should_unsubscribe = true;
                 } else {
-                    false
+                    should_unsubscribe = false;
                 }
             } else {
-                false
+                should_unsubscribe = false;
             }
-        };
+        });
 
         if should_unsubscribe {
             let ws = self
@@ -1270,20 +1277,20 @@ impl DataClient for BybitDataClient {
             .get_product_type_for_instrument(instrument_id)
             .unwrap_or(BybitProductType::Linear);
 
-        let should_unsubscribe = {
-            let mut subs = self.ticker_subs.write().expect(MUTEX_POISONED);
-            if let Some(entry) = subs.get_mut(&instrument_id) {
+        let mut should_unsubscribe = false;
+        self.ticker_subs.rcu(|m| {
+            if let Some(entry) = m.get_mut(&instrument_id) {
                 entry.remove("index_prices");
                 if entry.is_empty() {
-                    subs.remove(&instrument_id);
-                    true
+                    m.remove(&instrument_id);
+                    should_unsubscribe = true;
                 } else {
-                    false
+                    should_unsubscribe = false;
                 }
             } else {
-                false
+                should_unsubscribe = false;
             }
-        };
+        });
 
         if should_unsubscribe {
             let ws = self
@@ -1330,13 +1337,12 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         self.option_greeks_subs.insert(instrument_id);
 
-        let should_subscribe = {
-            let mut subs = self.ticker_subs.write().expect(MUTEX_POISONED);
-            let entry = subs.entry(instrument_id).or_default();
-            let first = entry.is_empty();
+        let mut should_subscribe = false;
+        self.ticker_subs.rcu(|m| {
+            let entry = m.entry(instrument_id).or_default();
+            should_subscribe = entry.is_empty();
             entry.insert("option_greeks");
-            first
-        };
+        });
 
         if should_subscribe {
             let product_type = self
@@ -1364,20 +1370,20 @@ impl DataClient for BybitDataClient {
         let instrument_id = cmd.instrument_id;
         self.option_greeks_subs.remove(&instrument_id);
 
-        let should_unsubscribe = {
-            let mut subs = self.ticker_subs.write().expect(MUTEX_POISONED);
-            if let Some(entry) = subs.get_mut(&instrument_id) {
+        let mut should_unsubscribe = false;
+        self.ticker_subs.rcu(|m| {
+            if let Some(entry) = m.get_mut(&instrument_id) {
                 entry.remove("option_greeks");
                 if entry.is_empty() {
-                    subs.remove(&instrument_id);
-                    true
+                    m.remove(&instrument_id);
+                    should_unsubscribe = true;
                 } else {
-                    false
+                    should_unsubscribe = false;
                 }
             } else {
-                false
+                should_unsubscribe = false;
             }
-        };
+        });
 
         if should_unsubscribe {
             let product_type = self
@@ -1750,6 +1756,7 @@ impl DataClient for BybitDataClient {
                     base_coin: None,
                     exp_date: None,
                 };
+
                 match http_client.request_option_tickers_raw_with_params(&params).await {
                     Ok(tickers) => {
                         let ts = clock.get_time_ns();
@@ -1850,7 +1857,7 @@ impl DataClient for BybitDataClient {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
 
     use ahash::{AHashMap, AHashSet};
     use nautilus_common::messages::DataEvent;
@@ -1909,7 +1916,7 @@ mod tests {
         let response: BybitInstrumentOptionResponse = serde_json::from_str(&json).unwrap();
         let instrument = &response.result.list[0];
         let ts = UnixNanos::new(1_700_000_000_000_000_000);
-        parse_option_instrument(instrument, ts, ts).unwrap()
+        parse_option_instrument(instrument, None, ts, ts).unwrap()
     }
 
     fn build_instruments(instruments: &[InstrumentAny]) -> AHashMap<Ustr, InstrumentAny> {
@@ -1922,16 +1929,18 @@ mod tests {
 
     #[allow(clippy::type_complexity)]
     fn empty_subs() -> (
-        Arc<RwLock<AHashMap<InstrumentId, AHashSet<&'static str>>>>,
-        Arc<RwLock<AHashMap<InstrumentId, u32>>>,
-        Arc<RwLock<AHashMap<InstrumentId, u32>>>,
+        Arc<AtomicSet<InstrumentId>>,
+        Arc<AtomicMap<InstrumentId, AHashSet<&'static str>>>,
+        Arc<AtomicMap<InstrumentId, u32>>,
+        Arc<AtomicMap<InstrumentId, u32>>,
         Arc<AtomicSet<InstrumentId>>,
         Arc<AtomicMap<String, BarType>>,
     ) {
         (
-            Arc::new(RwLock::new(AHashMap::new())),
-            Arc::new(RwLock::new(AHashMap::new())),
-            Arc::new(RwLock::new(AHashMap::new())),
+            Arc::new(AtomicSet::new()),
+            Arc::new(AtomicMap::new()),
+            Arc::new(AtomicMap::new()),
+            Arc::new(AtomicMap::new()),
             Arc::new(AtomicSet::new()),
             Arc::new(AtomicMap::new()),
         )
@@ -1941,7 +1950,9 @@ mod tests {
     fn test_handle_trade_message_emits_trade_tick() {
         let instrument = linear_instrument();
         let instruments = build_instruments(std::slice::from_ref(&instrument));
-        let (ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) = empty_subs();
+        let (trade_subs, ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) =
+            empty_subs();
+        trade_subs.insert(instrument.id());
         let mut quote_cache = AHashMap::new();
         let mut funding_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
@@ -1957,6 +1968,7 @@ mod tests {
             &tx,
             &instruments,
             Some(BybitProductType::Linear),
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -1982,7 +1994,8 @@ mod tests {
     #[rstest]
     fn test_handle_trade_message_unknown_symbol_no_event() {
         let instruments = AHashMap::new();
-        let (ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) = empty_subs();
+        let (trade_subs, ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) =
+            empty_subs();
         let mut quote_cache = AHashMap::new();
         let mut funding_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
@@ -1998,6 +2011,7 @@ mod tests {
             &tx,
             &instruments,
             Some(BybitProductType::Linear),
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -2016,10 +2030,11 @@ mod tests {
         let instrument = linear_instrument();
         let instrument_id = instrument.id();
         let instruments = build_instruments(&[instrument]);
-        let (ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) = empty_subs();
+        let (trade_subs, ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) =
+            empty_subs();
 
-        book_depths.write().unwrap().insert(instrument_id, 1);
-        quote_depths.write().unwrap().insert(instrument_id, 1);
+        book_depths.insert(instrument_id, 1);
+        quote_depths.insert(instrument_id, 1);
 
         let mut quote_cache = AHashMap::new();
         let mut funding_cache = AHashMap::new();
@@ -2036,6 +2051,7 @@ mod tests {
             &tx,
             &instruments,
             Some(BybitProductType::Linear),
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -2057,7 +2073,8 @@ mod tests {
     fn test_handle_orderbook_message_no_sub_no_event() {
         let instrument = linear_instrument();
         let instruments = build_instruments(&[instrument]);
-        let (ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) = empty_subs();
+        let (trade_subs, ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) =
+            empty_subs();
         let mut quote_cache = AHashMap::new();
         let mut funding_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
@@ -2073,6 +2090,7 @@ mod tests {
             &tx,
             &instruments,
             Some(BybitProductType::Linear),
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -2091,11 +2109,12 @@ mod tests {
         let instrument = linear_instrument();
         let instrument_id = instrument.id();
         let instruments = build_instruments(&[instrument]);
-        let (ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) = empty_subs();
+        let (trade_subs, ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) =
+            empty_subs();
 
         let mut subs = AHashSet::new();
         subs.insert("quotes");
-        ticker_subs.write().unwrap().insert(instrument_id, subs);
+        ticker_subs.insert(instrument_id, subs);
 
         let mut quote_cache = AHashMap::new();
         let mut funding_cache = AHashMap::new();
@@ -2112,6 +2131,7 @@ mod tests {
             &tx,
             &instruments,
             Some(BybitProductType::Linear),
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -2132,11 +2152,12 @@ mod tests {
         let instrument = linear_instrument();
         let instrument_id = instrument.id();
         let instruments = build_instruments(&[instrument]);
-        let (ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) = empty_subs();
+        let (trade_subs, ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) =
+            empty_subs();
 
         let mut subs = AHashSet::new();
         subs.insert("funding");
-        ticker_subs.write().unwrap().insert(instrument_id, subs);
+        ticker_subs.insert(instrument_id, subs);
 
         let mut quote_cache = AHashMap::new();
         let mut funding_cache = AHashMap::new();
@@ -2153,6 +2174,7 @@ mod tests {
             &tx,
             &instruments,
             Some(BybitProductType::Linear),
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -2173,6 +2195,7 @@ mod tests {
             &tx,
             &instruments,
             Some(BybitProductType::Linear),
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -2191,12 +2214,13 @@ mod tests {
         let instrument = linear_instrument();
         let instrument_id = instrument.id();
         let instruments = build_instruments(&[instrument]);
-        let (ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) = empty_subs();
+        let (trade_subs, ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) =
+            empty_subs();
 
         let mut subs = AHashSet::new();
         subs.insert("mark_prices");
         subs.insert("index_prices");
-        ticker_subs.write().unwrap().insert(instrument_id, subs);
+        ticker_subs.insert(instrument_id, subs);
 
         let mut quote_cache = AHashMap::new();
         let mut funding_cache = AHashMap::new();
@@ -2213,6 +2237,7 @@ mod tests {
             &tx,
             &instruments,
             Some(BybitProductType::Linear),
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -2233,7 +2258,8 @@ mod tests {
     #[rstest]
     fn test_handle_reconnected_clears_caches() {
         let instruments = AHashMap::new();
-        let (ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) = empty_subs();
+        let (trade_subs, ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) =
+            empty_subs();
         let mut quote_cache = AHashMap::new();
         let mut funding_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
@@ -2267,6 +2293,7 @@ mod tests {
             &tx,
             &instruments,
             None,
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -2293,7 +2320,8 @@ mod tests {
         let mut instruments = AHashMap::new();
         instruments.insert(ticker_key, instrument);
 
-        let (ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) = empty_subs();
+        let (trade_subs, ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) =
+            empty_subs();
         greeks_subs.insert(instrument_id);
 
         let mut quote_cache = AHashMap::new();
@@ -2311,6 +2339,7 @@ mod tests {
             &tx,
             &instruments,
             Some(BybitProductType::Option),
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -2328,7 +2357,8 @@ mod tests {
     #[rstest]
     fn test_handle_execution_message_ignored_by_data() {
         let instruments = AHashMap::new();
-        let (ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) = empty_subs();
+        let (trade_subs, ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) =
+            empty_subs();
         let mut quote_cache = AHashMap::new();
         let mut funding_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
@@ -2345,6 +2375,7 @@ mod tests {
             &tx,
             &instruments,
             None,
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -2363,9 +2394,11 @@ mod tests {
         let instrument = linear_instrument();
 
         let mut map = AHashMap::new();
-        map.insert(instrument.id().symbol.inner(), instrument);
+        map.insert(instrument.id().symbol.inner(), instrument.clone());
 
-        let (ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) = empty_subs();
+        let (trade_subs, ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) =
+            empty_subs();
+        trade_subs.insert(instrument.id());
         let mut quote_cache = AHashMap::new();
         let mut funding_cache = AHashMap::new();
         let clock = get_atomic_clock_realtime();
@@ -2380,6 +2413,7 @@ mod tests {
             &tx,
             &map,
             None,
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -2397,6 +2431,7 @@ mod tests {
             &tx,
             &map,
             Some(BybitProductType::Linear),
+            &trade_subs,
             &ticker_subs,
             &quote_depths,
             &book_depths,
@@ -2407,6 +2442,59 @@ mod tests {
             clock,
         );
 
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, DataEvent::Data(Data::Trade(_))));
+    }
+
+    #[rstest]
+    fn test_handle_trade_filters_by_subscription() {
+        let instrument = linear_instrument();
+        let instruments = build_instruments(std::slice::from_ref(&instrument));
+        let (trade_subs, ticker_subs, quote_depths, book_depths, greeks_subs, bar_types) =
+            empty_subs();
+        let mut quote_cache = AHashMap::new();
+        let mut funding_cache = AHashMap::new();
+        let clock = get_atomic_clock_realtime();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let json = load_test_json("ws_public_trade.json");
+        let msg: BybitWsTradeMsg = serde_json::from_str(&json).unwrap();
+
+        // Without subscription, trade should be filtered out
+        handle_ws_message(
+            &BybitWsMessage::Trade(msg.clone()),
+            &tx,
+            &instruments,
+            Some(BybitProductType::Linear),
+            &trade_subs,
+            &ticker_subs,
+            &quote_depths,
+            &book_depths,
+            &greeks_subs,
+            &bar_types,
+            &mut quote_cache,
+            &mut funding_cache,
+            clock,
+        );
+        assert!(rx.try_recv().is_err());
+
+        // With subscription, trade should be emitted
+        trade_subs.insert(instrument.id());
+        handle_ws_message(
+            &BybitWsMessage::Trade(msg),
+            &tx,
+            &instruments,
+            Some(BybitProductType::Linear),
+            &trade_subs,
+            &ticker_subs,
+            &quote_depths,
+            &book_depths,
+            &greeks_subs,
+            &bar_types,
+            &mut quote_cache,
+            &mut funding_cache,
+            clock,
+        );
         let event = rx.try_recv().unwrap();
         assert!(matches!(event, DataEvent::Data(Data::Trade(_))));
     }

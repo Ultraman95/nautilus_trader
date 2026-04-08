@@ -76,6 +76,7 @@ from nautilus_trader.model.identifiers import AccountId
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import ClientOrderId
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.instruments import CryptoOption
 from nautilus_trader.model.instruments import CurrencyPair
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.model.orders import Order
@@ -570,6 +571,7 @@ class OKXExecutionClient(LiveExecutionClient):
         pyo3_instrument_id: nautilus_pyo3.InstrumentId,
     ) -> OrderStatusReport | None:
         fallback_ids: list[ClientOrderId] = []
+
         for candidate in (
             canonical_requested_id,
             self._exchange_client_order_id(command.client_order_id),
@@ -579,6 +581,7 @@ class OKXExecutionClient(LiveExecutionClient):
                 fallback_ids.append(candidate)
 
         algo_ids: set[str] = set()
+
         for candidate in fallback_ids:
             candidate_report = await self._fetch_algo_order_status_report(
                 candidate,
@@ -658,6 +661,7 @@ class OKXExecutionClient(LiveExecutionClient):
                 instrument_id=pyo3_instrument_id,
                 algo_id=algo_id,
             )
+
             for algo_report in algo_reports:
                 algo_report = self._hydrate_zero_quantity_algo_report(algo_report)
                 report = OrderStatusReport.from_pyo3(algo_report)
@@ -1032,22 +1036,35 @@ class OKXExecutionClient(LiveExecutionClient):
             self._log.warning(f"Cannot submit already closed order: {order}")
             return
 
+        instrument = self._cache.instrument(order.instrument_id)
+        is_option = isinstance(instrument, CryptoOption)
+
+        # OKX does not support market orders for options
+        if is_option and order.order_type == OrderType.MARKET:
+            self.generate_order_denied(
+                strategy_id=order.strategy_id,
+                instrument_id=order.instrument_id,
+                client_order_id=order.client_order_id,
+                reason="Market orders are not supported for OKX options, use Limit orders instead",
+                ts_event=self._clock.timestamp_ns(),
+            )
+            return
+
         # Validate quote quantity for spot margin market orders
-        if order.order_type == OrderType.MARKET and order.side == OrderSide.BUY:
-            instrument = self._cache.instrument(order.instrument_id)
-            # Spot margin market buy orders must use quote quantity
-            if (
-                instrument
-                and isinstance(instrument, CurrencyPair)
-                and self._config.use_spot_margin
-                and not order.is_quote_quantity
-            ):
-                self._deny_market_order_quantity(
-                    order,
-                    "OKX spot margin MARKET BUY orders require quote-denominated quantities; "
-                    "resubmit with `quote_quantity=True`",
-                )
-                return
+        if (
+            order.order_type == OrderType.MARKET
+            and order.side == OrderSide.BUY
+            and instrument
+            and isinstance(instrument, CurrencyPair)
+            and self._config.use_spot_margin
+            and not order.is_quote_quantity
+        ):
+            self._deny_market_order_quantity(
+                order,
+                "OKX spot margin MARKET BUY orders require quote-denominated quantities; "
+                "resubmit with `quote_quantity=True`",
+            )
+            return
 
         # Check if this is a conditional order that needs to go via REST API
         is_conditional = order.order_type in (
@@ -1057,6 +1074,17 @@ class OKXExecutionClient(LiveExecutionClient):
             OrderType.LIMIT_IF_TOUCHED,
             OrderType.TRAILING_STOP_MARKET,
         )
+
+        # OKX trigger/algo orders are not supported for options
+        if is_conditional and is_option:
+            self.generate_order_denied(
+                strategy_id=order.strategy_id,
+                instrument_id=order.instrument_id,
+                client_order_id=order.client_order_id,
+                reason=f"Trigger/conditional orders ({order.order_type}) are not supported for OKX options",
+                ts_event=self._clock.timestamp_ns(),
+            )
+            return
 
         if is_conditional:
             await self._submit_algo_order_http(command)
@@ -1093,6 +1121,7 @@ class OKXExecutionClient(LiveExecutionClient):
             self._clear_attached_oco_binding(
                 parent_order.client_order_id if "parent_order" in locals() else None,
             )
+
             for order in order_list.orders:
                 self.generate_order_rejected(
                     strategy_id=order.strategy_id,
@@ -1122,6 +1151,9 @@ class OKXExecutionClient(LiveExecutionClient):
 
         td_mode = self._get_trade_mode_for_order(order.instrument_id, params)
 
+        px_usd = params.get("px_usd") if params else None
+        px_vol = params.get("px_vol") if params else None
+
         response = await self._http_client.place_order(
             trader_id=pyo3_trader_id,
             strategy_id=pyo3_strategy_id,
@@ -1137,6 +1169,8 @@ class OKXExecutionClient(LiveExecutionClient):
             reduce_only=order.is_reduce_only or None,
             quote_quantity=order.is_quote_quantity,
             attach_algo_ords=attach_algo_ords,
+            px_usd=str(px_usd) if px_usd is not None else None,
+            px_vol=str(px_vol) if px_vol is not None else None,
         )
 
         if response.get("s_code") and response["s_code"] != "0":
@@ -1168,6 +1202,9 @@ class OKXExecutionClient(LiveExecutionClient):
 
         td_mode = self._get_trade_mode_for_order(order.instrument_id, params)
 
+        px_usd = params.get("px_usd") if params else None
+        px_vol = params.get("px_vol") if params else None
+
         await self._ws_client.submit_order(
             trader_id=pyo3_trader_id,
             strategy_id=pyo3_strategy_id,
@@ -1184,6 +1221,8 @@ class OKXExecutionClient(LiveExecutionClient):
             reduce_only=order.is_reduce_only,
             quote_quantity=order.is_quote_quantity,
             attach_algo_ords=attach_algo_ords,
+            px_usd=str(px_usd) if px_usd is not None else None,
+            px_vol=str(px_vol) if px_vol is not None else None,
         )
 
     async def _submit_order_websocket(self, command: SubmitOrder) -> None:
@@ -1241,6 +1280,7 @@ class OKXExecutionClient(LiveExecutionClient):
 
         sl_order: Order | None = None
         tp_order: Order | None = None
+
         for child_order in child_orders:
             self._validate_attached_bracket_child(
                 parent_order=parent_order,
@@ -1782,6 +1822,9 @@ class OKXExecutionClient(LiveExecutionClient):
             nautilus_pyo3.Quantity.from_str(str(command.quantity)) if command.quantity else None
         )
 
+        new_px_usd = command.params.get("px_usd") if command.params else None
+        new_px_vol = command.params.get("px_vol") if command.params else None
+
         try:
             await self._ws_client.modify_order(
                 trader_id=pyo3_trader_id,
@@ -1791,6 +1834,8 @@ class OKXExecutionClient(LiveExecutionClient):
                 quantity=pyo3_quantity,
                 client_order_id=pyo3_client_order_id,
                 venue_order_id=pyo3_venue_order_id,
+                new_px_usd=str(new_px_usd) if new_px_usd is not None else None,
+                new_px_vol=str(new_px_vol) if new_px_vol is not None else None,
             )
         except Exception as e:
             self.generate_order_modify_rejected(
@@ -2222,6 +2267,7 @@ class OKXExecutionClient(LiveExecutionClient):
             return [venue_report]
 
         reports: list[OrderStatusReport] = []
+
         for child_client_order_id in child_client_order_ids:
             child_order = self._cache.order(child_client_order_id)
             if child_order is None or not self._is_conditional_order(child_order):

@@ -37,7 +37,8 @@ use nautilus_common::{
         ExecutionEvent, ExecutionReport,
         execution::{
             BatchCancelOrders, CancelOrder, GenerateFillReports, GenerateOrderStatusReport,
-            GenerateOrderStatusReports, GeneratePositionStatusReports, ModifyOrder, SubmitOrder,
+            GenerateOrderStatusReports, GeneratePositionStatusReports, ModifyOrder, QueryAccount,
+            QueryOrder, SubmitOrder,
         },
     },
     testing::wait_until_async,
@@ -129,7 +130,7 @@ fn create_test_exec_config(addr: SocketAddr) -> PolymarketExecClientConfig {
         funder: None,
         base_url_http: Some(format!("http://{addr}")),
         base_url_ws: Some(format!("ws://{addr}/ws")),
-        base_url_gamma: Some(format!("http://{addr}")),
+        base_url_data_api: Some(format!("http://{addr}")),
         http_timeout_secs: 5,
         max_retries: 0,
         ..PolymarketExecClientConfig::default()
@@ -296,6 +297,10 @@ async fn handle_health() -> impl IntoResponse {
     StatusCode::OK
 }
 
+async fn handle_get_positions() -> impl IntoResponse {
+    Json(serde_json::json!([]))
+}
+
 fn create_test_router(state: TestServerState) -> Router {
     Router::new()
         .route("/data/orders", get(handle_get_orders))
@@ -312,6 +317,7 @@ fn create_test_router(state: TestServerState) -> Router {
         .route("/book", get(handle_get_book))
         .route("/fee-rate", get(handle_get_fee_rate))
         .route("/health", get(handle_health))
+        .route("/positions", get(handle_get_positions))
         .with_state(state)
 }
 
@@ -1433,8 +1439,9 @@ async fn test_cancel_order_skips_non_open_order() {
     let cmd = make_cancel_cmd("O-CANCEL-INIT", instrument_id);
     client.cancel_order(&cmd).unwrap();
 
-    // No event should be emitted since the order is not open
-    assert!(rx.try_recv().is_err());
+    // CancelRejected is emitted synchronously for non-open orders
+    let event = rx.try_recv().expect("Expected CancelRejected event");
+    assert_order_event(event, "CancelRejected");
 }
 
 #[rstest]
@@ -1926,4 +1933,67 @@ async fn test_cancel_order_cache_fallback_with_rejection() {
         .unwrap()
         .unwrap();
     assert_order_event(event, "CancelRejected");
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_query_order_does_not_block_within_runtime() {
+    let state = TestServerState::default();
+    let addr = start_mock_server(state).await;
+    let (mut client, mut rx, cache) = create_test_execution_client(addr);
+    client.start().unwrap();
+
+    let instrument_id = InstrumentId::from("TEST-TOKEN.POLYMARKET");
+    add_instrument_to_cache(&cache, instrument_id);
+
+    let cmd = QueryOrder::new(
+        TraderId::from("TESTER-001"),
+        Some(ClientId::from("POLYMARKET")),
+        StrategyId::from("S-001"),
+        instrument_id,
+        ClientOrderId::from("O-QUERY-001"),
+        Some(VenueOrderId::from(
+            "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12",
+        )),
+        UUID4::new(),
+        UnixNanos::default(),
+    );
+
+    // This must not panic with "Cannot start a runtime from within a runtime"
+    client.query_order(&cmd).unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_order_status_report(event, OrderStatus::Accepted);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_query_account_does_not_block_within_runtime() {
+    let state = TestServerState::default();
+    let addr = start_mock_server(state).await;
+    let (mut client, mut rx, _cache) = create_test_execution_client(addr);
+    client.start().unwrap();
+
+    let cmd = QueryAccount::new(
+        TraderId::from("TESTER-001"),
+        Some(ClientId::from("POLYMARKET")),
+        AccountId::from("POLYMARKET-001"),
+        UUID4::new(),
+        UnixNanos::default(),
+    );
+
+    // This must not panic with "Cannot start a runtime from within a runtime"
+    client.query_account(&cmd).unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(event, ExecutionEvent::Account(_)),
+        "Expected Account event, was {event:?}"
+    );
 }

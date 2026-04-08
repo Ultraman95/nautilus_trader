@@ -16,16 +16,16 @@
 //! Live execution client implementation for the Binance Spot adapter.
 
 use std::{
-    collections::VecDeque,
     future::Future,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashMap;
 use anyhow::Context;
 use async_trait::async_trait;
 use nautilus_common::{
+    cache::fifo::FifoCache,
     clients::ExecutionClient,
     live::{get_runtime, runner::get_exec_event_sender},
     messages::execution::{
@@ -95,51 +95,6 @@ use crate::{
         },
     },
 };
-
-/// Bounded deduplication set for trade IDs.
-///
-/// Prevents duplicate fill events when the same trade is received from both
-/// HTTP reconciliation and WebSocket user data stream.
-struct BoundedDedup<T: std::hash::Hash + Eq + Copy> {
-    set: AHashSet<T>,
-    order: VecDeque<T>,
-    capacity: usize,
-}
-
-impl<T: std::hash::Hash + Eq + Copy> std::fmt::Debug for BoundedDedup<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct(stringify!(BoundedDedup))
-            .field("len", &self.set.len())
-            .field("capacity", &self.capacity)
-            .finish()
-    }
-}
-
-impl<T: std::hash::Hash + Eq + Copy> BoundedDedup<T> {
-    fn new(capacity: usize) -> Self {
-        Self {
-            set: AHashSet::with_capacity(capacity),
-            order: VecDeque::with_capacity(capacity),
-            capacity,
-        }
-    }
-
-    /// Returns `true` if the value was already present.
-    fn insert(&mut self, value: T) -> bool {
-        if self.set.contains(&value) {
-            return true;
-        }
-
-        if self.order.len() >= self.capacity
-            && let Some(old) = self.order.pop_front()
-        {
-            self.set.remove(&old);
-        }
-        self.set.insert(value);
-        self.order.push_back(value);
-        false
-    }
-}
 
 /// Live execution client for Binance Spot trading.
 ///
@@ -233,19 +188,23 @@ impl BinanceSpotExecutionClient {
             .await
     }
 
-    fn update_account_state(&self) -> anyhow::Result<()> {
-        let runtime = get_runtime();
-        let account_state = runtime.block_on(self.refresh_account_state())?;
+    fn update_account_state(&self) {
+        let http_client = self.http_client.clone();
+        let account_id = self.core.account_id;
+        let emitter = self.emitter.clone();
+        let clock = self.clock;
 
-        let ts_now = self.clock.get_time_ns();
-        self.emitter.emit_account_state(
-            account_state.balances.clone(),
-            account_state.margins.clone(),
-            account_state.is_reported,
-            ts_now,
-        );
-
-        Ok(())
+        self.spawn_task("query_account", async move {
+            let account_state = http_client.request_account_state(account_id).await?;
+            let ts_now = clock.get_time_ns();
+            emitter.emit_account_state(
+                account_state.balances.clone(),
+                account_state.margins.clone(),
+                account_state.is_reported,
+                ts_now,
+            );
+            Ok(())
+        });
     }
 
     /// Returns whether the WS trading client is connected and active.
@@ -289,6 +248,7 @@ impl BinanceSpotExecutionClient {
                 strategy_id,
                 order_side,
                 order_type,
+                price,
             },
         );
 
@@ -414,37 +374,39 @@ impl BinanceSpotExecutionClient {
             let dispatch_state = self.dispatch_state.clone();
             let params = build_cancel_order_params(&command);
 
+            // Pre-register before sending to avoid response racing the insert
+            let request_id = ws_client.next_request_id();
+            dispatch_state.pending_requests.insert(
+                request_id.clone(),
+                PendingRequest {
+                    client_order_id: command.client_order_id,
+                    venue_order_id: command.venue_order_id,
+                    operation: PendingOperation::Cancel,
+                },
+            );
+
             self.spawn_task("cancel_order_ws", async move {
-                match ws_client.cancel_order(params).await {
-                    Ok(request_id) => {
-                        dispatch_state.pending_requests.insert(
-                            request_id,
-                            PendingRequest {
-                                client_order_id: command.client_order_id,
-                                venue_order_id: command.venue_order_id,
-                                operation: PendingOperation::Cancel,
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        let ts_now = clock.get_time_ns();
-                        let rejected_event = OrderCancelRejected::new(
-                            trader_id,
-                            command.strategy_id,
-                            command.instrument_id,
-                            command.client_order_id,
-                            format!("ws-cancel-order-error: {e}").into(),
-                            UUID4::new(),
-                            ts_now,
-                            ts_now,
-                            false,
-                            command.venue_order_id,
-                            Some(account_id),
-                        );
-                        event_emitter
-                            .send_order_event(OrderEventAny::CancelRejected(rejected_event));
-                        anyhow::bail!("WS cancel order failed: {e}");
-                    }
+                if let Err(e) = ws_client
+                    .cancel_order_with_id(request_id.clone(), params)
+                    .await
+                {
+                    dispatch_state.pending_requests.remove(&request_id);
+                    let ts_now = clock.get_time_ns();
+                    let rejected_event = OrderCancelRejected::new(
+                        trader_id,
+                        command.strategy_id,
+                        command.instrument_id,
+                        command.client_order_id,
+                        format!("ws-cancel-order-error: {e}").into(),
+                        UUID4::new(),
+                        ts_now,
+                        ts_now,
+                        false,
+                        command.venue_order_id,
+                        Some(account_id),
+                    );
+                    event_emitter.send_order_event(OrderEventAny::CancelRejected(rejected_event));
+                    anyhow::bail!("WS cancel order failed: {e}");
                 }
                 Ok(())
             });
@@ -510,52 +472,11 @@ impl BinanceSpotExecutionClient {
     where
         F: Future<Output = anyhow::Result<()>> + Send + 'static,
     {
-        let runtime = get_runtime();
-        let handle = runtime.spawn(async move {
-            if let Err(e) = fut.await {
-                log::warn!("{description} failed: {e}");
-            }
-        });
-
-        let mut tasks = self.pending_tasks.lock().expect(MUTEX_POISONED);
-        tasks.retain(|handle| !handle.is_finished());
-        tasks.push(handle);
+        crate::common::execution::spawn_task(&self.pending_tasks, description, fut);
     }
 
     fn abort_pending_tasks(&self) {
-        let mut tasks = self.pending_tasks.lock().expect(MUTEX_POISONED);
-        for handle in tasks.drain(..) {
-            handle.abort();
-        }
-    }
-
-    /// Polls the cache until the account is registered or timeout is reached.
-    async fn await_account_registered(&self, timeout_secs: f64) -> anyhow::Result<()> {
-        let account_id = self.core.account_id;
-
-        if self.core.cache().account(&account_id).is_some() {
-            log::info!("Account {account_id} registered");
-            return Ok(());
-        }
-
-        let start = Instant::now();
-        let timeout = Duration::from_secs_f64(timeout_secs);
-        let interval = Duration::from_millis(10);
-
-        loop {
-            tokio::time::sleep(interval).await;
-
-            if self.core.cache().account(&account_id).is_some() {
-                log::info!("Account {account_id} registered");
-                return Ok(());
-            }
-
-            if start.elapsed() >= timeout {
-                anyhow::bail!(
-                    "Timeout waiting for account {account_id} to be registered after {timeout_secs}s"
-                );
-            }
-        }
+        crate::common::execution::abort_pending_tasks(&self.pending_tasks);
     }
 }
 
@@ -624,7 +545,8 @@ impl ExecutionClient for BinanceSpotExecutionClient {
         self.emitter.send_account_state(account_state);
 
         // Wait for account to be registered in cache before completing connect
-        self.await_account_registered(30.0).await?;
+        crate::common::execution::await_account_registered(&self.core, self.core.account_id, 30.0)
+            .await?;
 
         // Connect WS trading client (primary order transport)
         if let Some(ref mut ws_trading) = self.ws_trading_client {
@@ -639,8 +561,7 @@ impl ExecutionClient for BinanceSpotExecutionClient {
                     let http_client = self.http_client.clone();
                     let dispatch_state = self.dispatch_state.clone();
                     let ws_authenticated = self.ws_authenticated.clone();
-                    let seen_trade_ids =
-                        std::sync::Arc::new(Mutex::new(BoundedDedup::<(Ustr, i64)>::new(10_000)));
+                    let seen_trade_ids = std::sync::Arc::new(Mutex::new(FifoCache::new()));
 
                     let handle = get_runtime().spawn(async move {
                         loop {
@@ -731,7 +652,8 @@ impl ExecutionClient for BinanceSpotExecutionClient {
     }
 
     fn query_account(&self, _cmd: &QueryAccount) -> anyhow::Result<()> {
-        self.update_account_state()
+        self.update_account_state();
+        Ok(())
     }
 
     fn query_order(&self, cmd: &QueryOrder) -> anyhow::Result<()> {
@@ -1052,37 +974,39 @@ impl ExecutionClient for BinanceSpotExecutionClient {
             let dispatch_state = self.dispatch_state.clone();
             let params = build_cancel_replace_params(&command, &order, quantity)?;
 
+            // Pre-register before sending to avoid response racing the insert
+            let request_id = ws_client.next_request_id();
+            dispatch_state.pending_requests.insert(
+                request_id.clone(),
+                PendingRequest {
+                    client_order_id: command.client_order_id,
+                    venue_order_id: command.venue_order_id,
+                    operation: PendingOperation::Modify,
+                },
+            );
+
             self.spawn_task("modify_order_ws", async move {
-                match ws_client.cancel_replace_order(params).await {
-                    Ok(request_id) => {
-                        dispatch_state.pending_requests.insert(
-                            request_id,
-                            PendingRequest {
-                                client_order_id: command.client_order_id,
-                                venue_order_id: command.venue_order_id,
-                                operation: PendingOperation::Modify,
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        let ts_now = clock.get_time_ns();
-                        let rejected_event = OrderModifyRejected::new(
-                            trader_id,
-                            command.strategy_id,
-                            command.instrument_id,
-                            command.client_order_id,
-                            format!("ws-modify-order-error: {e}").into(),
-                            UUID4::new(),
-                            ts_now,
-                            ts_now,
-                            false,
-                            command.venue_order_id,
-                            Some(account_id),
-                        );
-                        event_emitter
-                            .send_order_event(OrderEventAny::ModifyRejected(rejected_event));
-                        anyhow::bail!("WS modify order failed: {e}");
-                    }
+                if let Err(e) = ws_client
+                    .cancel_replace_order_with_id(request_id.clone(), params)
+                    .await
+                {
+                    dispatch_state.pending_requests.remove(&request_id);
+                    let ts_now = clock.get_time_ns();
+                    let rejected_event = OrderModifyRejected::new(
+                        trader_id,
+                        command.strategy_id,
+                        command.instrument_id,
+                        command.client_order_id,
+                        format!("ws-modify-order-error: {e}").into(),
+                        UUID4::new(),
+                        ts_now,
+                        ts_now,
+                        false,
+                        command.venue_order_id,
+                        Some(account_id),
+                    );
+                    event_emitter.send_order_event(OrderEventAny::ModifyRejected(rejected_event));
+                    anyhow::bail!("WS modify order failed: {e}");
                 }
                 Ok(())
             });
@@ -1280,6 +1204,7 @@ impl ExecutionClient for BinanceSpotExecutionClient {
                     Ok(results) => {
                         for (i, result) in results.iter().enumerate() {
                             let cancel = &chunk[i];
+
                             match result {
                                 BatchCancelResult::Success(success) => {
                                     let venue_order_id =
@@ -1365,7 +1290,7 @@ fn dispatch_ws_trading_message(
     clock: &'static AtomicTime,
     dispatch_state: &WsDispatchState,
     ws_authenticated: &tokio::sync::Notify,
-    seen_trade_ids: &std::sync::Arc<Mutex<BoundedDedup<(Ustr, i64)>>>,
+    seen_trade_ids: &std::sync::Arc<Mutex<FifoCache<(Ustr, i64), 10_000>>>,
 ) {
     match msg {
         BinanceSpotWsTradingMessage::OrderAccepted {
@@ -1546,6 +1471,7 @@ fn dispatch_ws_trading_message(
             );
             let http_client = http_client.clone();
             let emitter = emitter.clone();
+
             get_runtime().spawn(async move {
                 match http_client.request_account_state(account_id).await {
                     Ok(state) => emitter.send_account_state(state),
@@ -1700,7 +1626,7 @@ fn dispatch_execution_report(
     http_client: &BinanceSpotHttpClient,
     account_id: AccountId,
     dispatch_state: &WsDispatchState,
-    seen_trade_ids: &std::sync::Arc<Mutex<BoundedDedup<(Ustr, i64)>>>,
+    seen_trade_ids: &std::sync::Arc<Mutex<FifoCache<(Ustr, i64), 10_000>>>,
     ts_init: UnixNanos,
 ) {
     let symbol = report.symbol;
@@ -1755,7 +1681,7 @@ fn dispatch_tracked_execution_report(
     emitter: &ExecutionEventEmitter,
     account_id: AccountId,
     state: &WsDispatchState,
-    seen_trade_ids: &std::sync::Arc<Mutex<BoundedDedup<(Ustr, i64)>>>,
+    seen_trade_ids: &std::sync::Arc<Mutex<FifoCache<(Ustr, i64), 10_000>>>,
     client_order_id: ClientOrderId,
     identity: &OrderIdentity,
     instrument_id: InstrumentId,
@@ -1768,12 +1694,12 @@ fn dispatch_tracked_execution_report(
 
     match report.execution_type {
         BinanceSpotExecutionType::New => {
-            if state.filled_orders.contains(&client_order_id) {
+            if state.has_filled(&client_order_id) {
                 log::debug!("Skipping New for already-filled {client_order_id}");
                 return;
             }
 
-            if state.emitted_accepted.contains(&client_order_id) {
+            if state.has_emitted_accepted(&client_order_id) {
                 // Already accepted: this New is a cancel-replace result
                 let price: f64 = report.price.parse().unwrap_or(0.0);
                 let quantity: f64 = report.original_qty.parse().unwrap_or(0.0);
@@ -1820,10 +1746,10 @@ fn dispatch_tracked_execution_report(
         }
         BinanceSpotExecutionType::Trade => {
             let dedup_key = (report.symbol, report.trade_id);
-            let is_duplicate = seen_trade_ids
-                .lock()
-                .expect(MUTEX_POISONED)
-                .insert(dedup_key);
+            let mut guard = seen_trade_ids.lock().expect(MUTEX_POISONED);
+            let is_duplicate = guard.contains(&dedup_key);
+            guard.add(dedup_key);
+            drop(guard);
 
             if is_duplicate {
                 log::debug!(
@@ -1954,7 +1880,7 @@ fn dispatch_untracked_execution_report(
     emitter: &ExecutionEventEmitter,
     _http_client: &BinanceSpotHttpClient,
     account_id: AccountId,
-    seen_trade_ids: &std::sync::Arc<Mutex<BoundedDedup<(Ustr, i64)>>>,
+    seen_trade_ids: &std::sync::Arc<Mutex<FifoCache<(Ustr, i64), 10_000>>>,
     instrument_id: InstrumentId,
     price_precision: u8,
     size_precision: u8,
@@ -1963,10 +1889,10 @@ fn dispatch_untracked_execution_report(
     match report.execution_type {
         BinanceSpotExecutionType::Trade => {
             let dedup_key = (report.symbol, report.trade_id);
-            let is_duplicate = seen_trade_ids
-                .lock()
-                .expect(MUTEX_POISONED)
-                .insert(dedup_key);
+            let mut guard = seen_trade_ids.lock().expect(MUTEX_POISONED);
+            let is_duplicate = guard.contains(&dedup_key);
+            guard.add(dedup_key);
+            drop(guard);
 
             if is_duplicate {
                 log::debug!(
@@ -2031,5 +1957,171 @@ fn is_spot_post_only_rejection(error: &crate::spot::http::BinanceSpotHttpError) 
                     && message == BINANCE_SPOT_POST_ONLY_REJECT_MSG)
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nautilus_common::messages::ExecutionEvent;
+    use nautilus_core::time::get_atomic_clock_realtime;
+    use nautilus_model::{
+        enums::{AccountType, OrderSide},
+        identifiers::{StrategyId, TraderId},
+    };
+    use rstest::rstest;
+
+    use super::*;
+    use crate::common::enums::BinanceEnvironment;
+
+    #[rstest]
+    fn test_dispatch_ws_trading_message_emits_cancel_rejected_and_clears_pending_request() {
+        let clock = get_atomic_clock_realtime();
+        let (emitter, mut rx) = create_test_emitter(clock);
+        let http_client = create_test_http_client(clock);
+        let dispatch_state = create_tracked_dispatch_state(
+            ClientOrderId::from("TEST"),
+            InstrumentId::from("BTCUSDT.BINANCE"),
+        );
+        let ws_authenticated = tokio::sync::Notify::new();
+        let seen_trade_ids = Arc::new(Mutex::new(FifoCache::new()));
+
+        dispatch_state.pending_requests.insert(
+            "req-cancel".to_string(),
+            PendingRequest {
+                client_order_id: ClientOrderId::from("TEST"),
+                venue_order_id: Some(VenueOrderId::from("12345")),
+                operation: PendingOperation::Cancel,
+            },
+        );
+
+        dispatch_ws_trading_message(
+            BinanceSpotWsTradingMessage::CancelRejected {
+                request_id: "req-cancel".to_string(),
+                code: -2011,
+                msg: "Unknown order sent".to_string(),
+            },
+            &emitter,
+            &http_client,
+            AccountId::from("BINANCE-001"),
+            clock,
+            &dispatch_state,
+            &ws_authenticated,
+            &seen_trade_ids,
+        );
+
+        assert!(dispatch_state.pending_requests.get("req-cancel").is_none());
+
+        match rx
+            .try_recv()
+            .expect("Cancel rejection event should be emitted")
+        {
+            ExecutionEvent::Order(OrderEventAny::CancelRejected(event)) => {
+                assert_eq!(event.client_order_id, ClientOrderId::from("TEST"));
+                assert_eq!(event.account_id, Some(AccountId::from("BINANCE-001")));
+                assert!(event.reason.as_str().contains("code=-2011"));
+            }
+            other => panic!("Expected CancelRejected event, was {other:?}"),
+        }
+    }
+
+    #[rstest]
+    fn test_dispatch_ws_trading_message_emits_modify_rejected_and_clears_pending_request() {
+        let clock = get_atomic_clock_realtime();
+        let (emitter, mut rx) = create_test_emitter(clock);
+        let http_client = create_test_http_client(clock);
+        let dispatch_state = create_tracked_dispatch_state(
+            ClientOrderId::from("TEST"),
+            InstrumentId::from("BTCUSDT.BINANCE"),
+        );
+        let ws_authenticated = tokio::sync::Notify::new();
+        let seen_trade_ids = Arc::new(Mutex::new(FifoCache::new()));
+
+        dispatch_state.pending_requests.insert(
+            "req-modify".to_string(),
+            PendingRequest {
+                client_order_id: ClientOrderId::from("TEST"),
+                venue_order_id: Some(VenueOrderId::from("12345")),
+                operation: PendingOperation::Modify,
+            },
+        );
+
+        dispatch_ws_trading_message(
+            BinanceSpotWsTradingMessage::CancelReplaceRejected {
+                request_id: "req-modify".to_string(),
+                code: -2021,
+                msg: "Order cancel-replace partially failed".to_string(),
+            },
+            &emitter,
+            &http_client,
+            AccountId::from("BINANCE-001"),
+            clock,
+            &dispatch_state,
+            &ws_authenticated,
+            &seen_trade_ids,
+        );
+
+        assert!(dispatch_state.pending_requests.get("req-modify").is_none());
+
+        match rx
+            .try_recv()
+            .expect("Modify rejection event should be emitted")
+        {
+            ExecutionEvent::Order(OrderEventAny::ModifyRejected(event)) => {
+                assert_eq!(event.client_order_id, ClientOrderId::from("TEST"));
+                assert_eq!(event.account_id, Some(AccountId::from("BINANCE-001")));
+                assert!(event.reason.as_str().contains("code=-2021"));
+            }
+            other => panic!("Expected ModifyRejected event, was {other:?}"),
+        }
+    }
+
+    fn create_test_emitter(
+        clock: &'static AtomicTime,
+    ) -> (
+        ExecutionEventEmitter,
+        tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>,
+    ) {
+        let mut emitter = ExecutionEventEmitter::new(
+            clock,
+            TraderId::from("TESTER-001"),
+            AccountId::from("BINANCE-001"),
+            AccountType::Cash,
+            None,
+        );
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        emitter.set_sender(tx);
+        (emitter, rx)
+    }
+
+    fn create_test_http_client(clock: &'static AtomicTime) -> BinanceSpotHttpClient {
+        BinanceSpotHttpClient::new(
+            BinanceEnvironment::Mainnet,
+            clock,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("Test HTTP client should be created")
+    }
+
+    fn create_tracked_dispatch_state(
+        client_order_id: ClientOrderId,
+        instrument_id: InstrumentId,
+    ) -> WsDispatchState {
+        let dispatch_state = WsDispatchState::default();
+        dispatch_state.order_identities.insert(
+            client_order_id,
+            OrderIdentity {
+                instrument_id,
+                strategy_id: StrategyId::from("TEST-STRATEGY"),
+                order_side: OrderSide::Buy,
+                order_type: OrderType::Limit,
+                price: None,
+            },
+        );
+        dispatch_state
     }
 }

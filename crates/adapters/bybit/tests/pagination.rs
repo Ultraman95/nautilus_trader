@@ -66,6 +66,7 @@ async fn mock_klines_paginated(Query(params): Query<HashMap<String, String>>) ->
     // Generate bars going backwards from end_ms
     // Each bar is 1 minute apart
     let mut klines = Vec::new();
+
     for i in 0..1000 {
         let bar_time = end_ms - (i * 60_000);
         klines.push(generate_kline(
@@ -155,6 +156,7 @@ async fn init_instrument_cache(client: &BybitHttpClient) {
 
     let response = client.get_instruments_linear(&params).await.unwrap();
     let ts_init = nautilus_core::time::get_atomic_clock_realtime().get_time_ns();
+
     for definition in response.result.list {
         let fee_rate = BybitFeeRate {
             symbol: definition.symbol,
@@ -174,8 +176,7 @@ async fn test_bars_chronological_order_single_page() {
     let addr = start_pagination_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client =
-        BybitHttpClient::new(Some(base_url), Some(60), None, None, None, None, None).unwrap();
+    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
     init_instrument_cache(&client).await;
 
     let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), Venue::from("BYBIT"));
@@ -223,8 +224,7 @@ async fn test_bars_chronological_order_multiple_pages() {
     let addr = start_pagination_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client =
-        BybitHttpClient::new(Some(base_url), Some(60), None, None, None, None, None).unwrap();
+    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
     init_instrument_cache(&client).await;
 
     let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), Venue::from("BYBIT"));
@@ -275,8 +275,7 @@ async fn test_bars_limit_returns_most_recent() {
     let addr = start_pagination_test_server().await.unwrap();
     let base_url = format!("http://{addr}");
 
-    let client =
-        BybitHttpClient::new(Some(base_url), Some(60), None, None, None, None, None).unwrap();
+    let client = BybitHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, 5_000, None).unwrap();
     init_instrument_cache(&client).await;
 
     let instrument_id = InstrumentId::new(Symbol::from("ETHUSDT-LINEAR"), Venue::from("BYBIT"));

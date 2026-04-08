@@ -32,8 +32,8 @@
 //!
 //! - Struct must have named fields
 //! - Must include `ts_event` and `ts_init` fields (e.g. `nautilus_core::UnixNanos`)
-//! - Supported field types: InstrumentId, AccountId, Currency, BarType, UnixNanos, f64, f32, bool,
-//!   String, u64, i64, u32, i32, `Vec<f64>`, `Vec<u8>`
+//! - Supported field types: InstrumentId, AccountId, Currency, BarType, Params, UnixNanos, f64,
+//!   f32, bool, String, u64, i64, u32, i32, `Vec<f64>`, `Vec<u8>`
 //!
 //! # Options
 //!
@@ -94,6 +94,7 @@ fn vec_inner_type(ty: &Type) -> Option<&Type> {
     if args.len() != 1 {
         return None;
     }
+
     match &args[0] {
         syn::GenericArgument::Type(t) => Some(t),
         _ => None,
@@ -120,6 +121,7 @@ fn use_string_extract(ty: &Type) -> bool {
                 | ("AccountId", "AccountId")
                 | ("Currency", "Currency")
                 | ("BarType", "BarType")
+                | ("Params", "Params")
                 | ("String", "String")
         )
     } else {
@@ -146,7 +148,7 @@ fn arrow_type_for_rust_type(ty: &Type) -> Option<(TokenStream, TokenStream, Toke
             quote! { arrow::array::ListArray },
         ),
         _ if outer == inner => match outer.as_str() {
-            "InstrumentId" | "AccountId" | "Currency" | "BarType" => (
+            "InstrumentId" | "AccountId" | "Currency" | "BarType" | "Params" => (
                 quote! { arrow::datatypes::DataType::Utf8 },
                 quote! { arrow::array::StringArray },
                 quote! { arrow::array::StringArray },
@@ -214,6 +216,14 @@ fn encode_field_expr(field_name: &syn::Ident, ty: &Type) -> Option<TokenStream> 
             "InstrumentId" | "AccountId" | "Currency" | "BarType" => {
                 Some(quote! { builder.append_value(item.#name.to_string()); })
             }
+            "Params" => Some(quote! {
+                let value = serde_json::to_string(&item.#name).map_err(|e| {
+                    arrow::error::ArrowError::InvalidArgumentError(
+                        format!("failed to serialize Params field '{}': {e}", stringify!(#name)),
+                    )
+                })?;
+                builder.append_value(value);
+            }),
             "UnixNanos" => Some(quote! { builder.append_value(item.#name.as_u64()); }),
             "f64" | "f32" => Some(quote! { builder.append_value(item.#name); }),
             "bool" => Some(quote! { builder.append_value(item.#name); }),
@@ -256,6 +266,14 @@ fn decode_field_rhs(
                     format!("expected valid identifier/type, was '{}'", e),
                 ))?
             }),
+            "Params" => Some(quote! {
+                serde_json::from_str::<nautilus_core::Params>(#col.value(i)).map_err(|e| {
+                    nautilus_serialization::arrow::EncodingError::ParseError(
+                        stringify!(#name),
+                        format!("row {i}: {e}"),
+                    )
+                })?
+            }),
             "UnixNanos" => Some(quote! { #col.value(i).into() }),
             "f64" | "f32" | "bool" | "u64" | "i64" => Some(quote! { #col.value(i) }),
             "u32" => Some(quote! { #col.value(i) as u32 }),
@@ -271,13 +289,14 @@ fn decode_field_rhs(
 fn encode_builder_for_field(ty: &Type, len_var: &syn::Ident) -> Option<TokenStream> {
     let (outer, inner) = type_for_macro(ty)?;
     let len = len_var;
+
     match (outer.as_str(), inner.as_str()) {
         ("Vec", "u8") => Some(quote! { let mut builder = arrow::array::BinaryBuilder::new(); }),
         ("Vec", "f64") => Some(quote! {
             let mut builder = arrow::array::ListBuilder::new(arrow::array::Float64Builder::new());
         }),
         _ if outer == inner => match outer.as_str() {
-            "InstrumentId" | "AccountId" | "Currency" | "BarType" | "String" => {
+            "InstrumentId" | "AccountId" | "Currency" | "BarType" | "Params" | "String" => {
                 Some(quote! { let mut builder = arrow::array::StringBuilder::new(); })
             }
             "UnixNanos" | "u64" | "u32" => {
@@ -294,11 +313,15 @@ fn encode_builder_for_field(ty: &Type, len_var: &syn::Ident) -> Option<TokenStre
     }
 }
 
-/// Python constructor param type: UnixNanos -> u64, Vec<u8> -> &[u8] or Vec<u8>, rest unchanged.
+/// Python constructor param type: UnixNanos -> u64, Params -> PyDict, Vec<u8> -> Vec<u8>, rest unchanged.
 fn py_param_ty(ty: &Type) -> Option<TokenStream> {
     let (outer, inner) = type_for_macro(ty)?;
     if outer == "UnixNanos" {
         return Some(quote! { u64 });
+    }
+
+    if outer == inner && outer == "Params" {
+        return Some(quote! { pyo3::Py<pyo3::types::PyDict> });
     }
 
     if outer == "Vec" && inner == "u8" {
@@ -313,32 +336,46 @@ fn py_param_ty(ty: &Type) -> Option<TokenStream> {
 
 /// Python constructor body RHS: UnixNanos fields use arg.into(), rest use arg.
 fn py_field_init(ident: &syn::Ident, ty: &Type) -> Option<TokenStream> {
-    let (outer, _) = type_for_macro(ty)?;
+    let (outer, inner) = type_for_macro(ty)?;
     let name = ident;
 
     if outer == "UnixNanos" {
         return Some(quote! { #name.into() });
+    }
+
+    if outer == inner && outer == "Params" {
+        return Some(quote! {
+            pyo3::Python::attach(|py| nautilus_core::from_pydict(py, #name))?.unwrap_or_default()
+        });
     }
     Some(quote! { #name })
 }
 
 /// Python getter return type: UnixNanos -> u64, rest unchanged.
 fn py_getter_ret_ty(ty: &Type) -> Option<TokenStream> {
-    let (outer, _) = type_for_macro(ty)?;
+    let (outer, inner) = type_for_macro(ty)?;
 
     if outer == "UnixNanos" {
         return Some(quote! { u64 });
+    }
+
+    if outer == inner && outer == "Params" {
+        return Some(quote! { pyo3::PyResult<pyo3::Py<pyo3::types::PyDict>> });
     }
     Some(quote! { #ty })
 }
 
 /// Python getter body: UnixNanos -> self.x.as_u64(), Vec -> clone, String -> clone, rest -> self.x.
 fn py_getter_body(ident: &syn::Ident, ty: &Type) -> Option<TokenStream> {
-    let (outer, _inner) = type_for_macro(ty)?;
+    let (outer, inner) = type_for_macro(ty)?;
     let name = ident;
 
     if outer == "UnixNanos" {
         return Some(quote! { self.#name.as_u64() });
+    }
+
+    if outer == inner && outer == "Params" {
+        return Some(quote! { pyo3::Python::attach(|py| self.#name.to_pydict(py)) });
     }
 
     if outer == "Vec" || outer == "String" {
@@ -353,7 +390,7 @@ fn encode_finish_builder(ty: &Type) -> Option<TokenStream> {
     match (outer.as_str(), inner.as_str()) {
         ("Vec", "u8" | "f64") => Some(quote! { std::sync::Arc::new(builder.finish()) }),
         _ if outer == inner => match outer.as_str() {
-            "InstrumentId" | "AccountId" | "Currency" | "BarType" | "String" => {
+            "InstrumentId" | "AccountId" | "Currency" | "BarType" | "Params" | "String" => {
                 Some(quote! { std::sync::Arc::new(builder.finish()) })
             }
             "UnixNanos" | "u64" | "u32" | "f64" | "f32" | "bool" | "i64" | "i32" => {
@@ -626,6 +663,7 @@ fn gen_encode_batch_impl(ctx: &ExpansionContext<'_>) -> TokenStream {
     let len_var = format_ident!("data_len");
     let mut col_builds = Vec::new();
     let mut col_names = Vec::new();
+
     for (ident, ty) in field_list {
         let builder = encode_builder_for_field(ty, &len_var).unwrap();
         let append = encode_field_expr(ident, ty).unwrap();
@@ -634,6 +672,7 @@ fn gen_encode_batch_impl(ctx: &ExpansionContext<'_>) -> TokenStream {
         col_names.push(col_name.clone());
         col_builds.push(quote! {
             #builder
+
             for item in data {
                 #append
             }
@@ -832,9 +871,9 @@ fn gen_pymethods_impl(ctx: &ExpansionContext<'_>) -> TokenStream {
             #[allow(clippy::too_many_arguments)]
             #[new]
             #[pyo3(signature = (#(#py_new_call_args),*))]
-            fn py_new(#(#py_new_params),*) -> Self {
+            fn py_new(#(#py_new_params),*) -> pyo3::PyResult<Self> {
                 #(#py_let_bindings)*
-                Self::new(#(#py_new_call_args),*)
+                Ok(Self::new(#(#py_new_call_args),*))
             }
             #(#getters)*
 
@@ -896,6 +935,7 @@ fn gen_pymethods_impl(ctx: &ExpansionContext<'_>) -> TokenStream {
                     batch,
                 ).map_err(nautilus_core::python::to_pyvalue_err)?;
                 let mut py_items = Vec::new();
+
                 for d in data_list {
                     if let nautilus_model::data::Data::Custom(custom) = d {
                         if let Some(m) = custom.data.as_any().downcast_ref::<#name>() {
@@ -985,7 +1025,7 @@ pub fn expand_custom_data(attr: TokenStream, item: TokenStream) -> TokenStream {
             return syn::Error::new_spanned(
                 ty,
                 format!(
-                    "#[custom_data] does not support field type for '{ident}'; supported: InstrumentId, AccountId, Currency, BarType, UnixNanos, f64, f32, bool, String, u64, i64, u32, i32, Vec<f64>, Vec<u8>"
+                    "#[custom_data] does not support field type for '{ident}'; supported: InstrumentId, AccountId, Currency, BarType, Params, UnixNanos, f64, f32, bool, String, u64, i64, u32, i32, Vec<f64>, Vec<u8>"
                 ),
             )
             .to_compile_error();

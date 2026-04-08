@@ -40,13 +40,10 @@ use nautilus_core::{
 use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter};
 use nautilus_model::{
     accounts::AccountAny,
-    enums::{
-        AccountType, LiquiditySide, OmsType, OrderSide, OrderSide as NautilusOrderSide,
-        OrderStatus, OrderType, TimeInForce,
-    },
+    enums::{AccountType, LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, TimeInForce},
     events::{
         OrderAccepted, OrderCancelRejected, OrderCanceled, OrderEventAny, OrderExpired,
-        OrderFilled, OrderRejected,
+        OrderFilled, OrderRejected, OrderUpdated,
     },
     identifiers::{
         AccountId, ClientId, ClientOrderId, InstrumentId, StrategyId, TradeId, Venue, VenueOrderId,
@@ -61,15 +58,18 @@ use ustr::Ustr;
 
 use crate::{
     common::{
-        consts::{AX_POST_ONLY_REJECT, AX_VENUE},
+        consts::{
+            AX_ACCOUNT_REGISTRATION_TIMEOUT_SECS, AX_AUTH_TOKEN_TTL_EXEC_SECS, AX_POST_ONLY_REJECT,
+            AX_VENUE,
+        },
         credential::Credential,
-        enums::{AxOrderSide, AxOrderSide as VenueOrderSide, AxTimeInForce},
-        parse::{ax_timestamp_s_to_unix_nanos, cid_to_client_order_id, quantity_to_contracts},
+        enums::AxOrderSide,
+        parse::{ax_timestamp_stn_to_unix_nanos, cid_to_client_order_id, quantity_to_contracts},
     },
     config::AxExecClientConfig,
     http::{
         client::AxHttpClient,
-        models::{AxOrderRejectReason, PreviewAggressiveLimitOrderRequest},
+        models::{AxOrderRejectReason, PreviewAggressiveLimitOrderRequest, ReplaceOrderRequest},
     },
     websocket::{
         AxOrdersWsMessage, AxWsOrderEvent,
@@ -115,8 +115,13 @@ impl AxExecutionClient {
         let account_id = core.account_id;
         let emitter =
             ExecutionEventEmitter::new(clock, trader_id, account_id, AccountType::Margin, None);
+        let mut ws_url = config.ws_private_url();
+        if config.cancel_on_disconnect {
+            let separator = if ws_url.contains('?') { "&" } else { "?" };
+            ws_url.push_str(&format!("{separator}cancel_on_disconnect=true"));
+        }
         let ws_orders = AxOrdersWebSocketClient::new(
-            config.ws_private_url(),
+            ws_url,
             account_id,
             trader_id,
             config.heartbeat_interval_secs,
@@ -140,31 +145,35 @@ impl AxExecutionClient {
                 .context("API credentials not configured")?;
 
         self.http_client
-            .authenticate(credential.api_key(), credential.api_secret(), 3600)
+            .authenticate(
+                credential.api_key(),
+                credential.api_secret(),
+                AX_AUTH_TOKEN_TTL_EXEC_SECS,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Authentication failed: {e}"))
     }
 
-    async fn refresh_account_state(&self) -> anyhow::Result<()> {
-        let account_state = self
-            .http_client
-            .request_account_state(self.core.account_id)
-            .await
-            .context("failed to request AX account state")?;
+    fn update_account_state(&self) {
+        let http_client = self.http_client.clone();
+        let account_id = self.core.account_id;
+        let emitter = self.emitter.clone();
+        let clock = self.clock;
 
-        let ts_event = self.clock.get_time_ns();
-        self.emitter.emit_account_state(
-            account_state.balances.clone(),
-            account_state.margins.clone(),
-            account_state.is_reported,
-            ts_event,
-        );
-        Ok(())
-    }
-
-    fn update_account_state(&self) -> anyhow::Result<()> {
-        let runtime = get_runtime();
-        runtime.block_on(self.refresh_account_state())
+        self.spawn_task("query_account", async move {
+            let account_state = http_client
+                .request_account_state(account_id)
+                .await
+                .context("failed to request AX account state")?;
+            let ts_event = clock.get_time_ns();
+            emitter.emit_account_state(
+                account_state.balances.clone(),
+                account_state.margins.clone(),
+                account_state.is_reported,
+                ts_event,
+            );
+            Ok(())
+        });
     }
 
     fn submit_order_internal(&self, cmd: &SubmitOrder) -> anyhow::Result<()> {
@@ -211,7 +220,13 @@ impl AxExecutionClient {
 
         self.spawn_task("submit_order", async move {
             let result: anyhow::Result<()> = async {
-                // For market orders, get the take-through price from AX
+                // For market orders, get the take-through price from AX.
+                // The preview and submit are not atomic: the book can change
+                // between the two calls. This is safe because submit_order
+                // forces IOC time-in-force for market orders, so the order
+                // fills immediately or is canceled (it cannot rest on the book).
+                // If the book moves past the previewed take-through price the
+                // order may partially fill with the remainder canceled.
                 let price = if order_type == OrderType::Market {
                     let symbol = instrument_id.symbol.inner();
                     let ax_side = AxOrderSide::try_from(order_side)
@@ -475,7 +490,8 @@ impl ExecutionClient for AxExecutionClient {
         }
         self.emitter.send_account_state(account_state);
 
-        self.await_account_registered(30.0).await?;
+        self.await_account_registered(AX_ACCOUNT_REGISTRATION_TIMEOUT_SECS)
+            .await?;
 
         self.core.set_connected();
         log::info!("Connected: client_id={}", self.core.client_id);
@@ -502,7 +518,8 @@ impl ExecutionClient for AxExecutionClient {
     }
 
     fn query_account(&self, _cmd: &QueryAccount) -> anyhow::Result<()> {
-        self.update_account_state()
+        self.update_account_state();
+        Ok(())
     }
 
     fn query_order(&self, cmd: &QueryOrder) -> anyhow::Result<()> {
@@ -568,10 +585,10 @@ impl ExecutionClient for AxExecutionClient {
         self.emitter.set_sender(get_exec_event_sender());
         self.core.set_started();
         log::info!(
-            "Started: client_id={}, account_id={}, is_sandbox={}",
+            "Started: client_id={}, account_id={}, environment={}",
             self.core.client_id,
             self.core.account_id,
-            self.config.is_sandbox,
+            self.config.environment,
         );
         Ok(())
     }
@@ -611,10 +628,19 @@ impl ExecutionClient for AxExecutionClient {
                 self.emitter.emit_order_denied(
                     order,
                     &format!(
-                        "Unsupported order type: {:?}. \
-                         AX supports MARKET, LIMIT and STOP_LIMIT.",
+                        "Unsupported order type: {:?}, \
+                         AX supports MARKET, LIMIT and STOP_LIMIT",
                         order.order_type(),
                     ),
+                );
+                return Ok(());
+            }
+
+            if order.time_in_force() == TimeInForce::Gtd {
+                self.emitter.emit_order_denied(
+                    order,
+                    "Unsupported time in force: GTD, \
+                     AX supports GTC, IOC, FOK, and DAY",
                 );
                 return Ok(());
             }
@@ -652,18 +678,81 @@ impl ExecutionClient for AxExecutionClient {
     }
 
     fn modify_order(&self, cmd: &ModifyOrder) -> anyhow::Result<()> {
-        let reason = "AX does not support order modification. Use cancel and resubmit instead.";
-        log::error!("{reason}");
+        let venue_order_id = match cmd.venue_order_id {
+            Some(ref voi) => *voi,
+            None => {
+                let reason = "Cannot modify order without venue_order_id";
+                log::error!("{reason}");
+                let ts_event = self.clock.get_time_ns();
+                self.emitter.emit_order_modify_rejected_event(
+                    cmd.strategy_id,
+                    cmd.instrument_id,
+                    cmd.client_order_id,
+                    cmd.venue_order_id,
+                    reason,
+                    ts_event,
+                );
+                return Ok(());
+            }
+        };
 
-        let ts_event = self.clock.get_time_ns();
-        self.emitter.emit_order_modify_rejected_event(
-            cmd.strategy_id,
-            cmd.instrument_id,
-            cmd.client_order_id,
-            cmd.venue_order_id,
-            reason,
-            ts_event,
-        );
+        let http_client = self.http_client.clone();
+        let emitter = self.emitter.clone();
+        let caches = self.ws_orders.caches().clone();
+        let clock = self.clock;
+        let client_order_id = cmd.client_order_id;
+        let strategy_id = cmd.strategy_id;
+        let instrument_id = cmd.instrument_id;
+        let quantity = cmd.quantity;
+        let price = cmd.price;
+        let trigger_price = cmd.trigger_price;
+
+        self.spawn_task("modify_order", async move {
+            let mut request = ReplaceOrderRequest::new(venue_order_id.as_str());
+
+            if let Some(price) = price {
+                request = request.with_price(price.as_decimal());
+            }
+
+            if let Some(qty) = quantity {
+                let contracts = quantity_to_contracts(qty)?;
+                request = request.with_quantity(contracts);
+            }
+
+            if let Some(trigger) = trigger_price {
+                request = request.with_trigger_price(trigger.as_decimal());
+            }
+
+            match http_client.inner.replace_order(&request).await {
+                Ok(resp) => {
+                    let new_venue_order_id = VenueOrderId::new(&resp.oid);
+                    caches
+                        .venue_to_client_id
+                        .insert(new_venue_order_id, client_order_id);
+                    if let Some(mut entry) = caches.orders_metadata.get_mut(&client_order_id) {
+                        entry.venue_order_id = Some(new_venue_order_id);
+                        entry.pending_trigger_price = trigger_price;
+                    }
+                    log::info!("Order replaced: old={} new={}", request.oid, resp.oid);
+                }
+                Err(e) => {
+                    let reason = format!("modify-order-error: {e}");
+                    let ts_event = clock.get_time_ns();
+                    emitter.emit_order_modify_rejected_event(
+                        strategy_id,
+                        instrument_id,
+                        client_order_id,
+                        Some(VenueOrderId::new(&request.oid)),
+                        &reason,
+                        ts_event,
+                    );
+                    anyhow::bail!("{reason}");
+                }
+            }
+
+            Ok(())
+        });
+
         Ok(())
     }
 
@@ -673,36 +762,74 @@ impl ExecutionClient for AxExecutionClient {
     }
 
     fn cancel_all_orders(&self, cmd: &CancelAllOrders) -> anyhow::Result<()> {
-        let cache = self.core.cache();
-        let open_orders = cache.orders_open(None, Some(&cmd.instrument_id), None, None, None);
+        let http_client = self.http_client.clone();
+        let emitter = self.emitter.clone();
+        let clock = self.clock;
+        let instrument_id = cmd.instrument_id;
+        let account_id = self.core.account_id;
+        let trader_id = self.core.trader_id;
 
-        if open_orders.is_empty() {
-            log::debug!("No open orders to cancel for {}", cmd.instrument_id);
-            return Ok(());
-        }
+        // Snapshot open orders so we can emit cancel events after the HTTP request
+        let open_orders: Vec<(ClientOrderId, Option<VenueOrderId>, StrategyId)> = {
+            let cache = self.core.cache();
+            cache
+                .orders_open(None, Some(&instrument_id), None, None, None)
+                .iter()
+                .map(|o| (o.client_order_id(), o.venue_order_id(), o.strategy_id()))
+                .collect()
+        };
 
-        log::debug!(
-            "Canceling {} open orders for {}",
-            open_orders.len(),
-            cmd.instrument_id
-        );
+        let caches = self.ws_orders.caches().clone();
 
-        let ts_init = self.clock.get_time_ns();
+        self.spawn_task("cancel_all_orders", async move {
+            match http_client.cancel_all_orders(instrument_id).await {
+                Ok(()) => {
+                    log::info!("Canceled all orders for {instrument_id}");
 
-        for order in open_orders {
-            let cancel_cmd = CancelOrder {
-                trader_id: cmd.trader_id,
-                client_id: cmd.client_id,
-                strategy_id: cmd.strategy_id,
-                instrument_id: order.instrument_id(),
-                client_order_id: order.client_order_id(),
-                venue_order_id: order.venue_order_id(),
-                command_id: UUID4::new(),
-                ts_init,
-                params: None,
-            };
-            self.cancel_order_internal(&cancel_cmd);
-        }
+                    // AX does not push WS cancel confirmations for HTTP-initiated
+                    // cancels, so emit OrderCanceled events locally and clean up
+                    // tracking state to prevent duplicates if WS events arrive
+                    let ts_event = clock.get_time_ns();
+
+                    for (client_order_id, venue_order_id, strategy_id) in &open_orders {
+                        let event = OrderCanceled::new(
+                            trader_id,
+                            *strategy_id,
+                            instrument_id,
+                            *client_order_id,
+                            UUID4::new(),
+                            ts_event,
+                            clock.get_time_ns(),
+                            false,
+                            *venue_order_id,
+                            Some(account_id),
+                        );
+                        emitter.send_order_event(OrderEventAny::Canceled(event));
+
+                        if let Some(voi) = venue_order_id {
+                            caches.venue_to_client_id.remove(voi);
+                        }
+                        caches.orders_metadata.remove(client_order_id);
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to cancel all orders for {instrument_id}: {e}");
+                    let ts_event = clock.get_time_ns();
+
+                    for (client_order_id, venue_order_id, strategy_id) in &open_orders {
+                        emitter.emit_order_cancel_rejected_event(
+                            *strategy_id,
+                            instrument_id,
+                            *client_order_id,
+                            *venue_order_id,
+                            &format!("cancel-all-orders-error: {e}"),
+                            ts_event,
+                        );
+                    }
+                }
+            }
+            Ok(())
+        });
 
         Ok(())
     }
@@ -948,12 +1075,15 @@ fn dispatch_order_event(
     match event {
         AxWsOrderEvent::Heartbeat => {}
         AxWsOrderEvent::Acknowledged(msg) => {
-            if let Some(event) = create_order_accepted(&msg.o, msg.ts, caches, account_id, clock) {
+            if let Some(event) =
+                create_order_accepted(&msg.o, msg.ts, msg.tn, caches, account_id, clock)
+            {
                 emitter.send_order_event(OrderEventAny::Accepted(event));
             } else if let Some(report) = create_order_status_report(
                 &msg.o,
                 OrderStatus::Accepted,
                 msg.ts,
+                msg.tn,
                 caches,
                 account_id,
                 instruments,
@@ -963,47 +1093,42 @@ fn dispatch_order_event(
             }
         }
         AxWsOrderEvent::PartiallyFilled(msg) => {
-            if let Some(event) =
-                create_order_filled(&msg.o, &msg.xs, msg.ts, caches, account_id, clock)
-            {
-                emitter.send_order_event(OrderEventAny::Filled(event));
-            } else if let Some(report) = create_fill_report(
+            dispatch_fill_event(
                 &msg.o,
                 &msg.xs,
                 msg.ts,
+                msg.tn,
+                emitter,
                 caches,
                 account_id,
                 instruments,
                 clock,
-            ) {
-                emitter.send_fill_report(report);
-            }
+            );
         }
         AxWsOrderEvent::Filled(msg) => {
-            if let Some(event) =
-                create_order_filled(&msg.o, &msg.xs, msg.ts, caches, account_id, clock)
-            {
-                emitter.send_order_event(OrderEventAny::Filled(event));
-            } else if let Some(report) = create_fill_report(
+            dispatch_fill_event(
                 &msg.o,
                 &msg.xs,
                 msg.ts,
+                msg.tn,
+                emitter,
                 caches,
                 account_id,
                 instruments,
                 clock,
-            ) {
-                emitter.send_fill_report(report);
-            }
+            );
             cleanup_terminal_order_tracking(&msg.o, caches);
         }
         AxWsOrderEvent::Canceled(msg) => {
-            if let Some(event) = create_order_canceled(&msg.o, msg.ts, caches, account_id, clock) {
+            if let Some(event) =
+                create_order_canceled(&msg.o, msg.ts, msg.tn, caches, account_id, clock)
+            {
                 emitter.send_order_event(OrderEventAny::Canceled(event));
             } else if let Some(report) = create_order_status_report(
                 &msg.o,
                 OrderStatus::Canceled,
                 msg.ts,
+                msg.tn,
                 caches,
                 account_id,
                 instruments,
@@ -1022,19 +1147,22 @@ fn dispatch_order_event(
                 .unwrap_or("UNKNOWN");
 
             if let Some(event) =
-                create_order_rejected(&msg.o, reason, msg.ts, caches, account_id, clock)
+                create_order_rejected(&msg.o, reason, msg.ts, msg.tn, caches, account_id, clock)
             {
                 emitter.send_order_event(OrderEventAny::Rejected(event));
             }
             cleanup_terminal_order_tracking(&msg.o, caches);
         }
         AxWsOrderEvent::Expired(msg) => {
-            if let Some(event) = create_order_expired(&msg.o, msg.ts, caches, account_id, clock) {
+            if let Some(event) =
+                create_order_expired(&msg.o, msg.ts, msg.tn, caches, account_id, clock)
+            {
                 emitter.send_order_event(OrderEventAny::Expired(event));
             } else if let Some(report) = create_order_status_report(
                 &msg.o,
                 OrderStatus::Expired,
                 msg.ts,
+                msg.tn,
                 caches,
                 account_id,
                 instruments,
@@ -1045,12 +1173,15 @@ fn dispatch_order_event(
             cleanup_terminal_order_tracking(&msg.o, caches);
         }
         AxWsOrderEvent::Replaced(msg) => {
-            if let Some(event) = create_order_accepted(&msg.o, msg.ts, caches, account_id, clock) {
-                emitter.send_order_event(OrderEventAny::Accepted(event));
+            if let Some(event) =
+                create_order_updated(&msg.o, msg.ts, msg.tn, caches, account_id, clock)
+            {
+                emitter.send_order_event(OrderEventAny::Updated(event));
             } else if let Some(report) = create_order_status_report(
                 &msg.o,
                 OrderStatus::Accepted,
                 msg.ts,
+                msg.tn,
                 caches,
                 account_id,
                 instruments,
@@ -1060,12 +1191,15 @@ fn dispatch_order_event(
             }
         }
         AxWsOrderEvent::DoneForDay(msg) => {
-            if let Some(event) = create_order_expired(&msg.o, msg.ts, caches, account_id, clock) {
+            if let Some(event) =
+                create_order_expired(&msg.o, msg.ts, msg.tn, caches, account_id, clock)
+            {
                 emitter.send_order_event(OrderEventAny::Expired(event));
             } else if let Some(report) = create_order_status_report(
                 &msg.o,
                 OrderStatus::Expired,
                 msg.ts,
+                msg.tn,
                 caches,
                 account_id,
                 instruments,
@@ -1104,6 +1238,34 @@ fn dispatch_order_event(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn dispatch_fill_event(
+    order: &AxWsOrder,
+    execution: &AxWsTradeExecution,
+    ts: i64,
+    tn: i64,
+    emitter: &ExecutionEventEmitter,
+    caches: &OrdersCaches,
+    account_id: AccountId,
+    instruments: &AtomicMap<Ustr, InstrumentAny>,
+    clock: &'static AtomicTime,
+) {
+    if let Some(event) = create_order_filled(order, execution, ts, tn, caches, account_id, clock) {
+        emitter.send_order_event(OrderEventAny::Filled(event));
+    } else if let Some(report) = create_fill_report(
+        order,
+        execution,
+        ts,
+        tn,
+        caches,
+        account_id,
+        instruments,
+        clock,
+    ) {
+        emitter.send_fill_report(report);
+    }
+}
+
 pub(crate) fn lookup_order_metadata<'a>(
     order: &AxWsOrder,
     caches: &'a OrdersCaches,
@@ -1129,6 +1291,7 @@ pub(crate) fn lookup_order_metadata<'a>(
 pub(crate) fn create_order_accepted(
     order: &AxWsOrder,
     event_ts: i64,
+    event_tn: i64,
     caches: &OrdersCaches,
     account_id: AccountId,
     clock: &'static AtomicTime,
@@ -1150,7 +1313,7 @@ pub(crate) fn create_order_accepted(
         entry.venue_order_id = Some(venue_order_id);
     }
 
-    let ts_event = ax_timestamp_s_to_unix_nanos(event_ts)
+    let ts_event = ax_timestamp_stn_to_unix_nanos(event_ts, event_tn)
         .map_err(|e| log::error!("{e}"))
         .ok()?;
 
@@ -1168,10 +1331,70 @@ pub(crate) fn create_order_accepted(
     ))
 }
 
+pub(crate) fn create_order_updated(
+    order: &AxWsOrder,
+    event_ts: i64,
+    event_tn: i64,
+    caches: &OrdersCaches,
+    account_id: AccountId,
+    clock: &'static AtomicTime,
+) -> Option<OrderUpdated> {
+    let metadata = lookup_order_metadata(order, caches)?;
+
+    let client_order_id = metadata.client_order_id;
+    let trader_id = metadata.trader_id;
+    let strategy_id = metadata.strategy_id;
+    let instrument_id = metadata.instrument_id;
+    let price_precision = metadata.price_precision;
+    let size_precision = metadata.size_precision;
+    let pending_trigger_price = metadata.pending_trigger_price;
+    // Use cached venue_order_id (set by HTTP handler) over the WS event oid,
+    // because AX may report the old oid in the replaced event
+    let venue_order_id = metadata
+        .venue_order_id
+        .unwrap_or_else(|| VenueOrderId::new(&order.oid));
+    drop(metadata);
+
+    caches
+        .venue_to_client_id
+        .insert(venue_order_id, client_order_id);
+
+    // Consume the pending trigger price now that the replace is confirmed
+    if let Some(mut entry) = caches.orders_metadata.get_mut(&client_order_id) {
+        entry.pending_trigger_price = None;
+    }
+
+    let ts_event = ax_timestamp_stn_to_unix_nanos(event_ts, event_tn)
+        .map_err(|e| log::error!("{e}"))
+        .ok()?;
+
+    let quantity = Quantity::new(order.q as f64, size_precision);
+    let price = Price::from_decimal_dp(order.p, price_precision).ok();
+
+    Some(OrderUpdated::new(
+        trader_id,
+        strategy_id,
+        instrument_id,
+        client_order_id,
+        quantity,
+        UUID4::new(),
+        ts_event,
+        clock.get_time_ns(),
+        false,
+        Some(venue_order_id),
+        Some(account_id),
+        price,
+        pending_trigger_price,
+        None, // protection_price
+        false,
+    ))
+}
+
 pub(crate) fn create_order_filled(
     order: &AxWsOrder,
     execution: &AxWsTradeExecution,
     event_ts: i64,
+    event_tn: i64,
     caches: &OrdersCaches,
     account_id: AccountId,
     clock: &'static AtomicTime,
@@ -1179,17 +1402,14 @@ pub(crate) fn create_order_filled(
     let venue_order_id = VenueOrderId::new(&order.oid);
     let metadata = lookup_order_metadata(order, caches)?;
 
-    let ts_event = ax_timestamp_s_to_unix_nanos(event_ts)
+    let ts_event = ax_timestamp_stn_to_unix_nanos(event_ts, event_tn)
         .map_err(|e| log::error!("{e}"))
         .ok()?;
 
     let last_qty = Quantity::new(execution.q as f64, metadata.size_precision);
     let last_px = Price::from_decimal_dp(execution.p, metadata.price_precision).ok()?;
 
-    let order_side = match order.d {
-        VenueOrderSide::Buy => NautilusOrderSide::Buy,
-        VenueOrderSide::Sell => NautilusOrderSide::Sell,
-    };
+    let order_side: OrderSide = order.d.into();
 
     let liquidity_side = if execution.agg {
         LiquiditySide::Taker
@@ -1223,6 +1443,7 @@ pub(crate) fn create_order_filled(
 pub(crate) fn create_order_canceled(
     order: &AxWsOrder,
     event_ts: i64,
+    event_tn: i64,
     caches: &OrdersCaches,
     account_id: AccountId,
     clock: &'static AtomicTime,
@@ -1230,7 +1451,7 @@ pub(crate) fn create_order_canceled(
     let venue_order_id = VenueOrderId::new(&order.oid);
     let metadata = lookup_order_metadata(order, caches)?;
 
-    let ts_event = ax_timestamp_s_to_unix_nanos(event_ts)
+    let ts_event = ax_timestamp_stn_to_unix_nanos(event_ts, event_tn)
         .map_err(|e| log::error!("{e}"))
         .ok()?;
 
@@ -1251,6 +1472,7 @@ pub(crate) fn create_order_canceled(
 pub(crate) fn create_order_expired(
     order: &AxWsOrder,
     event_ts: i64,
+    event_tn: i64,
     caches: &OrdersCaches,
     account_id: AccountId,
     clock: &'static AtomicTime,
@@ -1258,7 +1480,7 @@ pub(crate) fn create_order_expired(
     let venue_order_id = VenueOrderId::new(&order.oid);
     let metadata = lookup_order_metadata(order, caches)?;
 
-    let ts_event = ax_timestamp_s_to_unix_nanos(event_ts)
+    let ts_event = ax_timestamp_stn_to_unix_nanos(event_ts, event_tn)
         .map_err(|e| log::error!("{e}"))
         .ok()?;
 
@@ -1280,13 +1502,14 @@ pub(crate) fn create_order_rejected(
     order: &AxWsOrder,
     reason: &str,
     event_ts: i64,
+    event_tn: i64,
     caches: &OrdersCaches,
     account_id: AccountId,
     clock: &'static AtomicTime,
 ) -> Option<OrderRejected> {
     let metadata = lookup_order_metadata(order, caches)?;
 
-    let ts_event = ax_timestamp_s_to_unix_nanos(event_ts)
+    let ts_event = ax_timestamp_stn_to_unix_nanos(event_ts, event_tn)
         .map_err(|e| log::error!("{e}"))
         .ok()?;
     let due_post_only = reason.contains(AX_POST_ONLY_REJECT);
@@ -1327,29 +1550,12 @@ pub(crate) fn cleanup_terminal_order_tracking(order: &AxWsOrder, caches: &Orders
     }
 }
 
-fn map_order_side(side: VenueOrderSide) -> NautilusOrderSide {
-    match side {
-        VenueOrderSide::Buy => NautilusOrderSide::Buy,
-        VenueOrderSide::Sell => NautilusOrderSide::Sell,
-    }
-}
-
-fn map_time_in_force(tif: AxTimeInForce) -> TimeInForce {
-    match tif {
-        AxTimeInForce::Gtc => TimeInForce::Gtc,
-        AxTimeInForce::Ioc => TimeInForce::Ioc,
-        AxTimeInForce::Fok => TimeInForce::Fok,
-        AxTimeInForce::Day => TimeInForce::Day,
-        AxTimeInForce::Gtd => TimeInForce::Gtd,
-        AxTimeInForce::Ato => TimeInForce::AtTheOpen,
-        AxTimeInForce::Atc => TimeInForce::AtTheClose,
-    }
-}
-
+#[allow(clippy::too_many_arguments)]
 fn create_order_status_report(
     order: &AxWsOrder,
     order_status: OrderStatus,
     event_ts: i64,
+    event_tn: i64,
     caches: &OrdersCaches,
     account_id: AccountId,
     instruments: &AtomicMap<Ustr, InstrumentAny>,
@@ -1359,13 +1565,13 @@ fn create_order_status_report(
     let instrument = instruments_snap.get(&order.s)?;
     let venue_order_id = VenueOrderId::new(&order.oid);
     let instrument_id = instrument.id();
-    let order_side = map_order_side(order.d);
-    let time_in_force = map_time_in_force(order.tif);
+    let order_side = order.d.into();
+    let time_in_force = order.tif.into();
 
     let quantity = Quantity::new(order.q as f64, instrument.size_precision());
     let filled_qty = Quantity::new(order.xq as f64, instrument.size_precision());
 
-    let ts_event = ax_timestamp_s_to_unix_nanos(event_ts)
+    let ts_event = ax_timestamp_stn_to_unix_nanos(event_ts, event_tn)
         .map_err(|e| log::error!("{e}"))
         .ok()?;
     let ts_init = clock.get_time_ns();
@@ -1401,10 +1607,12 @@ fn create_order_status_report(
     Some(report)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_fill_report(
     order: &AxWsOrder,
     execution: &AxWsTradeExecution,
     event_ts: i64,
+    event_tn: i64,
     caches: &OrdersCaches,
     account_id: AccountId,
     instruments: &AtomicMap<Ustr, InstrumentAny>,
@@ -1414,7 +1622,7 @@ fn create_fill_report(
     let instrument = instruments_snap.get(&order.s)?;
     let venue_order_id = VenueOrderId::new(&order.oid);
     let instrument_id = instrument.id();
-    let order_side = map_order_side(order.d);
+    let order_side = order.d.into();
 
     let last_qty = Quantity::new(execution.q as f64, instrument.size_precision());
     let last_px = Price::from_decimal_dp(execution.p, instrument.price_precision()).ok()?;
@@ -1425,7 +1633,7 @@ fn create_fill_report(
         LiquiditySide::Maker
     };
 
-    let ts_event = ax_timestamp_s_to_unix_nanos(event_ts)
+    let ts_event = ax_timestamp_stn_to_unix_nanos(event_ts, event_tn)
         .map_err(|e| log::error!("{e}"))
         .ok()?;
     let ts_init = clock.get_time_ns();
@@ -1437,6 +1645,9 @@ fn create_fill_report(
             .map_or_else(|| cid_to_client_order_id(cid), |v| *v)
     });
 
+    // The WS trade execution payload does not include fee data so
+    // commission is zero here. The REST /fills endpoint (used during
+    // reconciliation via parse_fill_report) includes accurate fees.
     let commission = Money::new(0.0, instrument.quote_currency());
 
     Some(FillReport::new(
@@ -1455,4 +1666,164 @@ fn create_fill_report(
         ts_init,
         Some(UUID4::new()),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use dashmap::DashMap;
+    use nautilus_core::time::get_atomic_clock_realtime;
+    use nautilus_model::{
+        identifiers::{AccountId, ClientOrderId, InstrumentId, StrategyId, TraderId, VenueOrderId},
+        types::{Currency, Price, Quantity},
+    };
+    use rstest::rstest;
+    use rust_decimal::Decimal;
+    use rust_decimal_macros::dec;
+    use ustr::Ustr;
+
+    use super::*;
+    use crate::{
+        common::enums::{AxOrderSide, AxOrderStatus, AxTimeInForce},
+        websocket::{messages::OrderMetadata, orders::OrdersCaches},
+    };
+
+    fn test_caches() -> OrdersCaches {
+        OrdersCaches {
+            orders_metadata: Arc::new(DashMap::new()),
+            venue_to_client_id: Arc::new(DashMap::new()),
+            cid_to_client_order_id: Arc::new(DashMap::new()),
+        }
+    }
+
+    fn test_ws_order(oid: &str, price: Decimal, qty: u64) -> AxWsOrder {
+        AxWsOrder {
+            oid: oid.to_string(),
+            u: "user".to_string(),
+            s: Ustr::from("BTC-PERP"),
+            p: price,
+            q: qty,
+            xq: 0,
+            rq: qty,
+            o: AxOrderStatus::Accepted,
+            d: AxOrderSide::Buy,
+            tif: AxTimeInForce::Gtc,
+            ts: 1609459200,
+            tn: 0,
+            cid: None,
+            tag: None,
+            txt: None,
+        }
+    }
+
+    #[rstest]
+    fn test_create_order_updated_uses_cached_venue_order_id() {
+        let caches = test_caches();
+        let clock = get_atomic_clock_realtime();
+        let account_id = AccountId::from("AX-001");
+        let client_order_id = ClientOrderId::from("O-001");
+        let new_venue_id = VenueOrderId::new("NEW-OID");
+        let trigger = Price::from("49000.00");
+
+        let metadata = OrderMetadata {
+            trader_id: TraderId::from("TRADER-001"),
+            strategy_id: StrategyId::from("S-001"),
+            instrument_id: InstrumentId::from("BTC-PERP.AX"),
+            client_order_id,
+            venue_order_id: Some(new_venue_id),
+            ts_init: 0.into(),
+            size_precision: 0,
+            price_precision: 2,
+            quote_currency: Currency::USD(),
+            pending_trigger_price: Some(trigger),
+        };
+        caches.orders_metadata.insert(client_order_id, metadata);
+        caches
+            .venue_to_client_id
+            .insert(new_venue_id, client_order_id);
+
+        // WS event carries the OLD oid
+        let ws_order = test_ws_order("OLD-OID", dec!(50500.00), 100);
+
+        // Lookup needs cid path since OLD-OID is not in venue_to_client_id.
+        // Seed it via cid instead.
+        let cid_value = 42u64;
+        caches
+            .cid_to_client_order_id
+            .insert(cid_value, client_order_id);
+        let mut ws_order_with_cid = ws_order;
+        ws_order_with_cid.cid = Some(cid_value);
+
+        let event = create_order_updated(
+            &ws_order_with_cid,
+            1609459200,
+            0,
+            &caches,
+            account_id,
+            clock,
+        )
+        .expect("should produce OrderUpdated");
+
+        // Uses cached NEW-OID, not the WS event's OLD-OID
+        assert_eq!(event.venue_order_id, Some(new_venue_id));
+        assert_eq!(event.trigger_price, Some(trigger));
+        assert_eq!(event.quantity, Quantity::new(100.0, 0));
+        assert_eq!(event.price, Some(Price::from("50500.00")));
+
+        // Pending trigger consumed
+        let meta = caches.orders_metadata.get(&client_order_id).unwrap();
+        assert!(meta.pending_trigger_price.is_none());
+    }
+
+    #[rstest]
+    fn test_create_order_updated_falls_back_to_ws_oid() {
+        let caches = test_caches();
+        let clock = get_atomic_clock_realtime();
+        let account_id = AccountId::from("AX-001");
+        let client_order_id = ClientOrderId::from("O-002");
+        let ws_oid = VenueOrderId::new("WS-OID");
+
+        let metadata = OrderMetadata {
+            trader_id: TraderId::from("TRADER-001"),
+            strategy_id: StrategyId::from("S-001"),
+            instrument_id: InstrumentId::from("BTC-PERP.AX"),
+            client_order_id,
+            venue_order_id: None,
+            ts_init: 0.into(),
+            size_precision: 0,
+            price_precision: 2,
+            quote_currency: Currency::USD(),
+            pending_trigger_price: None,
+        };
+        caches.orders_metadata.insert(client_order_id, metadata);
+        caches.venue_to_client_id.insert(ws_oid, client_order_id);
+
+        let ws_order = test_ws_order("WS-OID", dec!(50500.00), 200);
+
+        let event = create_order_updated(&ws_order, 1609459200, 0, &caches, account_id, clock)
+            .expect("should produce OrderUpdated");
+
+        assert_eq!(event.venue_order_id, Some(ws_oid));
+        assert!(event.trigger_price.is_none());
+    }
+
+    #[rstest]
+    fn test_cancel_on_disconnect_url_no_existing_query() {
+        let mut url = "wss://example.com/orders/ws".to_string();
+        let separator = if url.contains('?') { "&" } else { "?" };
+        url.push_str(&format!("{separator}cancel_on_disconnect=true"));
+        assert_eq!(url, "wss://example.com/orders/ws?cancel_on_disconnect=true");
+    }
+
+    #[rstest]
+    fn test_cancel_on_disconnect_url_with_existing_query() {
+        let mut url = "wss://example.com/orders/ws?token=abc".to_string();
+        let separator = if url.contains('?') { "&" } else { "?" };
+        url.push_str(&format!("{separator}cancel_on_disconnect=true"));
+        assert_eq!(
+            url,
+            "wss://example.com/orders/ws?token=abc&cancel_on_disconnect=true"
+        );
+    }
 }

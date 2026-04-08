@@ -28,7 +28,10 @@ use nautilus_core::{
 };
 use nautilus_model::{
     data::{BarType, Data, OrderBookDeltas_API, QuoteTick},
-    enums::{AggregationSource, BarAggregation, OrderSide, OrderType, PriceType, TimeInForce},
+    enums::{
+        AggregationSource, BarAggregation, OrderSide, OrderType, PriceType, TimeInForce,
+        TriggerType,
+    },
     events::{OrderCancelRejected, OrderModifyRejected, OrderRejected},
     identifiers::{
         AccountId, ClientOrderId, InstrumentId, StrategyId, Symbol, TraderId, VenueOrderId,
@@ -131,12 +134,12 @@ impl BybitWebSocketClient {
     /// Creates a new Bybit public WebSocket client.
     #[staticmethod]
     #[pyo3(name = "new_public")]
-    #[pyo3(signature = (product_type, environment, url=None, heartbeat=None))]
+    #[pyo3(signature = (product_type, environment, url=None, heartbeat=20))]
     fn py_new_public(
         product_type: BybitProductType,
         environment: BybitEnvironment,
         url: Option<String>,
-        heartbeat: Option<u64>,
+        heartbeat: u64,
     ) -> Self {
         Self::new_public_with(product_type, environment, url, heartbeat)
     }
@@ -150,13 +153,13 @@ impl BybitWebSocketClient {
     /// - Mainnet: `BYBIT_API_KEY`, `BYBIT_API_SECRET`
     #[staticmethod]
     #[pyo3(name = "new_private")]
-    #[pyo3(signature = (environment, api_key=None, api_secret=None, url=None, heartbeat=None))]
+    #[pyo3(signature = (environment, api_key=None, api_secret=None, url=None, heartbeat=20))]
     fn py_new_private(
         environment: BybitEnvironment,
         api_key: Option<String>,
         api_secret: Option<String>,
         url: Option<String>,
-        heartbeat: Option<u64>,
+        heartbeat: u64,
     ) -> Self {
         Self::new_private(environment, api_key, api_secret, url, heartbeat)
     }
@@ -170,13 +173,13 @@ impl BybitWebSocketClient {
     /// - Mainnet: `BYBIT_API_KEY`, `BYBIT_API_SECRET`
     #[staticmethod]
     #[pyo3(name = "new_trade")]
-    #[pyo3(signature = (environment, api_key=None, api_secret=None, url=None, heartbeat=None))]
+    #[pyo3(signature = (environment, api_key=None, api_secret=None, url=None, heartbeat=20))]
     fn py_new_trade(
         environment: BybitEnvironment,
         api_key: Option<String>,
         api_secret: Option<String>,
         url: Option<String>,
-        heartbeat: Option<u64>,
+        heartbeat: u64,
     ) -> Self {
         Self::new_trade(environment, api_key, api_secret, url, heartbeat)
     }
@@ -263,6 +266,7 @@ impl BybitWebSocketClient {
             let product_type = client.product_type();
             let account_id = client.account_id();
             let bar_types_cache = client.bar_types_cache().clone();
+            let trade_subs = client.trade_subs().clone();
             let option_greeks_subs = client.option_greeks_subs().clone();
             let bars_timestamp_on_close = client.bars_timestamp_on_close();
             let instruments = Arc::clone(client.instruments_cache_ref());
@@ -299,6 +303,7 @@ impl BybitWebSocketClient {
                                 msg,
                                 product_type,
                                 &instruments,
+                                &trade_subs,
                                 clock,
                                 &call_soon,
                                 &callback,
@@ -815,6 +820,7 @@ impl BybitWebSocketClient {
         time_in_force=None,
         price=None,
         trigger_price=None,
+        trigger_type=None,
         post_only=None,
         reduce_only=None,
         is_leverage=false,
@@ -835,6 +841,7 @@ impl BybitWebSocketClient {
         time_in_force: Option<TimeInForce>,
         price: Option<Price>,
         trigger_price: Option<Price>,
+        trigger_type: Option<TriggerType>,
         post_only: Option<bool>,
         reduce_only: Option<bool>,
         is_leverage: bool,
@@ -855,6 +862,7 @@ impl BybitWebSocketClient {
                     time_in_force,
                     price,
                     trigger_price,
+                    trigger_type,
                     post_only,
                     reduce_only,
                     is_leverage,
@@ -988,6 +996,7 @@ impl BybitWebSocketClient {
         time_in_force=None,
         price=None,
         trigger_price=None,
+        trigger_type=None,
         post_only=None,
         reduce_only=None,
         is_leverage=false,
@@ -1007,6 +1016,7 @@ impl BybitWebSocketClient {
         time_in_force: Option<TimeInForce>,
         price: Option<Price>,
         trigger_price: Option<Price>,
+        trigger_type: Option<TriggerType>,
         post_only: Option<bool>,
         reduce_only: Option<bool>,
         is_leverage: bool,
@@ -1025,6 +1035,7 @@ impl BybitWebSocketClient {
                 time_in_force,
                 price,
                 trigger_price,
+                trigger_type,
                 post_only,
                 reduce_only,
                 is_leverage,
@@ -1342,15 +1353,24 @@ fn handle_trade(
     msg: &crate::websocket::messages::BybitWsTradeMsg,
     product_type: Option<BybitProductType>,
     instruments: &AtomicMap<Ustr, InstrumentAny>,
+    trade_subs: &AtomicSet<InstrumentId>,
     clock: &AtomicTime,
     call_soon: &Py<PyAny>,
     callback: &Py<PyAny>,
 ) {
     let ts_init = clock.get_time_ns();
+
     for trade in &msg.data {
         let Some(instrument) = resolve_instrument(&trade.s, product_type, instruments) else {
             continue;
         };
+
+        if product_type == Some(BybitProductType::Option)
+            && !trade_subs.is_empty()
+            && !trade_subs.contains(&instrument.id())
+        {
+            continue;
+        }
 
         match parse_ws_trade_tick(trade, &instrument, ts_init) {
             Ok(tick) => send_data_to_python(Data::Trade(tick), call_soon, callback),
@@ -1382,6 +1402,7 @@ fn handle_kline(
     };
 
     let ts_init = clock.get_time_ns();
+
     for kline in &msg.data {
         if !kline.confirm {
             continue;
@@ -1534,6 +1555,7 @@ fn handle_account_order(
     callback: &Py<PyAny>,
 ) {
     let ts_init = clock.get_time_ns();
+
     for order in &msg.data {
         let symbol = make_bybit_symbol(order.symbol, order.category);
         let Some(instrument) = instruments.get_cloned(&symbol) else {
@@ -1560,6 +1582,7 @@ fn handle_account_execution(
     callback: &Py<PyAny>,
 ) {
     let ts_init = clock.get_time_ns();
+
     for exec in &msg.data {
         let symbol = make_bybit_symbol(exec.symbol, exec.category);
         let Some(instrument) = instruments.get_cloned(&symbol) else {
@@ -1607,6 +1630,7 @@ fn handle_account_position(
     callback: &Py<PyAny>,
 ) {
     let ts_init = clock.get_time_ns();
+
     for position in &msg.data {
         let symbol = make_bybit_symbol(position.symbol, position.category);
         let Some(instrument) = instruments.get_cloned(&symbol) else {

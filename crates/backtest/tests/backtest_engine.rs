@@ -16,14 +16,18 @@
 use std::{
     cell::Cell,
     fmt::Debug,
-    ops::{Deref, DerefMut},
     sync::atomic::{AtomicU32, Ordering},
 };
 
 use ahash::AHashMap;
 use nautilus_backtest::{config::BacktestEngineConfig, engine::BacktestEngine};
 use nautilus_common::{
-    actor::{DataActor, DataActorCore},
+    actor::{
+        DataActor, DataActorCore, data_actor::DataActorConfig, registry::try_get_actor_unchecked,
+    },
+    component::Component,
+    enums::ComponentState,
+    msgbus, nautilus_actor,
     timer::TimeEvent,
 };
 use nautilus_core::UnixNanos;
@@ -38,12 +42,17 @@ use nautilus_model::{
         AccountType, AggregationSource, BarAggregation, BookType, OmsType, OrderSide, PriceType,
     },
     events::OrderFilled,
-    identifiers::{InstrumentId, StrategyId, Venue},
+    identifiers::{ActorId, ExecAlgorithmId, InstrumentId, StrategyId, Venue},
     instruments::{CryptoPerpetual, Instrument, InstrumentAny, stubs::crypto_perpetual_ethusdt},
+    orders::OrderAny,
     position::Position,
     types::{Money, Price, Quantity},
 };
-use nautilus_trading::{Strategy, StrategyConfig, StrategyCore};
+use nautilus_system::trader::Trader;
+use nautilus_trading::{
+    ExecutionAlgorithm as ExecutionAlgorithmTrait, ExecutionAlgorithmConfig,
+    ExecutionAlgorithmCore, Strategy, StrategyConfig, StrategyCore, nautilus_strategy,
+};
 use rstest::*;
 struct EmptyStrategy {
     core: StrategyCore,
@@ -62,18 +71,7 @@ impl EmptyStrategy {
     }
 }
 
-impl Deref for EmptyStrategy {
-    type Target = DataActorCore;
-    fn deref(&self) -> &Self::Target {
-        &self.core
-    }
-}
-
-impl DerefMut for EmptyStrategy {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.core
-    }
-}
+nautilus_strategy!(EmptyStrategy);
 
 impl Debug for EmptyStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,13 +81,65 @@ impl Debug for EmptyStrategy {
 
 impl DataActor for EmptyStrategy {}
 
-impl Strategy for EmptyStrategy {
-    fn core(&self) -> &StrategyCore {
-        &self.core
+struct EmptyActor {
+    core: DataActorCore,
+}
+
+impl EmptyActor {
+    fn new() -> Self {
+        let config = DataActorConfig {
+            actor_id: Some(ActorId::from("EMPTY-ACTOR-001")),
+            ..Default::default()
+        };
+        Self {
+            core: DataActorCore::new(config),
+        }
+    }
+}
+
+nautilus_actor!(EmptyActor);
+
+impl Debug for EmptyActor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(stringify!(EmptyActor)).finish()
+    }
+}
+
+impl DataActor for EmptyActor {}
+
+struct EmptyExecAlgorithm {
+    core: ExecutionAlgorithmCore,
+}
+
+impl EmptyExecAlgorithm {
+    fn new() -> Self {
+        let config = ExecutionAlgorithmConfig {
+            exec_algorithm_id: Some(ExecAlgorithmId::from("EMPTY-EXEC-001")),
+            ..Default::default()
+        };
+        Self {
+            core: ExecutionAlgorithmCore::new(config),
+        }
+    }
+}
+
+nautilus_actor!(EmptyExecAlgorithm);
+
+impl Debug for EmptyExecAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(stringify!(EmptyExecAlgorithm)).finish()
+    }
+}
+
+impl DataActor for EmptyExecAlgorithm {}
+
+impl ExecutionAlgorithmTrait for EmptyExecAlgorithm {
+    fn core_mut(&mut self) -> &mut ExecutionAlgorithmCore {
+        &mut self.core
     }
 
-    fn core_mut(&mut self) -> &mut StrategyCore {
-        &mut self.core
+    fn on_order(&mut self, _order: OrderAny) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 
@@ -141,18 +191,7 @@ impl EmaCross {
     }
 }
 
-impl Deref for EmaCross {
-    type Target = DataActorCore;
-    fn deref(&self) -> &Self::Target {
-        &self.core
-    }
-}
-
-impl DerefMut for EmaCross {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.core
-    }
-}
+nautilus_strategy!(EmaCross);
 
 impl Debug for EmaCross {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -188,16 +227,6 @@ impl DataActor for EmaCross {
 
         self.prev_fast_above = Some(fast_above);
         Ok(())
-    }
-}
-
-impl Strategy for EmaCross {
-    fn core(&self) -> &StrategyCore {
-        &self.core
-    }
-
-    fn core_mut(&mut self) -> &mut StrategyCore {
-        &mut self.core
     }
 }
 
@@ -240,18 +269,7 @@ impl SnapshotNettingFlip {
     }
 }
 
-impl Deref for SnapshotNettingFlip {
-    type Target = DataActorCore;
-    fn deref(&self) -> &Self::Target {
-        &self.core
-    }
-}
-
-impl DerefMut for SnapshotNettingFlip {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.core
-    }
-}
+nautilus_strategy!(SnapshotNettingFlip);
 
 impl Debug for SnapshotNettingFlip {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -280,14 +298,140 @@ impl DataActor for SnapshotNettingFlip {
     }
 }
 
-impl Strategy for SnapshotNettingFlip {
-    fn core(&self) -> &StrategyCore {
-        &self.core
-    }
+#[rstest]
+fn test_add_actor_registers_actor_with_trader() {
+    let mut engine = BacktestEngine::new(BacktestEngineConfig::default()).unwrap();
+    let actor = EmptyActor::new();
+    let actor_id = actor.actor_id();
 
-    fn core_mut(&mut self) -> &mut StrategyCore {
-        &mut self.core
-    }
+    engine.add_actor(actor).unwrap();
+
+    assert_eq!(engine.kernel().trader.borrow().actor_count(), 1);
+    assert!(
+        engine
+            .kernel()
+            .trader
+            .borrow()
+            .actor_ids()
+            .contains(&actor_id)
+    );
+}
+
+#[rstest]
+fn test_add_exec_algorithm_registers_exec_algorithm_with_trader_and_endpoint() {
+    let mut engine = BacktestEngine::new(BacktestEngineConfig::default()).unwrap();
+    let exec_algorithm = EmptyExecAlgorithm::new();
+    let exec_algorithm_id = ExecAlgorithmId::from(exec_algorithm.actor_id().inner().as_str());
+    let endpoint = format!("{exec_algorithm_id}.execute");
+
+    engine.add_exec_algorithm(exec_algorithm).unwrap();
+
+    assert_eq!(engine.kernel().trader.borrow().exec_algorithm_count(), 1);
+    assert!(
+        engine
+            .kernel()
+            .trader
+            .borrow()
+            .exec_algorithm_ids()
+            .contains(&exec_algorithm_id)
+    );
+    assert!(msgbus::has_endpoint(&endpoint));
+}
+
+#[rstest]
+fn test_add_exec_algorithm_while_running_returns_error() {
+    let mut engine = BacktestEngine::new(BacktestEngineConfig::default()).unwrap();
+
+    engine
+        .kernel_mut()
+        .trader
+        .borrow_mut()
+        .initialize()
+        .unwrap();
+    engine.kernel_mut().trader.borrow_mut().start().unwrap();
+
+    let result = engine.add_exec_algorithm(EmptyExecAlgorithm::new());
+    assert!(result.is_err());
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "Cannot add execution algorithms to running trader"
+    );
+    assert_eq!(engine.kernel().trader.borrow().exec_algorithm_count(), 0);
+}
+
+#[rstest]
+fn test_add_actor_while_running_registers_actor_with_trader() {
+    let mut engine = BacktestEngine::new(BacktestEngineConfig::default()).unwrap();
+    let actor = EmptyActor::new();
+    let actor_id = actor.actor_id();
+
+    engine
+        .kernel_mut()
+        .trader
+        .borrow_mut()
+        .initialize()
+        .unwrap();
+    engine.kernel_mut().trader.borrow_mut().start().unwrap();
+
+    engine.add_actor(actor).unwrap();
+
+    assert_eq!(engine.kernel().trader.borrow().actor_count(), 1);
+    assert!(
+        engine
+            .kernel()
+            .trader
+            .borrow()
+            .actor_ids()
+            .contains(&actor_id)
+    );
+}
+
+#[rstest]
+fn test_add_strategy_while_running_registers_strategy_and_market_exit_control() {
+    let mut engine = BacktestEngine::new(BacktestEngineConfig::default()).unwrap();
+    let strategy = EmptyStrategy::new();
+    let strategy_id = StrategyId::from(strategy.actor_id().inner().as_str());
+    let strategy_registry_id = strategy_id.inner();
+
+    engine
+        .kernel_mut()
+        .trader
+        .borrow_mut()
+        .initialize()
+        .unwrap();
+    engine.kernel_mut().trader.borrow_mut().start().unwrap();
+
+    engine.add_strategy(strategy).unwrap();
+
+    assert_eq!(engine.kernel().trader.borrow().strategy_count(), 1);
+    assert!(
+        engine
+            .kernel()
+            .trader
+            .borrow()
+            .strategy_ids()
+            .contains(&strategy_id)
+    );
+    assert_eq!(
+        try_get_actor_unchecked::<EmptyStrategy>(&strategy_registry_id)
+            .unwrap()
+            .state(),
+        ComponentState::Ready
+    );
+
+    engine
+        .kernel()
+        .trader
+        .borrow()
+        .start_strategy(&strategy_id)
+        .unwrap();
+    Trader::market_exit_strategy(&engine.kernel().trader, &strategy_id).unwrap();
+
+    assert!(
+        try_get_actor_unchecked::<EmptyStrategy>(&strategy_registry_id)
+            .unwrap()
+            .is_exiting()
+    );
 }
 
 fn create_engine() -> BacktestEngine {
@@ -1024,18 +1168,7 @@ impl CascadingStopStrategy {
     }
 }
 
-impl Deref for CascadingStopStrategy {
-    type Target = DataActorCore;
-    fn deref(&self) -> &Self::Target {
-        &self.core
-    }
-}
-
-impl DerefMut for CascadingStopStrategy {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.core
-    }
-}
+nautilus_strategy!(CascadingStopStrategy);
 
 impl Debug for CascadingStopStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1097,16 +1230,6 @@ impl DataActor for CascadingStopStrategy {
     }
 }
 
-impl Strategy for CascadingStopStrategy {
-    fn core(&self) -> &StrategyCore {
-        &self.core
-    }
-
-    fn core_mut(&mut self) -> &mut StrategyCore {
-        &mut self.core
-    }
-}
-
 #[rstest]
 fn test_cascading_stop_loss_on_fill_settled_same_tick(crypto_perpetual_ethusdt: CryptoPerpetual) {
     let mut engine = create_engine();
@@ -1162,18 +1285,7 @@ impl DualTimerStrategy {
     }
 }
 
-impl Deref for DualTimerStrategy {
-    type Target = DataActorCore;
-    fn deref(&self) -> &Self::Target {
-        &self.core
-    }
-}
-
-impl DerefMut for DualTimerStrategy {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.core
-    }
-}
+nautilus_strategy!(DualTimerStrategy);
 
 impl Debug for DualTimerStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1213,16 +1325,6 @@ impl DataActor for DualTimerStrategy {
         );
         self.submit_order(order, None, None)?;
         Ok(())
-    }
-}
-
-impl Strategy for DualTimerStrategy {
-    fn core(&self) -> &StrategyCore {
-        &self.core
-    }
-
-    fn core_mut(&mut self) -> &mut StrategyCore {
-        &mut self.core
     }
 }
 
@@ -1275,18 +1377,7 @@ impl BarSubscriberStrategy {
     }
 }
 
-impl Deref for BarSubscriberStrategy {
-    type Target = DataActorCore;
-    fn deref(&self) -> &Self::Target {
-        &self.core
-    }
-}
-
-impl DerefMut for BarSubscriberStrategy {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.core
-    }
-}
+nautilus_strategy!(BarSubscriberStrategy);
 
 impl Debug for BarSubscriberStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1299,16 +1390,6 @@ impl DataActor for BarSubscriberStrategy {
         self.subscribe_quotes(self.instrument_id, None, None);
         self.subscribe_bars(self.bar_type, None, None);
         Ok(())
-    }
-}
-
-impl Strategy for BarSubscriberStrategy {
-    fn core(&self) -> &StrategyCore {
-        &self.core
-    }
-
-    fn core_mut(&mut self) -> &mut StrategyCore {
-        &mut self.core
     }
 }
 

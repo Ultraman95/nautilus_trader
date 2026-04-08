@@ -24,7 +24,10 @@ use nautilus_model::{
     },
     enums::{AggregationSource, AggressorSide, BarAggregation, BookAction, OrderSide, PriceType},
     identifiers::{InstrumentId, Symbol, TradeId},
-    instruments::{CurrencyPair, Instrument, InstrumentAny},
+    instruments::{
+        CurrencyPair, Instrument, InstrumentAny,
+        stubs::{audusd_sim, equity_aapl},
+    },
     types::{Currency, Price, Quantity},
 };
 use nautilus_persistence::{
@@ -32,7 +35,7 @@ use nautilus_persistence::{
         catalog::ParquetDataCatalog,
         session::{DataBackendSession, QueryResult},
     },
-    test_data::{MacroYieldCurveData, RustTestCustomData},
+    test_data::{MacroYieldCurveData, RustTestCustomData, RustTestParamsCustomData},
 };
 use nautilus_serialization::{arrow::ArrowSchemaProvider, ensure_custom_data_registered};
 use nautilus_testkit::common::get_nautilus_test_data_file_path;
@@ -53,6 +56,7 @@ fn ensure_test_custom_data_registered() {
     ONCE.call_once(|| {
         ensure_custom_data_registered::<MacroYieldCurveData>();
         ensure_custom_data_registered::<RustTestCustomData>();
+        ensure_custom_data_registered::<RustTestParamsCustomData>();
     });
 }
 
@@ -1393,6 +1397,7 @@ fn test_generic_consolidate_data_by_period_bars() {
 
     // Create multiple small files with contiguous timestamps
     let mut bars_list = Vec::new();
+
     for i in 0..3 {
         let bars = vec![create_bar(1000 + i)];
         bars_list.push(bars[0]);
@@ -1449,6 +1454,7 @@ fn test_generic_consolidate_data_by_period_with_time_range() {
         create_quote_tick(5000),
         create_quote_tick(10000),
     ];
+
     for quote in quotes {
         catalog
             .write_to_parquet(vec![quote], None, None, None)
@@ -1479,6 +1485,7 @@ fn test_consolidation_workflow_end_to_end() {
 
     // Create multiple small files
     let mut bars_list = Vec::new();
+
     for i in 0..5 {
         let bars = vec![create_bar(1000 + i * 1000)];
         bars_list.push(bars[0]);
@@ -2679,6 +2686,7 @@ fn test_catalog_query_multiple_instruments_table_naming() {
 
     // Verify we have data from all three instruments
     let mut instrument_counts = HashMap::new();
+
     for item in &data {
         if let Data::Quote(quote) = item {
             *instrument_counts
@@ -2905,6 +2913,83 @@ fn test_rust_custom_data_roundtrip() {
                 .as_any()
                 .downcast_ref::<RustTestCustomData>()
                 .expect("Expected RustTestCustomData");
+            assert_eq!(expected, rust);
+        } else {
+            panic!("Expected Data::Custom variant");
+        }
+    }
+}
+
+#[rstest]
+fn test_rust_custom_data_roundtrip_with_params_field() {
+    use std::sync::Arc;
+
+    use nautilus_model::data::{CustomData, Data, DataType};
+
+    ensure_test_custom_data_registered();
+    let (_temp_dir, mut catalog) = create_temp_catalog();
+
+    let data_type = DataType::new("RustTestParamsCustomData", None, None);
+
+    let mut params_a = Params::new();
+    params_a.insert("key".to_string(), json!("alpha"));
+    params_a.insert("count".to_string(), json!(1_u64));
+    params_a.insert("enabled".to_string(), json!(true));
+
+    let mut params_b = Params::new();
+    params_b.insert("key".to_string(), json!("beta"));
+    params_b.insert(
+        "nested".to_string(),
+        json!({"level": 2, "tags": ["x", "y"]}),
+    );
+
+    let original_data = [
+        RustTestParamsCustomData {
+            name: "first".to_string(),
+            params: params_a,
+            ts_event: UnixNanos::from(10),
+            ts_init: UnixNanos::from(10),
+        },
+        RustTestParamsCustomData {
+            name: "second".to_string(),
+            params: params_b,
+            ts_event: UnixNanos::from(20),
+            ts_init: UnixNanos::from(20),
+        },
+    ];
+
+    let custom_data: Vec<CustomData> = original_data
+        .iter()
+        .cloned()
+        .map(|item| CustomData::new(Arc::new(item), data_type.clone()))
+        .collect();
+
+    catalog
+        .write_custom_data_batch(custom_data, None, None, Some(false))
+        .unwrap();
+
+    let loaded: Vec<Data> = catalog
+        .query_custom_data_dynamic(
+            "RustTestParamsCustomData",
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+    assert_eq!(loaded.len(), original_data.len());
+
+    for (expected, actual) in original_data.iter().zip(loaded.iter()) {
+        if let Data::Custom(custom) = actual {
+            assert_eq!(custom.data_type.type_name(), "RustTestParamsCustomData");
+            let rust: &RustTestParamsCustomData = custom
+                .data
+                .as_any()
+                .downcast_ref::<RustTestParamsCustomData>()
+                .expect("Expected RustTestParamsCustomData");
             assert_eq!(expected, rust);
         } else {
             panic!("Expected Data::Custom variant");
@@ -3469,4 +3554,93 @@ fn test_instrument_roundtrip_with_info_params() {
         Some(info),
         "info (Params) must roundtrip unchanged"
     );
+}
+
+#[rstest]
+fn test_write_instruments_appends_time_series_versions_for_same_instrument() {
+    let temp_dir = TempDir::new().unwrap();
+    let catalog = ParquetDataCatalog::new(temp_dir.path(), None, None, None, None);
+
+    let base = audusd_sim();
+    let base_id = base.id;
+    let base_info = base.info.clone().unwrap_or_default();
+
+    let mut instrument_v1 = base.clone();
+    let mut info_v1 = base_info.clone();
+    info_v1.insert("venue_extra".to_string(), json!("v1"));
+    instrument_v1.info = Some(info_v1);
+    instrument_v1.ts_event = UnixNanos::from(1_000);
+    instrument_v1.ts_init = UnixNanos::from(1_000);
+
+    let mut instrument_v2 = base;
+    let mut info_v2 = base_info;
+    info_v2.insert("venue_extra".to_string(), json!("v2"));
+    instrument_v2.info = Some(info_v2);
+    instrument_v2.ts_event = UnixNanos::from(2_000);
+    instrument_v2.ts_init = UnixNanos::from(2_000);
+
+    let instrument_v1 = InstrumentAny::CurrencyPair(instrument_v1);
+    let instrument_v2 = InstrumentAny::CurrencyPair(instrument_v2);
+
+    catalog.write_instruments(vec![instrument_v1]).unwrap();
+    catalog.write_instruments(vec![instrument_v2]).unwrap();
+
+    let id_str = base_id.to_string();
+    let ids = vec![id_str.clone()];
+    let read = catalog.query_instruments(Some(&ids)).unwrap();
+    assert_eq!(read.len(), 2, "Should read back both instrument versions");
+    assert_eq!(HasTsInit::ts_init(&read[0]), UnixNanos::from(1_000));
+    assert_eq!(HasTsInit::ts_init(&read[1]), UnixNanos::from(2_000));
+
+    let filtered = catalog
+        .query_instruments_filtered(
+            Some(&ids),
+            Some(UnixNanos::from(1_500)),
+            Some(UnixNanos::from(2_500)),
+        )
+        .unwrap();
+    assert_eq!(filtered.len(), 1, "Should filter to the matching version");
+    assert_eq!(HasTsInit::ts_init(&filtered[0]), UnixNanos::from(2_000));
+
+    let intervals = catalog.get_intervals("instruments", Some(&id_str)).unwrap();
+    assert_eq!(intervals, vec![(1_000, 1_000), (2_000, 2_000)]);
+}
+
+#[rstest]
+fn test_write_instruments_groups_by_type_and_id_before_encoding() {
+    let temp_dir = TempDir::new().unwrap();
+    let catalog = ParquetDataCatalog::new(temp_dir.path(), None, None, None, None);
+
+    let currency_pair = audusd_sim();
+    let shared_id = currency_pair.id;
+
+    let mut equity = equity_aapl();
+    equity.id = shared_id;
+    equity.ts_event = UnixNanos::from(2_000);
+    equity.ts_init = UnixNanos::from(2_000);
+
+    let mut currency_pair = currency_pair;
+    currency_pair.ts_event = UnixNanos::from(1_000);
+    currency_pair.ts_init = UnixNanos::from(1_000);
+
+    let written = catalog
+        .write_instruments(vec![
+            InstrumentAny::Equity(equity),
+            InstrumentAny::CurrencyPair(currency_pair),
+        ])
+        .unwrap();
+
+    assert_eq!(written.len(), 2);
+
+    let id_str = shared_id.to_string();
+    let intervals = catalog.get_intervals("instruments", Some(&id_str)).unwrap();
+    assert_eq!(intervals, vec![(1_000, 1_000), (2_000, 2_000)]);
+
+    let ids = vec![id_str];
+    let read = catalog.query_instruments(Some(&ids)).unwrap();
+    assert_eq!(read.len(), 2);
+    assert!(matches!(read[0], InstrumentAny::CurrencyPair(_)));
+    assert!(matches!(read[1], InstrumentAny::Equity(_)));
+    assert_eq!(HasTsInit::ts_init(&read[0]), UnixNanos::from(1_000));
+    assert_eq!(HasTsInit::ts_init(&read[1]), UnixNanos::from(2_000));
 }

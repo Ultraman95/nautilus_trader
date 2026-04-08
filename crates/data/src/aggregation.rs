@@ -2189,7 +2189,7 @@ impl SpreadQuoteAggregator {
 
         let callback = TimeEventCallback::RustLocal(Rc::new(move |event: TimeEvent| {
             if let Some(agg) = aggregator_weak.upgrade() {
-                agg.borrow_mut().on_timer_fire(event.ts_init);
+                agg.borrow_mut().on_timer_fire(event.ts_event);
             }
         }));
 
@@ -2213,10 +2213,10 @@ impl SpreadQuoteAggregator {
             .expect("Failed to set spread quote timer");
     }
 
-    /// Called when the timer fires (live mode). Builds and sends a spread quote using cached leg state.
-    pub fn on_timer_fire(&mut self, ts_init: UnixNanos) {
+    /// Called when the timer fires (live mode). Builds and sends a spread quote using the timer event timestamp.
+    pub fn on_timer_fire(&mut self, ts_event: UnixNanos) {
         if self.last_quotes.len() == self.n_legs {
-            self.build_and_send_quote(ts_init);
+            self.build_and_send_quote(ts_event);
         }
     }
 
@@ -2248,6 +2248,25 @@ impl SpreadQuoteAggregator {
 
         if self.update_interval_seconds.is_none() && self.last_quotes.len() == self.n_legs {
             self.build_and_send_quote(ts_init);
+        }
+    }
+
+    /// Flushes the deferred historical timer event, if any.
+    ///
+    /// This is intended for historical request finalization, where we know no more historical
+    /// quotes will arrive for the requested range and should not require a later live tick just
+    /// to release the final same-timestamp spread quote.
+    pub fn flush_pending_historical_quote(&mut self) {
+        if self.update_interval_seconds.is_none() || !self.historical_mode {
+            return;
+        }
+
+        let Some(event) = self.historical_event_at_ts_init.take() else {
+            return;
+        };
+
+        if self.last_quotes.len() == self.n_legs {
+            self.build_and_send_quote(event.ts_event);
         }
     }
 
@@ -2285,6 +2304,7 @@ impl SpreadQuoteAggregator {
                 .expect("Expected TestClock in historical mode");
             test_clock.advance_time(ts_init, true)
         };
+
         for event in events {
             if event.ts_event == ts_init {
                 self.historical_event_at_ts_init = Some(event);
@@ -2295,10 +2315,11 @@ impl SpreadQuoteAggregator {
     }
 
     /// Builds and sends one spread quote (Cython `_build_and_send_quote`).
-    fn build_and_send_quote(&mut self, ts_init: UnixNanos) {
+    fn build_and_send_quote(&mut self, ts_event: UnixNanos) {
         if !self.has_update {
             return;
         }
+
         for (idx, &leg_id) in self.leg_ids.iter().enumerate() {
             let Some(tick) = self.last_quotes.get(&leg_id) else {
                 log::error!(
@@ -2331,7 +2352,7 @@ impl SpreadQuoteAggregator {
         } else {
             self.create_option_spread_prices()
         };
-        let spread_quote = self.create_quote_tick_from_raw_prices(raw_bid, raw_ask, ts_init);
+        let spread_quote = self.create_quote_tick_from_raw_prices(raw_bid, raw_ask, ts_event);
         self.has_update = false;
         (self.handler)(spread_quote);
     }
@@ -2382,6 +2403,7 @@ impl SpreadQuoteAggregator {
     fn create_futures_spread_prices(&self) -> (f64, f64) {
         let mut raw_ask = 0.0_f64;
         let mut raw_bid = 0.0_f64;
+
         for i in 0..self.n_legs {
             let r = self.ratios[i] as f64;
             if self.ratios[i] >= 0 {
@@ -2399,7 +2421,7 @@ impl SpreadQuoteAggregator {
         &self,
         raw_bid_price: f64,
         raw_ask_price: f64,
-        ts_init: UnixNanos,
+        ts_event: UnixNanos,
     ) -> QuoteTick {
         let (bid_price, ask_price) = if let Some(ref rounder) = self.price_rounder {
             rounder.round_prices(raw_bid_price, raw_ask_price, self.price_precision)
@@ -2440,8 +2462,8 @@ impl SpreadQuoteAggregator {
             ask_price,
             bid_size,
             ask_size,
-            ts_init,
-            ts_init,
+            ts_event,
+            ts_event,
         )
     }
 }
@@ -5241,6 +5263,11 @@ mod tests {
         rc.borrow_mut().prepare_for_timer_mode(&rc);
         rc.borrow_mut().start_timer(Some(Rc::clone(&rc)));
 
+        for event in clock.borrow_mut().advance_time(UnixNanos::from(0), true) {
+            rc.borrow_mut().on_timer_fire(event.ts_event);
+        }
+        assert_eq!(handler.lock().expect(MUTEX_POISONED).len(), 0);
+
         let ts1 = UnixNanos::from(1_000_000_000);
         rc.borrow_mut().handle_quote_tick(QuoteTick::new(
             leg1,
@@ -5261,19 +5288,24 @@ mod tests {
             ts1,
         ));
 
+        for event in clock.borrow_mut().advance_time(ts1, true) {
+            rc.borrow_mut().on_timer_fire(event.ts_event);
+        }
+
+        {
+            let quotes = handler.lock().expect(MUTEX_POISONED);
+            assert_eq!(quotes.len(), 1);
+            assert_eq!(quotes[0].ts_event, ts1);
+            assert_eq!(quotes[0].ts_init, ts1);
+        }
+
         let ts2 = UnixNanos::from(2_000_000_000);
-        let mut clock_guard = clock.borrow_mut();
-        let events = clock_guard.advance_time(ts2, true);
-        drop(clock_guard);
-        for event in events {
-            rc.borrow_mut().on_timer_fire(event.ts_init);
+        for event in clock.borrow_mut().advance_time(ts2, true) {
+            rc.borrow_mut().on_timer_fire(event.ts_event);
         }
 
         let quotes = handler.lock().expect(MUTEX_POISONED);
-        assert!(
-            !quotes.is_empty(),
-            "timer-driven mode should emit at least one spread quote after advance"
-        );
+        assert_eq!(quotes.len(), 1);
     }
 
     #[rstest]
@@ -5348,6 +5380,72 @@ mod tests {
             1,
             "deferred event at ts2 is processed when we have all legs and advance to ts3"
         );
+    }
+
+    #[rstest]
+    fn test_spread_quote_historical_flush_emits_pending_final_quote(equity_aapl: Equity) {
+        let instrument = InstrumentAny::Equity(equity_aapl);
+        let leg1 = instrument.id();
+        let leg2 = InstrumentId::from("MSFT.XNAS");
+        let spread_id = InstrumentId::from("SPREAD.XNAS");
+        let legs = vec![(leg1, 1_i64), (leg2, -1_i64)];
+        let handler = Arc::new(Mutex::new(Vec::new()));
+        let handler_clone = Arc::clone(&handler);
+        let clock = Rc::new(RefCell::new(TestClock::new()));
+
+        let agg = SpreadQuoteAggregator::new(
+            spread_id,
+            &legs,
+            true,
+            instrument.price_precision(),
+            0,
+            Box::new(move |q: QuoteTick| {
+                handler_clone.lock().expect(MUTEX_POISONED).push(q);
+            }),
+            #[allow(clippy::redundant_clone)] // need clock for set_clock after
+            clock.clone(),
+            true,
+            Some(1),
+            0,
+            None,
+            None,
+        );
+        let rc = Rc::new(RefCell::new(agg));
+        rc.borrow_mut().prepare_for_timer_mode(&rc);
+        rc.borrow_mut().set_clock(clock);
+
+        let ts1 = UnixNanos::from(1_000_000_000);
+        let ts2 = UnixNanos::from(2_000_000_000);
+        rc.borrow_mut().handle_quote_tick(QuoteTick::new(
+            leg1,
+            Price::from("100.00"),
+            Price::from("100.10"),
+            Quantity::from(10),
+            Quantity::from(10),
+            ts1,
+            ts1,
+        ));
+        rc.borrow_mut().handle_quote_tick(QuoteTick::new(
+            leg2,
+            Price::from("99.00"),
+            Price::from("99.10"),
+            Quantity::from(10),
+            Quantity::from(10),
+            ts2,
+            ts2,
+        ));
+
+        assert_eq!(handler.lock().expect(MUTEX_POISONED).len(), 0);
+
+        rc.borrow_mut().flush_pending_historical_quote();
+
+        let quotes = handler.lock().expect(MUTEX_POISONED);
+        assert_eq!(
+            quotes.len(),
+            1,
+            "final historical quote should be emitted when the deferred event is flushed",
+        );
+        assert_eq!(quotes[0].ts_event, ts2);
     }
 
     #[rstest]

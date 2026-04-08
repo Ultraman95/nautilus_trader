@@ -36,7 +36,7 @@ use crate::{
 
 /// Represents an event where an order has triggered.
 ///
-/// Applicable to `StopLimit` orders only.
+/// Applicable to `StopLimit`, `TrailingStopLimit`, and `LimitIfTouched` orders.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Builder)]
 #[serde(tag = "type")]
@@ -329,5 +329,13 @@ mod tests {
             "OrderTriggered(instrument_id=BTCUSDT.COINBASE, client_order_id=O-19700101-000000-001-001-1, \
         venue_order_id=001, account_id=SIM-001, ts_event=0)"
         );
+    }
+
+    #[rstest]
+    fn test_order_triggered_serialization() {
+        let original = OrderTriggered::default();
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: OrderTriggered = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
     }
 }

@@ -294,6 +294,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<TestServerState>) {
                                 params.get("channels").and_then(|c| c.as_array())
                         {
                             let mut unsubscribed = Vec::new();
+
                             for channel in channels {
                                 if let Some(channel_str) = channel.as_str() {
                                     state
@@ -529,6 +530,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<TestServerState>) {
                                 params.get("channels").and_then(|c| c.as_array())
                         {
                             let mut unsubscribed = Vec::new();
+
                             for channel in channels {
                                 if let Some(channel_str) = channel.as_str() {
                                     state
@@ -597,10 +599,10 @@ async fn start_ws_server(state: Arc<TestServerState>) -> SocketAddr {
 fn create_test_client(ws_url: &str) -> DeribitWebSocketClient {
     DeribitWebSocketClient::new(
         Some(ws_url.to_string()),
-        None,     // api_key
-        None,     // api_secret
-        Some(30), // heartbeat_interval
-        true,     // is_testnet
+        None, // api_key
+        None, // api_secret
+        30,   // heartbeat_interval
+        true, // is_testnet
     )
     .expect("failed to construct deribit websocket client")
 }
@@ -609,7 +611,7 @@ fn create_test_client(ws_url: &str) -> DeribitWebSocketClient {
 ///
 /// Does NOT fall back to environment variables.
 fn create_test_client_without_credentials(ws_url: &str) -> DeribitWebSocketClient {
-    DeribitWebSocketClient::new_unauthenticated(Some(ws_url.to_string()), Some(30), true)
+    DeribitWebSocketClient::new_unauthenticated(Some(ws_url.to_string()), 30, true)
         .expect("failed to construct deribit websocket client")
 }
 
@@ -652,10 +654,10 @@ async fn test_websocket_connection() {
 async fn test_wait_until_active_timeout() {
     let client = DeribitWebSocketClient::new(
         Some("ws://127.0.0.1:0/ws/api/v2".to_string()),
-        None,     // api_key
-        None,     // api_secret
-        Some(30), // heartbeat_interval
-        true,     // is_testnet
+        None, // api_key
+        None, // api_secret
+        30,   // heartbeat_interval
+        true, // is_testnet
     )
     .expect("construct client");
 
@@ -1389,8 +1391,8 @@ fn create_authenticated_client(ws_url: &str) -> DeribitWebSocketClient {
         Some(ws_url.to_string()),
         Some("test_api_key".to_string()),
         Some("test_api_secret".to_string()),
-        Some(30), // heartbeat_interval
-        true,     // is_testnet
+        30,   // heartbeat_interval
+        true, // is_testnet
     )
     .expect("failed to construct authenticated deribit websocket client")
 }

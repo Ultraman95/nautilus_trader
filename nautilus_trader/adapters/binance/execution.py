@@ -258,7 +258,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
 
         self._submit_order_method: dict[
             OrderType,
-            Callable[[Order, BinanceFuturesPositionSide | None, str | None], Awaitable[None]],
+            Callable[[Order, BinanceFuturesPositionSide | None, str | None, bool], Awaitable[None]],
         ] = {
             OrderType.MARKET: self._submit_market_order,
             OrderType.LIMIT: self._submit_limit_order,
@@ -570,6 +570,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
         end_ms: int | None,
     ) -> list[OrderStatusReport]:
         reports: list[OrderStatusReport] = []
+
         for order in binance_orders:
             if start_ms is not None and order.time < start_ms:
                 continue  # Filter start on the Nautilus side
@@ -623,6 +624,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
 
         # Parse all Binance trades
         reports: list[FillReport] = []
+
         for trade in binance_trades:
             if trade.symbol is None:
                 self._log.warning(f"No symbol for trade {trade}")
@@ -781,6 +783,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
 
         try:
             price_match = self._extract_price_match(order, params)
+            close_position = self._extract_close_position(order, params)
         except ValueError as e:
             self._deny_order_pre_submit(order, str(e))
             return
@@ -809,6 +812,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                 order,
                 position_side,
                 price_match,
+                close_position,
             )
 
             if not retry_manager.result:
@@ -879,6 +883,40 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
 
         return value
 
+    def _extract_close_position(
+        self,
+        order: Order,
+        params: dict[str, object] | None,
+    ) -> bool:
+        if params is None:
+            return False
+
+        raw_value = params.get("close_position")
+        if raw_value is None:
+            return False
+
+        if not self._binance_account_type.is_futures:
+            raise ValueError(
+                "UNSUPPORTED: `close_position` is only supported for Binance futures accounts",
+            )
+
+        if not isinstance(raw_value, bool):
+            raise ValueError(
+                "INVALID_ARG: `close_position` must be provided as a bool value",
+            )
+
+        if order.order_type not in (OrderType.STOP_MARKET, OrderType.MARKET_IF_TOUCHED):
+            raise ValueError(
+                f"UNSUPPORTED: `close_position` is not supported for order type {order.type_string()} on Binance",
+            )
+
+        if order.is_reduce_only:
+            raise ValueError(
+                "INVALID_ARG: `close_position` cannot be combined with `reduce_only` on Binance",
+            )
+
+        return raw_value
+
     def _deny_order_pre_submit(self, order: Order, reason: str) -> None:
         self.generate_order_denied(
             strategy_id=order.strategy_id,
@@ -920,8 +958,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
             if order.trailing_offset_type != TrailingOffsetType.BASIS_POINTS:
                 return f"INVALID_TRAILING_OFFSET_TYPE: {trailing_offset_type_to_str(order.trailing_offset_type)}"
 
-            callback_rate = Decimal(order.trailing_offset) / Decimal(100)
-            callback_rate = callback_rate.quantize(Decimal("0.1"))
+            callback_rate = self._trailing_offset_to_callback_rate(order)
 
             if (
                 callback_rate < BINANCE_MIN_CALLBACK_RATE
@@ -939,6 +976,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
         order: MarketOrder,
         position_side: BinanceFuturesPositionSide | None,
         price_match: str | None,
+        close_position: bool,
     ) -> None:
         assert price_match is None  # type checking
 
@@ -966,6 +1004,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
         order: LimitOrder,
         position_side: BinanceFuturesPositionSide | None,
         price_match: str | None,
+        close_position: bool,
     ) -> None:
         time_in_force = self._determine_time_in_force(order)
         if order.is_post_only and self._binance_account_type.is_spot_or_margin:
@@ -994,6 +1033,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
         order: StopLimitOrder,
         position_side: BinanceFuturesPositionSide | None,
         price_match: str | None,
+        close_position: bool,
     ) -> None:
         if self._binance_account_type.is_spot_or_margin:
             working_type = None
@@ -1068,6 +1108,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
         order: StopMarketOrder,
         position_side: BinanceFuturesPositionSide | None,
         price_match: str | None,
+        close_position: bool,
     ) -> None:
         assert price_match is None  # type checking
 
@@ -1086,20 +1127,36 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
         time_in_force = self._determine_time_in_force(order)
 
         if self._binance_account_type.is_futures:
-            await self._http_account.new_algo_order(  # type: ignore [attr-defined]
-                symbol=order.instrument_id.symbol.value,
-                side=self._enum_parser.parse_internal_order_side(order.side),
-                order_type=self._enum_parser.parse_internal_order_type(order),
-                position_side=position_side,
-                quantity=str(order.quantity),
-                trigger_price=str(order.trigger_price),
-                time_in_force=time_in_force,
-                working_type=working_type,
-                reduce_only=self._determine_reduce_only_str(order),
-                client_algo_id=order.client_order_id.value,
-                good_till_date=self._determine_good_till_date(order, time_in_force),
-                recv_window=str(self._recv_window),
-            )
+            if close_position:
+                # closePosition is mutually exclusive with quantity and reduceOnly
+                await self._http_account.new_algo_order(  # type: ignore [attr-defined]
+                    symbol=order.instrument_id.symbol.value,
+                    side=self._enum_parser.parse_internal_order_side(order.side),
+                    order_type=self._enum_parser.parse_internal_order_type(order),
+                    position_side=position_side,
+                    close_position="true",
+                    trigger_price=str(order.trigger_price),
+                    time_in_force=time_in_force,
+                    working_type=working_type,
+                    client_algo_id=order.client_order_id.value,
+                    good_till_date=self._determine_good_till_date(order, time_in_force),
+                    recv_window=str(self._recv_window),
+                )
+            else:
+                await self._http_account.new_algo_order(  # type: ignore [attr-defined]
+                    symbol=order.instrument_id.symbol.value,
+                    side=self._enum_parser.parse_internal_order_side(order.side),
+                    order_type=self._enum_parser.parse_internal_order_type(order),
+                    position_side=position_side,
+                    quantity=str(order.quantity),
+                    trigger_price=str(order.trigger_price),
+                    time_in_force=time_in_force,
+                    working_type=working_type,
+                    reduce_only=self._determine_reduce_only_str(order),
+                    client_algo_id=order.client_order_id.value,
+                    good_till_date=self._determine_good_till_date(order, time_in_force),
+                    recv_window=str(self._recv_window),
+                )
         else:
             await self._http_account.new_order(
                 symbol=order.instrument_id.symbol.value,
@@ -1121,6 +1178,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
         order: TrailingStopMarketOrder,
         position_side: BinanceFuturesPositionSide | None,
         price_match: str | None,
+        close_position: bool,
     ) -> None:
         assert price_match is None  # type checking
 
@@ -1136,11 +1194,8 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
 
         time_in_force = self._determine_time_in_force(order)
 
-        # Convert basis points to percentage, preserving precision
-        # Binance supports up to 1 decimal place precision for callback rates
-        callback_rate = Decimal(order.trailing_offset) / Decimal(100)
-        # Round to 1 decimal place only if necessary to meet Binance requirements
-        callback_rate = callback_rate.quantize(Decimal("0.1"))
+        callback_rate = self._trailing_offset_to_callback_rate(order)
+        callback_rate_str = self._format_callback_rate(callback_rate)
 
         activation_price: Price | None = order.activation_price
 
@@ -1152,7 +1207,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
             position_side=position_side,
             quantity=str(order.quantity),
             activation_price=str(activation_price) if activation_price is not None else None,
-            callback_rate=str(callback_rate),
+            callback_rate=callback_rate_str,
             time_in_force=time_in_force,
             working_type=working_type,
             reduce_only=self._determine_reduce_only_str(order),
@@ -1160,6 +1215,17 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
             good_till_date=self._determine_good_till_date(order, time_in_force),
             recv_window=str(self._recv_window),
         )
+
+    @staticmethod
+    def _trailing_offset_to_callback_rate(order: TrailingStopMarketOrder) -> Decimal:
+        return Decimal(order.trailing_offset) / Decimal(100)
+
+    @staticmethod
+    def _format_callback_rate(callback_rate: Decimal) -> str:
+        if callback_rate == callback_rate.to_integral():
+            return format(callback_rate.quantize(Decimal("0.1")), "f")
+
+        return format(callback_rate.normalize(), "f")
 
     def _get_cached_instrument_id(self, symbol: str) -> InstrumentId:
         nautilus_symbol: str = BinanceSymbol(symbol).parse_as_nautilus(

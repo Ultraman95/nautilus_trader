@@ -58,9 +58,6 @@ use crate::{
     websocket::messages::{AxOrdersWsMessage, AxWsPlaceOrder, OrderMetadata},
 };
 
-/// Default heartbeat interval in seconds.
-const DEFAULT_HEARTBEAT_SECS: u64 = 30;
-
 /// Result type for Ax orders WebSocket operations.
 pub type AxOrdersWsResult<T> = Result<T, AxOrdersWsClientError>;
 
@@ -172,12 +169,7 @@ impl Clone for AxOrdersWebSocketClient {
 impl AxOrdersWebSocketClient {
     /// Creates a new Ax orders WebSocket client.
     #[must_use]
-    pub fn new(
-        url: String,
-        account_id: AccountId,
-        trader_id: TraderId,
-        heartbeat: Option<u64>,
-    ) -> Self {
+    pub fn new(url: String, account_id: AccountId, trader_id: TraderId, heartbeat: u64) -> Self {
         let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel::<HandlerCommand>();
 
         let initial_mode = AtomicU8::new(ConnectionMode::Closed.as_u8());
@@ -186,7 +178,7 @@ impl AxOrdersWebSocketClient {
         Self {
             clock: get_atomic_clock_realtime(),
             url,
-            heartbeat: heartbeat.or(Some(DEFAULT_HEARTBEAT_SECS)),
+            heartbeat: Some(heartbeat),
             connection_mode,
             cmd_tx: Arc::new(tokio::sync::RwLock::new(cmd_tx)),
             out_rx: None,
@@ -326,6 +318,7 @@ impl AxOrdersWebSocketClient {
             size_precision: instrument.size_precision(),
             price_precision: instrument.price_precision(),
             quote_currency: instrument.quote_currency(),
+            pending_trigger_price: None,
         };
 
         self.caches
@@ -620,6 +613,7 @@ impl AxOrdersWebSocketClient {
             size_precision: instrument.size_precision(),
             price_precision: instrument.price_precision(),
             quote_currency: instrument.quote_currency(),
+            pending_trigger_price: None,
         };
         self.caches
             .orders_metadata
@@ -781,7 +775,7 @@ mod tests {
             "wss://example.com/orders/ws".to_string(),
             AccountId::from("AX-001"),
             TraderId::from("TRADER-001"),
-            Some(30),
+            30,
         );
         let client_order_id = ClientOrderId::from("CID-123");
 
@@ -800,7 +794,7 @@ mod tests {
             "wss://example.com/orders/ws".to_string(),
             AccountId::from("AX-001"),
             TraderId::from("TRADER-001"),
-            Some(30),
+            30,
         );
 
         let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<HandlerCommand>();

@@ -25,7 +25,9 @@ use crate::common::{
         PolymarketOutcome, PolymarketTradeStatus, SignatureType,
     },
     models::PolymarketMakerOrder,
-    parse::{deserialize_decimal_from_str, serialize_decimal_as_str},
+    parse::{
+        deserialize_decimal_from_str, deserialize_optional_string_to_u64, serialize_decimal_as_str,
+    },
 };
 
 /// A signed limit order for submission to the CLOB exchange.
@@ -222,6 +224,23 @@ pub struct GammaMarket {
     /// Neg-risk market ID for CTF exchange interaction.
     #[serde(rename = "negRiskMarketID")]
     pub neg_risk_market_id: Option<String>,
+    /// Fee schedule for this market.
+    pub fee_schedule: Option<FeeSchedule>,
+    /// Game ID for sport markets.
+    /// Comes as a string from the API: <https://github.com/Polymarket/rs-clob-client/blob/main/src/gamma/types/response.rs>
+    #[serde(default, deserialize_with = "deserialize_optional_string_to_u64")]
+    pub game_id: Option<u64>,
+    /// Events linked to this gamma market.
+    pub events: Option<Vec<GammaEvent>>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeeSchedule {
+    pub exponent: f64,
+    pub rate: f64,
+    pub taker_only: bool,
+    pub rebate_rate: f64,
 }
 
 /// An event response from the Gamma API `GET /events`.
@@ -261,6 +280,9 @@ pub struct GammaEvent {
     pub neg_risk_market_id: Option<String>,
     /// Whether event is featured.
     pub featured: Option<bool>,
+    /// Game ID for sport markets.
+    /// Comes as an int from the API: <https://github.com/Polymarket/rs-clob-client/blob/main/src/gamma/types/response.rs>
+    pub game_id: Option<u64>,
 }
 
 /// A tag from the Gamma API `GET /tags`.
@@ -319,6 +341,17 @@ pub struct ClobBookResponse {
     pub asks: Vec<ClobBookLevel>,
 }
 
+/// A position from the Polymarket Data API `GET /positions` endpoint.
+#[derive(Clone, Debug, Deserialize)]
+pub struct DataApiPosition {
+    pub asset: String,
+    #[serde(alias = "conditionId", alias = "condition_id")]
+    pub condition_id: String,
+    pub size: f64,
+    #[serde(alias = "avgPrice", alias = "avg_price")]
+    pub avg_price: Option<f64>,
+}
+
 /// A trade from the Polymarket Data API `GET /trades` endpoint.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -361,7 +394,7 @@ mod tests {
         assert_eq!(order.original_size, dec!(100.0000));
         assert_eq!(order.price, dec!(0.5000));
         assert_eq!(order.size_matched, dec!(25.0000));
-        assert_eq!(order.created_at, 1703875200000);
+        assert_eq!(order.created_at, 1703875200);
         assert!(order.expiration.is_none());
         assert_eq!(order.associate_trades, Some(vec!["0xabc001".to_string()]));
     }
@@ -508,6 +541,22 @@ mod tests {
     }
 
     #[rstest]
+    fn test_sports_market_are_weird() {
+        let money_line: GammaMarket = load("gamma_market_sports_market_money_line.json");
+        let map_handicap: GammaMarket = load("gamma_market_sports_market_map_handicap.json");
+
+        // same event, same slug
+        assert_eq!(
+            money_line.events.as_ref().unwrap()[0].game_id,
+            map_handicap.events.as_ref().unwrap()[0].game_id
+        );
+
+        // one market has no game_id
+        assert!(map_handicap.game_id.is_none());
+        assert_eq!(money_line.game_id, Some(1_427_074));
+    }
+
+    #[rstest]
     fn test_gamma_market_enriched_fields() {
         let market: GammaMarket = load("gamma_market.json");
 
@@ -633,6 +682,39 @@ mod tests {
     fn test_fee_rate_response_nonzero() {
         let response: FeeRateResponse = load("clob_fee_rate_response_nonzero.json");
         assert_eq!(response.base_fee, dec!(150));
+    }
+
+    #[rstest]
+    fn test_data_api_position_deserialization() {
+        let positions: Vec<DataApiPosition> = load("data_api_positions_response.json");
+
+        assert_eq!(positions.len(), 4);
+        assert_eq!(
+            positions[0].asset,
+            "71321045863084981365469005770620412523470745398083994982746259498689308907982"
+        );
+        assert_eq!(
+            positions[0].condition_id,
+            "0xc8f1cf5d4f26e0fd9c8fe89f2a7b3263b902cf14fde7bfccef525753bb492e47"
+        );
+        assert_eq!(positions[0].size, 150.5);
+        assert_eq!(positions[0].avg_price, Some(0.55));
+
+        // Zero-size position
+        assert_eq!(positions[1].size, 0.0);
+        assert_eq!(positions[1].avg_price, Some(0.45));
+
+        // Third position
+        assert_eq!(
+            positions[2].condition_id,
+            "0xabc123def456789012345678901234567890abcdef1234567890abcdef123456"
+        );
+        assert_eq!(positions[2].size, 42.0);
+        assert_eq!(positions[2].avg_price, Some(0.3));
+
+        // Dust position (below DUST_SNAP_THRESHOLD)
+        assert_eq!(positions[3].size, 0.005);
+        assert_eq!(positions[3].avg_price, Some(0.7));
     }
 
     #[rstest]

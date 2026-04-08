@@ -15,11 +15,7 @@
 
 //! Example showing how to use the `GreeksCalculator` with a `DataActor`.
 
-use std::{
-    cell::RefCell,
-    ops::{Deref, DerefMut},
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 
 use nautilus_common::{
     actor::data_actor::{DataActor, DataActorConfig, DataActorCore},
@@ -27,6 +23,7 @@ use nautilus_common::{
     component::Component,
     greeks::GreeksCalculator,
     live::clock::LiveClock,
+    nautilus_actor,
 };
 use nautilus_model::{
     data::{
@@ -74,6 +71,7 @@ impl GreeksActor {
         let vol_shock = 0.0;
         let time_to_expiry_shock = 0.0;
         let use_cached_greeks = false;
+        let update_vol = false;
         let cache_greeks = true;
         let publish_greeks = true;
         let ts_event = self.core.timestamp_ns();
@@ -91,6 +89,7 @@ impl GreeksActor {
             Some(vol_shock),
             Some(time_to_expiry_shock),
             Some(use_cached_greeks),
+            Some(update_vol),
             Some(cache_greeks),
             Some(publish_greeks),
             Some(ts_event),
@@ -116,6 +115,7 @@ impl GreeksActor {
         let vol_shock = 0.0;
         let time_to_expiry_shock = 0.0;
         let use_cached_greeks = false;
+        let update_vol = false;
         let cache_greeks = true;
         let publish_greeks = true;
         let percent_greeks = false;
@@ -135,6 +135,7 @@ impl GreeksActor {
             Some(vol_shock),
             Some(time_to_expiry_shock),
             Some(use_cached_greeks),
+            Some(update_vol),
             Some(cache_greeks),
             Some(publish_greeks),
             Some(percent_greeks),
@@ -152,19 +153,7 @@ impl GreeksActor {
     }
 }
 
-impl Deref for GreeksActor {
-    type Target = DataActorCore;
-
-    fn deref(&self) -> &Self::Target {
-        &self.core
-    }
-}
-
-impl DerefMut for GreeksActor {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.core
-    }
-}
+nautilus_actor!(GreeksActor);
 
 impl DataActor for GreeksActor {
     fn on_start(&mut self) -> anyhow::Result<()> {

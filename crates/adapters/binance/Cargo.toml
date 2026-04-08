@@ -36,6 +36,7 @@ python = [
   "nautilus-core/python",
   "nautilus-model/python",
   "nautilus-network/python",
+  "nautilus-serialization/python",
   "nautilus-system/python",
   "pyo3",
   "pyo3-async-runtimes",
@@ -52,22 +53,24 @@ nautilus-core = { workspace = true }
 nautilus-live = { workspace = true }
 nautilus-model = { workspace = true }
 nautilus-network = { workspace = true }
-nautilus-serialization = { workspace = true, features = ["sbe"] }
+nautilus-serialization = { workspace = true, features = ["sbe", "arrow"] }
 nautilus-system = { workspace = true }
+nautilus-trading = { workspace = true }
 
 ahash = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
+arrow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 aws-lc-rs = { workspace = true }
 base64 = { workspace = true }
+bon = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 derive_builder = { workspace = true }
 ed25519-dalek = { workspace = true }
 futures-util = { workspace = true }
-hex = { workspace = true }
 log = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { workspace = true }
@@ -141,4 +144,10 @@ doc = false
 [[example]]
 name = "binance-futures-exec-tester"
 path = "examples/futures/node_exec_tester.rs"
+doc = false
+
+# Run with `cargo run --example binance-futures-exec-trailing-stop-tester --package nautilus-binance`
+[[example]]
+name = "binance-futures-exec-trailing-stop-tester"
+path = "examples/futures/node_exec_trailing_stop_tester.rs"
 doc = false

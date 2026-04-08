@@ -13,14 +13,7 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-use std::ops::{Deref, DerefMut};
-
-use nautilus_common::{
-    actor::{DataActor, DataActorCore},
-    enums::LogColor,
-    log_info, log_warn,
-    timer::TimeEvent,
-};
+use nautilus_common::{actor::DataActor, enums::LogColor, log_info, log_warn, timer::TimeEvent};
 use nautilus_core::{UnixNanos, datetime::secs_to_nanos_unchecked};
 use nautilus_model::{
     data::{Bar, IndexPriceUpdate, MarkPriceUpdate, OrderBookDeltas, QuoteTick, TradeTick},
@@ -31,7 +24,10 @@ use nautilus_model::{
     orders::{Order, OrderAny},
     types::Price,
 };
-use nautilus_trading::strategy::{Strategy, StrategyCore};
+use nautilus_trading::{
+    nautilus_strategy,
+    strategy::{Strategy, StrategyCore},
+};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 
 use super::config::ExecTesterConfig;
@@ -59,19 +55,11 @@ pub struct ExecTester {
     pub(super) sell_stop_order: Option<OrderAny>,
 }
 
-impl Deref for ExecTester {
-    type Target = DataActorCore;
-
-    fn deref(&self) -> &Self::Target {
-        &self.core
+nautilus_strategy!(ExecTester, {
+    fn external_order_claims(&self) -> Option<Vec<InstrumentId>> {
+        self.config.base.external_order_claims.clone()
     }
-}
-
-impl DerefMut for ExecTester {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.core
-    }
-}
+});
 
 impl DataActor for ExecTester {
     fn on_start(&mut self) -> anyhow::Result<()> {
@@ -277,20 +265,6 @@ impl DataActor for ExecTester {
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         Strategy::on_time_event(self, event)
-    }
-}
-
-impl Strategy for ExecTester {
-    fn core(&self) -> &StrategyCore {
-        &self.core
-    }
-
-    fn core_mut(&mut self) -> &mut StrategyCore {
-        &mut self.core
-    }
-
-    fn external_order_claims(&self) -> Option<Vec<InstrumentId>> {
-        self.config.base.external_order_claims.clone()
     }
 }
 
@@ -648,9 +622,9 @@ impl ExecTester {
         // Determine trigger price based on order type
         let trigger_price = if matches!(
             self.config.stop_order_type,
-            OrderType::LimitIfTouched | OrderType::MarketIfTouched
+            OrderType::LimitIfTouched | OrderType::MarketIfTouched | OrderType::TrailingStopMarket
         ) {
-            // IF_TOUCHED buy: place BELOW market (buy on dip)
+            // IF_TOUCHED and trailing-stop buy: place BELOW market
             instrument.make_price(best_bid.as_f64() - stop_offset)
         } else {
             // STOP buy orders are placed ABOVE the market (stop loss on short)
@@ -725,9 +699,9 @@ impl ExecTester {
         // Determine trigger price based on order type
         let trigger_price = if matches!(
             self.config.stop_order_type,
-            OrderType::LimitIfTouched | OrderType::MarketIfTouched
+            OrderType::LimitIfTouched | OrderType::MarketIfTouched | OrderType::TrailingStopMarket
         ) {
-            // IF_TOUCHED sell: place ABOVE market (sell on rally)
+            // IF_TOUCHED and trailing-stop sell: place ABOVE market
             instrument.make_price(best_ask.as_f64() + stop_offset)
         } else {
             // STOP sell orders are placed BELOW the market (stop loss on long)
@@ -886,7 +860,7 @@ impl ExecTester {
 
         let factory = self.core.order_factory();
 
-        let order: OrderAny = match self.config.stop_order_type {
+        let mut order: OrderAny = match self.config.stop_order_type {
             OrderType::StopMarket => factory.stop_market(
                 self.config.instrument_id,
                 order_side,
@@ -982,8 +956,8 @@ impl ExecTester {
                     quantity,
                     trailing_offset,
                     Some(self.config.trailing_offset_type),
+                    None,
                     Some(trigger_price),
-                    None, // trigger_price (activation_price used as trigger)
                     Some(self.config.stop_trigger_type),
                     Some(time_in_force),
                     expire_time,
@@ -1002,6 +976,10 @@ impl ExecTester {
                 anyhow::bail!("Unknown stop order type: {:?}", self.config.stop_order_type);
             }
         };
+
+        if let OrderAny::TrailingStopMarket(order) = &mut order {
+            order.activation_price = Some(trigger_price);
+        }
 
         if order_side == OrderSide::Buy {
             self.buy_stop_order = Some(order.clone());

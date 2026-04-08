@@ -202,7 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Connecting to HTTP API: {http_url}");
     let http_client = DydxHttpClient::new(
         Some(http_url.clone()),
-        Some(30),    // timeout_secs
+        30,          // timeout_secs
         None,        // proxy_url
         !is_mainnet, // is_testnet
         None,        // retry_config
@@ -210,7 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .expect("Failed to create HTTP client");
 
     // Also create raw HTTP client for order queries
-    let raw_http_client = DydxRawHttpClient::new(Some(http_url), Some(30), None, !is_mainnet, None)
+    let raw_http_client = DydxRawHttpClient::new(Some(http_url), 30, None, !is_mainnet, None)
         .expect("Failed to create raw HTTP client");
 
     // Fetch instruments
@@ -401,20 +401,8 @@ async fn run_all_edge_case_tests(args: &[String]) -> Result<(), Box<dyn std::err
     let (account_number, sequence) = grpc_client.query_address(&wallet_address).await?;
     account.set_account_info(account_number, sequence);
 
-    let http_client = DydxHttpClient::new(
-        Some(http_url.to_string()),
-        Some(30),
-        None,
-        !is_mainnet,
-        None,
-    )?;
-    let raw_http = DydxRawHttpClient::new(
-        Some(http_url.to_string()),
-        Some(30),
-        None,
-        !is_mainnet,
-        None,
-    )?;
+    let http_client = DydxHttpClient::new(Some(http_url.to_string()), 30, None, !is_mainnet, None)?;
+    let raw_http = DydxRawHttpClient::new(Some(http_url.to_string()), 30, None, !is_mainnet, None)?;
 
     http_client.fetch_and_cache_instruments().await?;
     log::info!("Setup complete - wallet: {wallet_address}");
@@ -656,6 +644,7 @@ async fn test_duplicate_cancel(
     log::info!("First cancel succeeded");
 
     tokio::time::sleep(Duration::from_secs(1)).await;
+
     match cancel_order_by_client_id(
         grpc, account, http, address, client_id, "BTC-USD", is_mainnet,
     )
@@ -731,6 +720,7 @@ async fn test_batch_cancel(
 
     // Place 5 orders on BTC
     let mut client_ids = Vec::new();
+
     for i in 0..5 {
         let client_id = generate_client_id();
         client_ids.push(client_id);

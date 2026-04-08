@@ -15,7 +15,10 @@
 
 //! Parsing functions for Polymarket execution reports.
 
-use nautilus_core::{UUID4, UnixNanos};
+use nautilus_core::{
+    UUID4, UnixNanos,
+    datetime::{NANOSECONDS_IN_MILLISECOND, NANOSECONDS_IN_SECOND},
+};
 use nautilus_model::{
     enums::{LiquiditySide, OrderSide, OrderStatus, OrderType, TimeInForce},
     identifiers::{AccountId, ClientOrderId, InstrumentId, TradeId, VenueOrderId},
@@ -26,7 +29,10 @@ use rust_decimal::Decimal;
 
 use crate::{
     common::{
-        enums::{PolymarketLiquiditySide, PolymarketOrderSide},
+        enums::{
+            PolymarketEventType, PolymarketLiquiditySide, PolymarketOrderSide,
+            PolymarketOrderStatus,
+        },
         models::PolymarketMakerOrder,
     },
     http::models::{ClobBookLevel, PolymarketOpenOrder, PolymarketTradeReport},
@@ -37,6 +43,21 @@ pub const fn parse_liquidity_side(side: PolymarketLiquiditySide) -> LiquiditySid
     match side {
         PolymarketLiquiditySide::Maker => LiquiditySide::Maker,
         PolymarketLiquiditySide::Taker => LiquiditySide::Taker,
+    }
+}
+
+/// Resolves the Nautilus order status from Polymarket status and event type.
+///
+/// Venue-initiated cancellations arrive as `status=Invalid, event_type=Cancellation`
+/// (e.g. sport market resolution). These map to `Canceled`, not `Rejected`.
+pub fn resolve_order_status(
+    status: PolymarketOrderStatus,
+    event_type: PolymarketEventType,
+) -> OrderStatus {
+    if status == PolymarketOrderStatus::Invalid && event_type == PolymarketEventType::Cancellation {
+        OrderStatus::Canceled
+    } else {
+        OrderStatus::from(status)
     }
 }
 
@@ -119,7 +140,7 @@ pub fn parse_order_status_report(
         price_precision,
     );
 
-    let ts_accepted = UnixNanos::from(order.created_at * 1_000_000); // ms -> ns
+    let ts_accepted = UnixNanos::from(order.created_at * NANOSECONDS_IN_SECOND);
 
     let mut report = OrderStatusReport::new(
         account_id,
@@ -251,11 +272,19 @@ pub fn build_maker_fill_report(
 
 /// Computes a USDC commission from fee basis points, size, and price.
 ///
-/// `commission = size * price * fee_rate_bps / 10_000`
+/// Polymarket fee formula: `fee = C * feeRate * p * (1 - p)`
+/// where C = number of shares, feeRate = fee_rate_bps / 10_000, p = share price.
+/// Fees peak at p = 0.50 and decrease symmetrically toward the extremes.
+/// Rounded to 5 decimal places (0.00001 USDC minimum).
 pub fn compute_commission(fee_rate_bps: Decimal, size: Decimal, price: Decimal) -> f64 {
+    if fee_rate_bps.is_zero() {
+        return 0.0;
+    }
     let bps = Decimal::new(10_000, 0);
-    let commission = size * price * fee_rate_bps / bps;
-    commission.to_string().parse().unwrap_or(0.0)
+    let fee_rate = fee_rate_bps / bps;
+    let commission = size * fee_rate * price * (Decimal::ONE - price);
+    let rounded = commission.round_dp(5);
+    rounded.to_string().parse().unwrap_or(0.0)
 }
 
 /// USDC scale factor: the Polymarket API returns balances in micro-USDC (10^6 units).
@@ -290,8 +319,8 @@ pub struct MarketPriceResult {
 /// Calculates the market-crossing price and expected base quantity by walking the order book.
 ///
 /// Sorts levels deterministically before walking:
-/// - BUY (asks): ascending by price — best (lowest) ask first
-/// - SELL (bids): descending by price — best (highest) bid first
+/// - BUY (asks): ascending by price, best (lowest) ask first
+/// - SELL (bids): descending by price, best (highest) bid first
 ///
 /// This ensures correct results regardless of the CLOB API's response ordering.
 ///
@@ -327,7 +356,7 @@ pub fn calculate_market_price(
     }
 
     match side {
-        PolymarketOrderSide::Buy => parsed_levels.sort_by(|a, b| a.0.cmp(&b.0)),
+        PolymarketOrderSide::Buy => parsed_levels.sort_by_key(|a| a.0),
         PolymarketOrderSide::Sell => parsed_levels.sort_by(|a, b| b.0.cmp(&a.0)),
     }
 
@@ -375,9 +404,9 @@ pub fn calculate_market_price(
 pub fn parse_timestamp(ts_str: &str) -> Option<UnixNanos> {
     if let Ok(n) = ts_str.parse::<u64>() {
         return if n > 1_000_000_000_000 {
-            Some(UnixNanos::from(n * 1_000_000)) // milliseconds
+            Some(UnixNanos::from(n * NANOSECONDS_IN_MILLISECOND))
         } else {
-            Some(UnixNanos::from(n * 1_000_000_000)) // seconds
+            Some(UnixNanos::from(n * NANOSECONDS_IN_SECOND))
         };
     }
     let dt = chrono::DateTime::parse_from_rfc3339(ts_str).ok()?;
@@ -410,16 +439,39 @@ mod tests {
         assert_eq!(balance.free, balance.total);
     }
 
+    /// Polymarket fee formula: `fee = C * feeRate * p * (1 - p)`
+    /// Reference: https://docs.polymarket.com/trading/fees
     #[rstest]
-    fn test_compute_commission() {
-        let commission = compute_commission(dec!(30), dec!(100), dec!(0.50));
-        assert!((commission - 0.15).abs() < 1e-10);
-    }
-
-    #[rstest]
-    fn test_compute_commission_zero_fee() {
-        let commission = compute_commission(dec!(0), dec!(100), dec!(0.50));
-        assert!((commission).abs() < 1e-10);
+    #[case::crypto_p50(720, "0.50", 1.8)]
+    #[case::crypto_p01(720, "0.01", 0.07128)]
+    #[case::crypto_p05(720, "0.05", 0.342)]
+    #[case::crypto_p10(720, "0.10", 0.648)]
+    #[case::crypto_p30(720, "0.30", 1.512)]
+    #[case::crypto_p70(720, "0.70", 1.512)]
+    #[case::crypto_p90(720, "0.90", 0.648)]
+    #[case::crypto_p99(720, "0.99", 0.07128)]
+    #[case::sports_p50(300, "0.50", 0.75)]
+    #[case::sports_p30(300, "0.30", 0.63)]
+    #[case::sports_p70(300, "0.70", 0.63)]
+    #[case::politics_p50(400, "0.50", 1.0)]
+    #[case::politics_p30(400, "0.30", 0.84)]
+    #[case::economics_p50(500, "0.50", 1.25)]
+    #[case::economics_p30(500, "0.30", 1.05)]
+    #[case::geopolitics_p50(0, "0.50", 0.0)]
+    fn test_compute_commission_docs_table(
+        #[case] fee_rate_bps: i64,
+        #[case] price: &str,
+        #[case] expected: f64,
+    ) {
+        let commission = compute_commission(
+            Decimal::new(fee_rate_bps, 0),
+            dec!(100),
+            Decimal::from_str_exact(price).unwrap(),
+        );
+        assert!(
+            (commission - expected).abs() < 1e-10,
+            "at p={price}, fee_rate_bps={fee_rate_bps}: expected {expected}, was {commission}"
+        );
     }
 
     #[rstest]
@@ -483,6 +535,15 @@ mod tests {
         assert_eq!(report.time_in_force, TimeInForce::Gtc);
         assert_eq!(report.order_status, OrderStatus::Accepted);
         assert!(report.price.is_some());
+        assert_eq!(
+            report.ts_accepted,
+            UnixNanos::from(1_703_875_200_000_000_000u64)
+        );
+        assert_eq!(
+            report.ts_last,
+            UnixNanos::from(1_703_875_200_000_000_000u64)
+        );
+        assert_eq!(report.ts_init, UnixNanos::from(1_000_000_000u64));
     }
 
     #[rstest]
@@ -607,7 +668,7 @@ mod tests {
 
     #[rstest]
     fn test_calculate_market_price_buy_walks_multiple_levels() {
-        // Asks in arbitrary order — function sorts ascending for BUY
+        // Asks in arbitrary order, function sorts ascending for BUY
         let levels = vec![
             ClobBookLevel {
                 price: "0.55".to_string(),
@@ -632,7 +693,7 @@ mod tests {
 
     #[rstest]
     fn test_calculate_market_price_buy_small_order_uses_best_ask() {
-        // Asks in mixed order — function sorts to find best (0.20) first
+        // Asks in mixed order, function sorts to find best (0.20) first
         let levels = vec![
             ClobBookLevel {
                 price: "0.50".to_string(),
@@ -656,7 +717,7 @@ mod tests {
 
     #[rstest]
     fn test_calculate_market_price_sell_walks_levels() {
-        // Bids in ascending order — function sorts descending for SELL (best bid first)
+        // Bids in ascending order, function sorts descending for SELL (best bid first)
         let levels = vec![
             ClobBookLevel {
                 price: "0.48".to_string(),

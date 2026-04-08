@@ -47,7 +47,7 @@ Cargo's build cache is keyed by the exact combination of features, profiles, and
 | Target                      | Features                         | Profile   | `--all-targets` | `--no-deps` | Purpose        |
 |-----------------------------|----------------------------------|-----------|-----------------|-------------|----------------|
 | `cargo-test`                | `ffi,python,high-precision,defi` | `nextest` | ✓ (implicit)    | n/a         | Run tests.     |
-| `cargo-clippy` (pre-commit) | `ffi,python,high-precision,defi` | `nextest` | ✓               | n/a         | Lint all code. |
+| `cargo-clippy` (pre‑commit) | `ffi,python,high-precision,defi` | `nextest` | ✓               | n/a         | Lint all code. |
 
 These targets share the same feature set and profile, allowing cargo to reuse compiled artifacts between linting and testing without rebuilds.
 The `nextest` profile is used to align with the workflow of the majority of core maintainers who use cargo-nextest for running tests.
@@ -1118,6 +1118,63 @@ Where unsafe code relies on invariants, add defense mechanisms:
 - **RAII guards**: Ensure cleanup on both normal return and panic paths.
 - **Runtime checks**: Fail fast when invariants are violated rather than proceeding unsafely.
 
+### Runtime invariants
+
+Several core subsystems rely on runtime invariants rather than compile-time
+guarantees. Tests verify the first three contracts below. The guard usage
+rules are enforced by convention. Any PR that touches `UnsafeCell`,
+registries, `unsendable`, or live-node threading should confirm the
+invariant tests still pass.
+
+#### Thread-local registries
+
+The actor registry, component registry, and message bus each use
+`thread_local!` storage. An object registered on one thread is never visible
+from another. The live node event loop runs on a single thread, and all
+registry and message bus access happens on that thread.
+
+`LiveNodeHandle` is the only intended cross-thread control surface. It uses
+`Arc<AtomicBool>` for stop signaling and `Arc<AtomicU8>` for state, both
+with `Ordering::Relaxed`.
+
+#### Actor registry vs component registry
+
+Both registries store `Rc<UnsafeCell<dyn Trait>>` in thread-local maps but
+differ in how they handle aliased access:
+
+| Property          | Actor registry                     | Component registry                 |
+|-------------------|------------------------------------|------------------------------------|
+| Aliasing          | Allowed (multiple guards)          | Prevented (`BorrowGuard` + set)    |
+| Re‑entrant access | Yes, required for callbacks        | No, lifecycle ops are sequential   |
+| Error handling    | Panic or `None` on lookup failure  | Returns `anyhow::Result` on error  |
+| Guard type        | `ActorRef<T>` (Rc‑backed)          | Stack‑local `BorrowGuard`          |
+
+The actor registry chooses re-entrant access over aliasing prevention because
+message handlers frequently call back into the registry to look up other
+actors. The component registry can enforce strict aliasing because lifecycle
+operations (start, stop, reset, dispose) are non-re-entrant.
+
+#### `ActorRef` usage rules
+
+`ActorRef` guards must be:
+
+- Obtained and dropped within a single synchronous scope.
+- Never stored in a struct field.
+- Never held across an `.await` point.
+- Never sent to another thread.
+
+The canonical pattern captures an actor's `Ustr` ID in a closure and looks
+up the actor each time the callback fires:
+
+```rust
+let actor_id = actor.actor_id().inner();
+let handler = TypedHandler::from(move |quote: &QuoteTick| {
+    if let Some(mut actor) = try_get_actor_unchecked::<MyActor>(&actor_id) {
+        actor.handle_quote(quote);
+    }
+});
+```
+
 ## Tooling configuration
 
 The project uses several tools for code quality:
@@ -1144,10 +1201,10 @@ rustup update       # Update to latest stable Rust
 rustup show         # Verify correct toolchain is active
 ```
 
-If pre-commit passes locally but fails in CI, clear the pre-commit cache and re-run:
+If pre-commit passes locally but fails in CI, clear the prek cache and re-run:
 
 ```bash
-pre-commit clean    # Clear cached environments
+prek clean    # Clear cached environments
 make pre-commit     # Re-run all checks
 ```
 
@@ -1168,7 +1225,7 @@ This feature is opt-in to avoid requiring the Cap'n Proto compiler for standard 
 ### Installing Cap'n Proto
 
 Install the Cap'n Proto compiler before working with schemas. The required version is
-specified in the `capnp-version` file in the repository root.
+specified in `tools.toml` in the repository root.
 
 See the [Environment Setup](environment_setup.md#capn-proto) guide for detailed installation
 instructions for each platform.
@@ -1180,7 +1237,7 @@ Ubuntu's default `capnproto` package is too old. Linux users must install from s
 Verify installation:
 
 ```bash
-capnp --version  # Should match the version in capnp-version
+capnp --version  # Should match the version in tools.toml
 ```
 
 ### Schema development workflow

@@ -53,7 +53,7 @@ use super::{
 };
 use crate::common::{
     consts::{
-        BINANCE_RATE_LIMIT_KEY_SUBSCRIPTION, BINANCE_WS_CONNECTION_QUOTA,
+        BINANCE_API_KEY_HEADER, BINANCE_RATE_LIMIT_KEY_SUBSCRIPTION, BINANCE_WS_CONNECTION_QUOTA,
         BINANCE_WS_SUBSCRIPTION_QUOTA,
     },
     credential::SigningCredential,
@@ -374,6 +374,7 @@ impl BinanceFuturesWebSocketClient {
                         "Handler not available for pool slot {slot_idx}: {e}"
                     ))
                 })?;
+
             for stream in batch {
                 slots[*slot_idx].streams.retain(|s| s != stream);
             }
@@ -442,7 +443,10 @@ impl BinanceFuturesWebSocketClient {
         let ping_handler: PingHandler = Arc::new(move |_| {});
 
         let headers = if let Some(ref cred) = self.credential {
-            vec![("X-MBX-APIKEY".to_string(), cred.api_key().to_string())]
+            vec![(
+                BINANCE_API_KEY_HEADER.to_string(),
+                cred.api_key().to_string(),
+            )]
         } else {
             vec![]
         };
@@ -485,6 +489,7 @@ impl BinanceFuturesWebSocketClient {
 
         // Convert raw Message frames to Vec<u8> for the JSON handler
         let (bytes_tx, bytes_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
         let bytes_task = get_runtime().spawn(async move {
             let mut raw_rx = raw_rx;
             while let Some(msg) = raw_rx.recv().await {

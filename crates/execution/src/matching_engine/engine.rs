@@ -118,6 +118,8 @@ pub struct OrderMatchingEngine {
     prev_bid_size_raw: QuantityRaw,
     prev_ask_price_raw: PriceRaw,
     prev_ask_size_raw: QuantityRaw,
+    last_quote_bid: Option<Price>,
+    last_quote_ask: Option<Price>,
     tob_initialized: bool,
     instrument_close: Option<InstrumentClose>,
     settlement_price: Option<Price>,
@@ -198,6 +200,8 @@ impl OrderMatchingEngine {
             prev_bid_size_raw: 0,
             prev_ask_price_raw: 0,
             prev_ask_size_raw: 0,
+            last_quote_bid: None,
+            last_quote_ask: None,
             tob_initialized: false,
             instrument_close: None,
             settlement_price: None,
@@ -250,6 +254,8 @@ impl OrderMatchingEngine {
         self.prev_bid_size_raw = 0;
         self.prev_ask_price_raw = 0;
         self.prev_ask_size_raw = 0;
+        self.last_quote_bid = None;
+        self.last_quote_ask = None;
         self.tob_initialized = false;
         self.instrument_close = None;
         self.settlement_price = None;
@@ -1092,6 +1098,7 @@ impl OrderMatchingEngine {
             self.check_price_precision(order.price.precision, "bid price")?;
             self.check_size_precision(order.size.precision, "bid size")?;
         }
+
         for order in &depth.asks {
             if order.side == OrderSide::NoOrderSide || !order.size.is_positive() {
                 continue;
@@ -1113,6 +1120,8 @@ impl OrderMatchingEngine {
                 depth.ts_init,
             );
             self.book.update_quote_tick(&quote)?;
+            self.last_quote_bid = Some(depth.bids[0].price);
+            self.last_quote_ask = Some(depth.asks[0].price);
         } else {
             self.book.apply_depth(depth)?;
         }
@@ -1178,6 +1187,18 @@ impl OrderMatchingEngine {
             .unwrap();
 
         if self.book_type == BookType::L1_MBP {
+            // Stale update: skip book mutation and cache updates
+            if quote.ts_event < self.book.ts_last {
+                log::warn!(
+                    "Skipping stale quote: ts_event {} < book.ts_last {} for {}",
+                    quote.ts_event,
+                    self.book.ts_last,
+                    self.book.instrument_id,
+                );
+                self.iterate(quote.ts_init, AggressorSide::NoAggressor);
+                return;
+            }
+
             if self.config.queue_position {
                 self.decrement_l1_queue_on_quote(
                     quote.bid_price.raw,
@@ -1192,6 +1213,8 @@ impl OrderMatchingEngine {
                 self.tob_initialized = true;
             }
             self.book.update_quote_tick(quote).unwrap();
+            self.last_quote_bid = Some(quote.bid_price);
+            self.last_quote_ask = Some(quote.ask_price);
         }
 
         self.iterate(quote.ts_init, AggressorSide::NoAggressor);
@@ -1436,6 +1459,8 @@ impl OrderMatchingEngine {
         quote_tick.bid_size = bid_close_size;
         quote_tick.ask_size = ask_close_size;
         self.book.update_quote_tick(&quote_tick).unwrap();
+        self.last_quote_bid = Some(bid_bar.close);
+        self.last_quote_ask = Some(ask_bar.close);
         self.iterate(quote_tick.ts_init, AggressorSide::NoAggressor);
 
         self.last_bar_bid = None;
@@ -1466,6 +1491,18 @@ impl OrderMatchingEngine {
         let price_raw = trade.price.raw;
 
         if self.book_type == BookType::L1_MBP {
+            // Stale update: skip book mutation and trade execution
+            if trade.ts_event < self.book.ts_last {
+                log::warn!(
+                    "Skipping stale trade: ts_event {} < book.ts_last {} for {}",
+                    trade.ts_event,
+                    self.book.ts_last,
+                    self.book.instrument_id,
+                );
+                self.iterate(trade.ts_init, AggressorSide::NoAggressor);
+                return;
+            }
+
             self.book.update_trade_tick(trade).unwrap();
         }
 
@@ -1489,24 +1526,28 @@ impl OrderMatchingEngine {
 
         match aggressor_side {
             AggressorSide::Buyer => {
+                // Buyer lifted the ask: ask was at trade.price, post-trade
+                // ask is at least this level (only widen)
                 if self.core.ask.is_none() || price_raw > self.core.ask.map_or(0, |p| p.raw) {
                     self.core.set_ask_raw(trade.price);
                 }
 
-                if self.core.bid.is_none()
-                    || price_raw < self.core.bid.map_or(PriceRaw::MAX, |p| p.raw)
-                {
+                // Initialize bid from first trade if needed
+                if self.core.bid.is_none() {
                     self.core.set_bid_raw(trade.price);
                 }
             }
             AggressorSide::Seller => {
+                // Seller hit the bid: bid was at trade.price, post-trade
+                // bid is at most this level (only narrow)
                 if self.core.bid.is_none()
                     || price_raw < self.core.bid.map_or(PriceRaw::MAX, |p| p.raw)
                 {
                     self.core.set_bid_raw(trade.price);
                 }
 
-                if self.core.ask.is_none() || price_raw > self.core.ask.map_or(0, |p| p.raw) {
+                // Initialize ask from first trade if needed
+                if self.core.ask.is_none() {
                     self.core.set_ask_raw(trade.price);
                 }
             }
@@ -1559,23 +1600,43 @@ impl OrderMatchingEngine {
         self.last_trade_size = None;
         self.trade_consumption = 0;
 
-        // Restore original bid/ask after temporary trade price override
-        match aggressor_side {
-            AggressorSide::Seller => {
-                if let Some(ask) = original_ask
-                    && price_raw < ask.raw
-                {
-                    self.core.ask = Some(ask);
+        // Restore the non-aggressor side after temporary trade price override.
+        // For L2/L3 books the book has independent depth so restore from originals.
+        // For L1_MBP restore from the last quote values (not originals, which are
+        // polluted by iterate's L1 book sync). Without quotes, skip the restore
+        // so the core tracks the latest trade price.
+        if self.book_type == BookType::L1_MBP {
+            match aggressor_side {
+                AggressorSide::Seller => {
+                    if let Some(ask) = self.last_quote_ask {
+                        self.core.ask = Some(ask);
+                    }
                 }
-            }
-            AggressorSide::Buyer => {
-                if let Some(bid) = original_bid
-                    && price_raw > bid.raw
-                {
-                    self.core.bid = Some(bid);
+                AggressorSide::Buyer => {
+                    if let Some(bid) = self.last_quote_bid {
+                        self.core.bid = Some(bid);
+                    }
                 }
+                AggressorSide::NoAggressor => {}
             }
-            AggressorSide::NoAggressor => {}
+        } else {
+            match aggressor_side {
+                AggressorSide::Seller => {
+                    if let Some(ask) = original_ask
+                        && price_raw < ask.raw
+                    {
+                        self.core.ask = Some(ask);
+                    }
+                }
+                AggressorSide::Buyer => {
+                    if let Some(bid) = original_bid
+                        && price_raw > bid.raw
+                    {
+                        self.core.bid = Some(bid);
+                    }
+                }
+                AggressorSide::NoAggressor => {}
+            }
         }
     }
 
@@ -2037,6 +2098,7 @@ impl OrderMatchingEngine {
             .into_iter()
             .cloned()
             .collect::<Vec<OrderAny>>();
+
         for order in open_orders {
             if command.order_side != OrderSide::NoOrderSide
                 && command.order_side != order.order_side()
@@ -2535,6 +2597,7 @@ impl OrderMatchingEngine {
                 MatchAction::TriggerStop(id) => self.trigger_stop_order(id),
             }
         }
+
         for action in self.core.iterate_asks() {
             match action {
                 MatchAction::FillLimit(id) => self.fill_limit_order(id),
@@ -2926,6 +2989,7 @@ impl OrderMatchingEngine {
                             } else {
                                 order_price
                             };
+
                             for fill in &mut fills {
                                 let last_px = fill.0;
                                 if last_px < order_price {
@@ -2948,6 +3012,7 @@ impl OrderMatchingEngine {
                             } else {
                                 order_price
                             };
+
                             for fill in &mut fills {
                                 let last_px = fill.0;
                                 if last_px > order_price {

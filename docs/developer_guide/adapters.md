@@ -105,11 +105,11 @@ Build the low-level networking and parsing foundation.
 
 | Step | Component                  | Description                                                                                  |
 |------|----------------------------|----------------------------------------------------------------------------------------------|
-| 1.1  | HTTP error types           | Define HTTP-specific error enum with retryable/non-retryable variants (`http/error.rs`).     |
+| 1.1  | HTTP error types           | Define HTTP‑specific error enum with retryable/non‑retryable variants (`http/error.rs`).     |
 | 1.2  | HTTP client                | Implement credentials, request signing, rate limiting, and retry logic.                      |
 | 1.3  | HTTP API models            | Define request/response structs for REST endpoints (`http/models.rs`, `http/query.rs`).      |
 | 1.4  | HTTP parsing               | Convert venue responses to Nautilus domain models (`http/parse.rs`, `common/parse.rs`).      |
-| 1.5  | WebSocket error types      | Define WebSocket-specific error enum (`websocket/error.rs`).                                 |
+| 1.5  | WebSocket error types      | Define WebSocket‑specific error enum (`websocket/error.rs`).                                 |
 | 1.6  | WebSocket client           | Implement connection lifecycle, authentication, heartbeat, and reconnection.                 |
 | 1.7  | WebSocket messages         | Define streaming payload types (`websocket/messages.rs`).                                    |
 | 1.8  | WebSocket parsing          | Convert stream messages to Nautilus domain models (`websocket/parse.rs`).                    |
@@ -125,7 +125,7 @@ Instruments are the foundation: both data and execution clients depend on them.
 |------|----------------------------|----------------------------------------------------------------------------------------------|
 | 2.1  | Instrument parsing         | Parse venue instrument definitions into Nautilus types (spot, perpetual, future, option).    |
 | 2.2  | Instrument provider        | Implement `InstrumentProvider` to load, filter, and cache instruments.                       |
-| 2.3  | Symbol mapping             | Handle venue-specific symbol formats and Nautilus `InstrumentId` conversion.                 |
+| 2.3  | Symbol mapping             | Handle venue‑specific symbol formats and Nautilus `InstrumentId` conversion.                 |
 
 **Milestone**: `InstrumentProvider.load_all_async()` returns valid Nautilus instruments.
 
@@ -161,9 +161,9 @@ Extend coverage based on venue capabilities.
 
 | Step | Component                  | Description                                                                                  |
 |------|----------------------------|----------------------------------------------------------------------------------------------|
-| 5.1  | Advanced order types       | Conditional orders, stop-loss, take-profit, trailing stops, iceberg, etc.                    |
+| 5.1  | Advanced order types       | Conditional orders, stop‑loss, take‑profit, trailing stops, iceberg, etc.                    |
 | 5.2  | Batch operations           | Batch order submission, batch cancellation, mass cancel.                                     |
-| 5.3  | Venue-specific features    | Options chains, funding rates, liquidations, or other venue-specific data.                   |
+| 5.3  | Venue‑specific features    | Options chains, funding rates, liquidations, or other venue‑specific data.                   |
 
 ### Phase 6: Configuration and factories
 
@@ -244,24 +244,115 @@ to these defaults when unset.
 Expose typed config structs in `src/config.rs` so Python callers toggle venue-specific behaviour
 (see how OKX wires demo URLs, retries, and channel flags).
 Keep defaults minimal and delegate URL selection to helpers in `common::urls`.
+For the user-facing design rationale, see the [Configuration](../concepts/configuration.md)
+concept guide.
 
-All config structs (data and execution) must implement `Default`. This enables the
-`..Default::default()` pattern in examples and tests, keeping only the fields that differ
-from defaults visible:
+#### Builder and Default
+
+Config structs derive `bon::Builder` and implement `Default`. The builder owns all default
+values via `#[builder(default = value)]` annotations. The `Default` impl delegates to the
+builder so defaults are defined in exactly one place:
 
 ```rust
-let exec_config = VenueExecClientConfig {
+#[derive(Clone, Debug, bon::Builder)]
+pub struct VenueDataClientConfig {
+    pub api_key: Option<String>,
+    #[builder(default = 60)]
+    pub http_timeout_secs: u64,
+    #[builder(default = 3)]
+    pub max_retries: u32,
+}
+
+impl Default for VenueDataClientConfig {
+    fn default() -> Self {
+        Self::builder().build()
+    }
+}
+```
+
+This prevents drift between builder defaults and `Default` output. Never duplicate
+default values in the `Default` impl body.
+
+Bon always defaults `Option<T>` fields to `None`. For the rare case where an
+`Option<T>` field should default to `Some(value)`, override it in the `Default` impl
+and delegate everything else to the builder:
+
+```rust
+impl Default for VenueDataClientConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_secs: Some(60),
+            ..Self::builder().build()
+        }
+    }
+}
+```
+
+#### Field type rules
+
+Use plain `T` with `#[builder(default = value)]` when a field always has a sensible
+default and downstream code consumes the value directly:
+
+```rust
+#[builder(default = 60)]
+pub http_timeout_secs: u64,
+```
+
+Use `Option<T>` (no builder annotation) when `None` carries distinct meaning such as
+"feature disabled", "unbounded", or "inherit from environment":
+
+```rust
+/// Interval in seconds between open order checks.
+/// When `None`, open order polling is disabled.
+pub open_check_interval_secs: Option<f64>,
+```
+
+Choose the type based on the config's own semantics, not downstream function
+signatures. If `None` means "this feature is off" at the config level, use
+`Option<T>`. If the field always resolves to a concrete value, use plain `T`
+even when a downstream constructor still accepts `Option<T>` and the call site
+wraps with `Some(config.field)`.
+
+#### Python constructors
+
+The `py_new` constructor accepts `Option<T>` for all configurable fields (Python callers
+pass `None` to mean "use default"). For plain `T` fields, unwrap against the default:
+
+```rust
+fn py_new(http_timeout_secs: Option<u64>) -> Self {
+    let defaults = Self::default();
+    Self {
+        http_timeout_secs: http_timeout_secs.unwrap_or(defaults.http_timeout_secs),
+        ..
+    }
+}
+```
+
+For `Option<T>` fields, use `.or()` to fall back to the default option value.
+When the default is `None`, this preserves the caller's `None`. When the default
+is `Some(value)`, this fills in the default if the caller passed `None`:
+
+```rust
+open_check_interval_secs: open_check_interval_secs.or(defaults.open_check_interval_secs),
+```
+
+#### Default values
+
+Use sensible production defaults: credentials as `None` (resolved from environment at
+runtime), mainnet URLs, standard timeouts. For `trader_id` and `account_id`, use
+placeholder values like `TraderId::from("TRADER-001")` and `AccountId::from("VENUE-001")`.
+
+The `..Default::default()` pattern keeps examples and tests focused on fields that
+differ from defaults:
+
+```rust
+let config = VenueExecClientConfig {
     trader_id,
     account_id,
     environment: VenueEnvironment::Testnet,
     ..Default::default()
 };
 ```
-
-Default values should use sensible production defaults: credentials as `None` (resolved
-from environment at runtime), mainnet URLs, standard timeouts. For `trader_id` and
-`account_id`, use placeholder values like `TraderId::from("TRADER-001")` and
-`AccountId::from("VENUE-001")`.
 
 ### Error taxonomy (`common/error.rs`)
 
@@ -1061,7 +1152,7 @@ Define handler-specific tuning constants for consistent behavior:
 
 | Constant                   | Purpose                                          | Typical value |
 |----------------------------|--------------------------------------------------|---------------|
-| `DEFAULT_HEARTBEAT_SECS`   | Interval for sending keep-alive messages.        | 15-30         |
+| `DEFAULT_HEARTBEAT_SECS`   | Interval for sending keep‑alive messages.        | 15-30         |
 | `WEBSOCKET_AUTH_WINDOW_MS` | Maximum age for authentication timestamps.       | 5000-30000    |
 | `BATCH_PROCESSING_LIMIT`   | Maximum messages processed per event loop cycle. | 100-1000      |
 
@@ -1299,7 +1390,7 @@ WebSocket message channels follow a two-stage transformation pipeline within the
 | Stage | Type | Description | Example |
 |-------|------|-------------|---------|
 | `raw` | Raw WebSocket frames | Bytes/text from the network layer. | `raw_rx: UnboundedReceiver<Message>` |
-| `out` | Venue-specific messages | Parsed venue message types. | `out_tx: UnboundedSender<MyWsMessage>` |
+| `out` | Venue‑specific messages | Parsed venue message types. | `out_tx: UnboundedSender<MyWsMessage>` |
 
 The handler deserializes raw frames into venue-specific types and emits them on `out_tx`.
 The data and execution client layers then convert venue types into Nautilus domain types.
@@ -1337,7 +1428,7 @@ Structs holding references to lower-level components follow these conventions:
 
 | Field         | Type                                                | Description |
 |---------------|-----------------------------------------------------|-------------|
-| `inner`       | `Option<WebSocketClient>`                           | Network-level WebSocket client (handler only, exclusively owned). |
+| `inner`       | `Option<WebSocketClient>`                           | Network‑level WebSocket client (handler only, exclusively owned). |
 | `cmd_tx`      | `Arc<tokio::sync::RwLock<UnboundedSender<...>>>`   | Command channel to handler (client side). |
 | `cmd_rx`      | `UnboundedReceiver<HandlerCommand>`                 | Command channel from client (handler side). |
 | `out_tx`      | `UnboundedSender<{Venue}WsMessage>`                 | Output channel to client (handler side). |
@@ -1546,6 +1637,42 @@ Store task handles in `pending_tasks: Mutex<Vec<JoinHandle<()>>>`. Each call to
 `spawn_task` prunes finished handles before pushing the new one, preventing unbounded
 growth. On disconnect, abort all remaining handles.
 
+### Never use `block_on` in trait methods
+
+The live runner calls sync `ExecutionClient` and `DataClient` trait methods from within a
+tokio runtime. Using `runtime.block_on()` in these methods panics with
+*"Cannot start a runtime from within a runtime"*. Use `spawn_task` instead:
+
+```rust
+// Wrong: panics at runtime
+fn query_order(&self, cmd: &QueryOrder) -> anyhow::Result<()> {
+    get_runtime().block_on(async { self.http_client.get_order(&id).await })
+}
+
+// Correct: clone what you need, spawn, return immediately
+fn query_order(&self, cmd: &QueryOrder) -> anyhow::Result<()> {
+    let http_client = self.http_client.clone();
+    let emitter = self.emitter.clone();
+
+    self.spawn_task("query_order", async move {
+        let report = http_client.get_order(&id).await?;
+        emitter.send_order_status_report(report);
+        Ok(())
+    });
+    Ok(())
+}
+```
+
+`block_on` is valid in contexts that run outside a tokio runtime:
+
+| Context                      | Why safe                                       |
+|------------------------------|------------------------------------------------|
+| PyO3 `#[pymethods]`         | Called from Python, no ambient runtime          |
+| Binary `main()` functions   | Top‑level entry point, runtime not yet started  |
+| Dedicated background threads | Thread created outside tokio's worker pool     |
+| `block_in_place` wrapper    | Moves the thread out of the worker pool first   |
+| Test code with own runtime  | `Runtime::new()` creates an isolated runtime    |
+
 ### Graceful shutdown with `CancellationToken`
 
 Use `tokio_util::sync::CancellationToken` to coordinate shutdown across multiple spawned
@@ -1606,7 +1733,7 @@ crates/adapters/your_adapter/
 |----------------------|---------------------------------------------------------------------------------------------------------------------------|
 | `tests/data_client.rs` | Integration tests for the data client. Validates data subscriptions, historical data requests, and market data parsing.    |
 | `tests/exec_client.rs` | Integration tests for the execution client. Validates order submission, modification, cancellation, and execution reports. |
-| `tests/http.rs`      | Low-level HTTP client tests. Validates request signing, error handling, and response parsing against mock Axum servers.    |
+| `tests/http.rs`      | Low‑level HTTP client tests. Validates request signing, error handling, and response parsing against mock Axum servers.    |
 | `tests/websocket.rs` | WebSocket client tests. Validates connection lifecycle, authentication, subscriptions, and message routing.                |
 
 **Guidelines:**
@@ -1725,7 +1852,7 @@ Data (`tests/data_client.rs`) and execution (`tests/exec_client.rs`) client inte
 |------------------------------|------------------------------------------------------------------------------------|
 | Mock Axum server             | Serves HTTP endpoints (instruments, fee rates, positions) and WebSocket channels.  |
 | `TestServerState`            | Tracks connections, subscriptions, and authentication state for assertions.        |
-| Thread-local event channels  | `set_data_event_sender()` / `set_exec_event_sender()` for capturing emitted events.|
+| Thread‑local event channels  | `set_data_event_sender()` / `set_exec_event_sender()` for capturing emitted events.|
 | `wait_until_async`           | Polls conditions with timeout for deterministic async assertions.                  |
 
 **Data client coverage:**
@@ -2070,7 +2197,7 @@ class TemplateLiveMarketDataClient(LiveMarketDataClient):
 | `_subscribe_instrument`            | Subscribes to market data for a single instrument.      |
 | `_subscribe_order_book_deltas`     | Subscribes to order book delta updates.                 |
 | `_subscribe_order_book_depth`      | Subscribes to order book depth updates.                 |
-| `_subscribe_quote_ticks`           | Subscribes to top-of-book quote updates.                |
+| `_subscribe_quote_ticks`           | Subscribes to top‑of‑book quote updates.                |
 | `_subscribe_trade_ticks`           | Subscribes to trade tick updates.                       |
 | `_subscribe_mark_prices`           | Subscribes to mark price updates.                       |
 | `_subscribe_index_prices`          | Subscribes to index price updates.                      |

@@ -40,7 +40,7 @@ use nautilus_common::live::get_runtime;
 use nautilus_core::python::{call_python_threadsafe, to_pyruntime_err, to_pyvalue_err};
 use nautilus_model::{
     data::{BarType, Data, OrderBookDeltas_API},
-    enums::{OrderSide, OrderType, TimeInForce},
+    enums::{OrderSide, OrderType, TimeInForce, TriggerType},
     identifiers::{AccountId, ClientOrderId, InstrumentId, StrategyId, TraderId},
     python::{
         data::data_to_pycapsule,
@@ -51,7 +51,10 @@ use nautilus_model::{
 use pyo3::{IntoPyObjectExt, prelude::*};
 
 use crate::{
-    common::{enums::DeribitTimeInForce, parse::parse_instrument_kind_currency},
+    common::{
+        enums::{DeribitTimeInForce, resolve_trigger_type},
+        parse::parse_instrument_kind_currency,
+    },
     websocket::{
         client::DeribitWebSocketClient,
         enums::DeribitUpdateInterval,
@@ -78,14 +81,14 @@ impl DeribitWebSocketClient {
         url=None,
         api_key=None,
         api_secret=None,
-        heartbeat_interval=None,
+        heartbeat_interval=30,
         is_testnet=false,
     ))]
     fn py_new(
         url: Option<String>,
         api_key: Option<String>,
         api_secret: Option<String>,
-        heartbeat_interval: Option<u64>,
+        heartbeat_interval: u64,
         is_testnet: bool,
     ) -> PyResult<Self> {
         Self::new(url, api_key, api_secret, heartbeat_interval, is_testnet).map_err(to_pyvalue_err)
@@ -224,6 +227,7 @@ impl DeribitWebSocketClient {
         let call_soon: Py<PyAny> = loop_.getattr(py, "call_soon_threadsafe")?;
 
         let mut instruments_any = Vec::new();
+
         for inst in instruments {
             let inst_any = pyobject_to_instrument_any(py, inst)?;
             instruments_any.push(inst_any);
@@ -1029,7 +1033,7 @@ impl DeribitWebSocketClient {
         post_only=false,
         reduce_only=false,
         trigger_price=None,
-        trigger=None,
+        trigger_type=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn py_submit_order<'py>(
@@ -1047,7 +1051,7 @@ impl DeribitWebSocketClient {
         post_only: bool,
         reduce_only: bool,
         trigger_price: Option<Price>,
-        trigger: Option<String>,
+        trigger_type: Option<TriggerType>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
         let instrument_name = instrument_id.symbol.to_string();
@@ -1072,7 +1076,7 @@ impl DeribitWebSocketClient {
             reject_post_only: if post_only { Some(true) } else { None },
             reduce_only: if reduce_only { Some(true) } else { None },
             trigger_price: trigger_price.map(|p| p.as_decimal()),
-            trigger,
+            trigger: resolve_trigger_type(trigger_type),
             max_show: None,
             valid_until: None,
         };

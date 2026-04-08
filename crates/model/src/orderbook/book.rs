@@ -718,6 +718,7 @@ impl OrderBook {
         let ts_event = self.ts_last;
 
         let mut order_id = 1_u64;
+
         for (price, quantity) in bids_map {
             if quantity <= Decimal::ZERO {
                 continue;
@@ -1028,6 +1029,16 @@ impl OrderBook {
             return Err(InvalidBookOperation::Update(self.book_type));
         }
 
+        if quote.ts_event < self.ts_last {
+            log::warn!(
+                "Skipping stale quote: ts_event {} < ts_last {} (instrument_id={})",
+                quote.ts_event,
+                self.ts_last,
+                self.instrument_id
+            );
+            return Ok(());
+        }
+
         // Crossed quotes (bid > ask) can occur temporarily in volatile markets
         if cfg!(debug_assertions) && quote.bid_price > quote.ask_price {
             log::warn!(
@@ -1068,6 +1079,16 @@ impl OrderBook {
     pub fn update_trade_tick(&mut self, trade: &TradeTick) -> Result<(), InvalidBookOperation> {
         if self.book_type != BookType::L1_MBP {
             return Err(InvalidBookOperation::Update(self.book_type));
+        }
+
+        if trade.ts_event < self.ts_last {
+            log::warn!(
+                "Skipping stale trade: ts_event {} < ts_last {} (instrument_id={})",
+                trade.ts_event,
+                self.ts_last,
+                self.instrument_id
+            );
+            return Ok(());
         }
 
         // Prices can be zero or negative for certain instruments (options, spreads)

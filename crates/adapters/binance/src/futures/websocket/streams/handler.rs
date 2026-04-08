@@ -37,9 +37,10 @@ use super::{
     messages::{
         BinanceFuturesAccountConfigMsg, BinanceFuturesAccountUpdateMsg, BinanceFuturesAggTradeMsg,
         BinanceFuturesAlgoUpdateMsg, BinanceFuturesBookTickerMsg, BinanceFuturesDepthUpdateMsg,
-        BinanceFuturesKlineMsg, BinanceFuturesListenKeyExpiredMsg, BinanceFuturesMarginCallMsg,
-        BinanceFuturesMarkPriceMsg, BinanceFuturesOrderUpdateMsg, BinanceFuturesTradeMsg,
-        BinanceFuturesWsErrorMsg, BinanceFuturesWsErrorResponse, BinanceFuturesWsStreamsCommand,
+        BinanceFuturesKlineMsg, BinanceFuturesLiquidationMsg, BinanceFuturesListenKeyExpiredMsg,
+        BinanceFuturesMarginCallMsg, BinanceFuturesMarkPriceMsg, BinanceFuturesOrderUpdateMsg,
+        BinanceFuturesTickerMsg, BinanceFuturesTradeMsg, BinanceFuturesWsErrorMsg,
+        BinanceFuturesWsErrorResponse, BinanceFuturesWsStreamsCommand,
         BinanceFuturesWsStreamsMessage, BinanceFuturesWsSubscribeRequest,
         BinanceFuturesWsSubscribeResponse,
     },
@@ -62,7 +63,7 @@ pub struct BinanceFuturesDataWsFeedHandler {
     raw_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
     #[allow(dead_code)]
     out_tx: tokio::sync::mpsc::UnboundedSender<BinanceFuturesWsStreamsMessage>,
-    client: Option<WebSocketClient>,
+    inner: Option<WebSocketClient>,
     subscriptions_state: SubscriptionState,
     request_id_counter: Arc<AtomicU64>,
     pending_requests: AHashMap<u64, Vec<String>>,
@@ -91,7 +92,7 @@ impl BinanceFuturesDataWsFeedHandler {
             cmd_rx,
             raw_rx,
             out_tx,
-            client: None,
+            inner: None,
             subscriptions_state,
             request_id_counter,
             pending_requests: AHashMap::new(),
@@ -126,13 +127,13 @@ impl BinanceFuturesDataWsFeedHandler {
     async fn handle_command(&mut self, cmd: BinanceFuturesWsStreamsCommand) {
         match cmd {
             BinanceFuturesWsStreamsCommand::SetClient(client) => {
-                self.client = Some(client);
+                self.inner = Some(client);
             }
             BinanceFuturesWsStreamsCommand::Disconnect => {
-                if let Some(client) = &self.client {
+                if let Some(client) = &self.inner {
                     let () = client.disconnect().await;
                 }
-                self.client = None;
+                self.inner = None;
             }
             BinanceFuturesWsStreamsCommand::Subscribe { streams } => {
                 self.send_subscribe(streams).await;
@@ -144,7 +145,7 @@ impl BinanceFuturesDataWsFeedHandler {
     }
 
     async fn send_subscribe(&mut self, streams: Vec<String>) {
-        let Some(client) = &self.client else {
+        let Some(client) = &self.inner else {
             log::warn!("Cannot subscribe: no client connected");
             return;
         };
@@ -180,7 +181,7 @@ impl BinanceFuturesDataWsFeedHandler {
     }
 
     async fn send_unsubscribe(&self, streams: Vec<String>) {
-        let Some(client) = &self.client else {
+        let Some(client) = &self.inner else {
             log::warn!("Cannot unsubscribe: no client connected");
             return;
         };
@@ -333,10 +334,20 @@ impl BinanceFuturesDataWsFeedHandler {
                     .ok()
             }
             BinanceWsEventType::ForceOrder => {
-                Some(BinanceFuturesWsStreamsMessage::ForceOrder(json.clone()))
+                serde_json::from_value::<BinanceFuturesLiquidationMsg>(json.clone())
+                    .map(BinanceFuturesWsStreamsMessage::ForceOrder)
+                    .map_err(|e| log::warn!("Failed to parse force order: {e}"))
+                    .ok()
             }
-            BinanceWsEventType::Ticker24Hr | BinanceWsEventType::MiniTicker24Hr => {
-                Some(BinanceFuturesWsStreamsMessage::Ticker(json.clone()))
+            BinanceWsEventType::Ticker24Hr => {
+                serde_json::from_value::<BinanceFuturesTickerMsg>(json.clone())
+                    .map(BinanceFuturesWsStreamsMessage::Ticker)
+                    .map_err(|e| log::warn!("Failed to parse ticker: {e}"))
+                    .ok()
+            }
+            BinanceWsEventType::MiniTicker24Hr => {
+                log::debug!("Mini ticker not yet supported, skipping");
+                None
             }
             BinanceWsEventType::AccountUpdate => {
                 serde_json::from_value::<BinanceFuturesAccountUpdateMsg>(json.clone())

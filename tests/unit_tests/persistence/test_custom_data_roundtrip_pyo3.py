@@ -37,7 +37,7 @@ def _assert_custom_data_json_roundtrip(result, inner_type, assert_fields):
 def test_python_custom_data_roundtrip(tmp_path):
     """Test PyO3 custom data roundtrip via catalog - same as Rust test but from Python."""
     from nautilus_trader.core.nautilus_pyo3 import InstrumentId
-    from nautilus_trader.core.nautilus_pyo3 import ParquetDataCatalogV2
+    from nautilus_trader.core.nautilus_pyo3 import ParquetDataCatalog
     from nautilus_trader.core.nautilus_pyo3.model import CustomData
     from nautilus_trader.core.nautilus_pyo3.model import DataType
     from nautilus_trader.core.nautilus_pyo3.model import custom_data_backend_kind
@@ -47,7 +47,7 @@ def test_python_custom_data_roundtrip(tmp_path):
     register_custom_data_class(RustTestCustomData)
     catalog_path = tmp_path / "catalog_file"
     catalog_path.mkdir(parents=True, exist_ok=True)
-    pyo3_catalog = ParquetDataCatalogV2(str(catalog_path))
+    pyo3_catalog = ParquetDataCatalog(str(catalog_path))
 
     instrument_id = InstrumentId.from_str("RUST.TEST")
     metadata = {"venue": "TEST", "instrument_id": str(instrument_id)}
@@ -84,6 +84,7 @@ def test_python_custom_data_roundtrip(tmp_path):
 
     # Result should be CustomData wrappers with RustTestCustomData in .data
     roundtripped = []
+
     for item in result:
         assert isinstance(item, CustomData), f"Expected CustomData, found {type(item)}"
         assert custom_data_backend_kind(item) == "native"
@@ -138,7 +139,7 @@ def test_python_custom_data_roundtrip(tmp_path):
 
 def test_macro_yield_curve_data_roundtrip(tmp_path):
     """Test MacroYieldCurveData roundtrip via catalog - tests Vec<f64> and numpy interop."""
-    from nautilus_trader.core.nautilus_pyo3 import ParquetDataCatalogV2
+    from nautilus_trader.core.nautilus_pyo3 import ParquetDataCatalog
     from nautilus_trader.core.nautilus_pyo3.model import CustomData
     from nautilus_trader.core.nautilus_pyo3.model import DataType
     from nautilus_trader.core.nautilus_pyo3.model import register_custom_data_class
@@ -147,7 +148,7 @@ def test_macro_yield_curve_data_roundtrip(tmp_path):
     register_custom_data_class(MacroYieldCurveData)
     catalog_path = tmp_path / "catalog_file"
     catalog_path.mkdir(parents=True, exist_ok=True)
-    pyo3_catalog = ParquetDataCatalogV2(str(catalog_path))
+    pyo3_catalog = ParquetDataCatalog(str(catalog_path))
 
     metadata = {"currency": "USD", "curve": "govt"}
     identifier = "USD-GOVT"
@@ -175,6 +176,7 @@ def test_macro_yield_curve_data_roundtrip(tmp_path):
     )
 
     roundtripped = []
+
     for item in result:
         assert isinstance(item, CustomData), f"Expected CustomData, found {type(item)}"
         inner = item.data
@@ -209,12 +211,100 @@ def test_macro_yield_curve_data_roundtrip(tmp_path):
     _assert_custom_data_json_roundtrip(result, MacroYieldCurveData, assert_yield_curve)
 
 
+def test_rust_params_custom_data_roundtrip(tmp_path):
+    """Test RustTestParamsCustomData roundtrip via catalog - exercises Params <-> dict interop."""
+    from nautilus_trader.core.nautilus_pyo3 import ParquetDataCatalog
+    from nautilus_trader.core.nautilus_pyo3.model import CustomData
+    from nautilus_trader.core.nautilus_pyo3.model import DataType
+    from nautilus_trader.core.nautilus_pyo3.model import register_custom_data_class
+    from nautilus_trader.core.nautilus_pyo3.persistence import RustTestParamsCustomData
+
+    register_custom_data_class(RustTestParamsCustomData)
+    catalog_path = tmp_path / "catalog_params"
+    catalog_path.mkdir(parents=True, exist_ok=True)
+    pyo3_catalog = ParquetDataCatalog(str(catalog_path))
+
+    metadata = {"source": "unit-test", "kind": "params"}
+    data_type = DataType("RustTestParamsCustomData", metadata, None)
+
+    original_params = [
+        {
+            "key": "alpha",
+            "count": 1,
+            "enabled": True,
+        },
+        {
+            "key": "beta",
+            "nested": {"level": 2, "tags": ["x", "y"]},
+            "ratio": 1.25,
+        },
+    ]
+    original_data = [
+        RustTestParamsCustomData("first", original_params[0], 10, 10),
+        RustTestParamsCustomData("second", original_params[1], 20, 20),
+    ]
+    wrapped = [CustomData(data_type, item) for item in original_data]
+
+    pyo3_catalog.write_custom_data(wrapped)
+
+    result = pyo3_catalog.query(
+        "RustTestParamsCustomData",
+        None,
+        None,
+        None,
+        None,
+        None,
+        True,
+    )
+
+    roundtripped = []
+
+    for item in result:
+        assert isinstance(item, CustomData), f"Expected CustomData, found {type(item)}"
+        inner = item.data
+        assert isinstance(inner, RustTestParamsCustomData), (
+            f"Expected RustTestParamsCustomData in .data, found {type(inner)}"
+        )
+        assert isinstance(inner.params, dict)
+        roundtripped.append(inner)
+
+    assert len(roundtripped) == len(original_data)
+
+    for item in result:
+        assert item.data_type.type_name == "RustTestParamsCustomData"
+        assert item.data_type.metadata == metadata
+        assert item.data_type.identifier is None
+
+    for expected, expected_params, actual in zip(
+        original_data,
+        original_params,
+        roundtripped,
+        strict=True,
+    ):
+        assert expected.name == actual.name
+        assert actual.params == expected_params
+        assert expected.ts_event == actual.ts_event
+        assert expected.ts_init == actual.ts_init
+
+    def assert_params_data(orig, rt):
+        assert orig.name == rt.name
+        assert rt.params == orig.params
+        assert orig.ts_event == rt.ts_event
+        assert orig.ts_init == rt.ts_init
+
+    _assert_custom_data_json_roundtrip(
+        result,
+        RustTestParamsCustomData,
+        assert_params_data,
+    )
+
+
 def test_python_only_customdataclass_pyo3_roundtrip(tmp_path):
     """
     Test Python-only custom data via customdataclass_pyo3 and
     register_custom_data_class.
     """
-    from nautilus_trader.core.nautilus_pyo3 import ParquetDataCatalogV2
+    from nautilus_trader.core.nautilus_pyo3 import ParquetDataCatalog
     from nautilus_trader.core.nautilus_pyo3.model import CustomData
     from nautilus_trader.core.nautilus_pyo3.model import DataType
     from nautilus_trader.core.nautilus_pyo3.model import custom_data_backend_kind
@@ -230,7 +320,7 @@ def test_python_only_customdataclass_pyo3_roundtrip(tmp_path):
     register_custom_data_class(MarketTickPython)
     catalog_path = tmp_path / "catalog_python_only"
     catalog_path.mkdir(parents=True, exist_ok=True)
-    pyo3_catalog = ParquetDataCatalogV2(str(catalog_path))
+    pyo3_catalog = ParquetDataCatalog(str(catalog_path))
 
     metadata = {"exchange": "NASDAQ", "asset_class": "equity"}
     identifier = "NASDAQ-EQUITY"
@@ -252,6 +342,7 @@ def test_python_only_customdataclass_pyo3_roundtrip(tmp_path):
         True,
     )
     roundtripped = []
+
     for item in result:
         assert isinstance(item, CustomData), f"Expected CustomData, found {type(item)}"
         assert custom_data_backend_kind(item) == "python"
@@ -285,6 +376,101 @@ def test_python_only_customdataclass_pyo3_roundtrip(tmp_path):
         assert orig.ts_init == rt.ts_init
 
     _assert_custom_data_json_roundtrip(result, MarketTickPython, assert_market_tick)
+
+
+def test_python_only_customdataclass_pyo3_dict_roundtrip(tmp_path):
+    """
+    Test Python-only custom data dict fields roundtrip via JSON-backed Arrow strings.
+    """
+    import json as json_module
+    from dataclasses import field
+
+    import pyarrow as pa
+
+    from nautilus_trader.core.nautilus_pyo3 import ParquetDataCatalog
+    from nautilus_trader.core.nautilus_pyo3.model import CustomData
+    from nautilus_trader.core.nautilus_pyo3.model import DataType
+    from nautilus_trader.core.nautilus_pyo3.model import custom_data_backend_kind
+    from nautilus_trader.core.nautilus_pyo3.model import register_custom_data_class
+    from nautilus_trader.model.custom import customdataclass_pyo3
+
+    @customdataclass_pyo3()
+    class JsonBlobPython:
+        name: str = ""
+        payload: dict[str, object] = field(default_factory=dict)
+
+    register_custom_data_class(JsonBlobPython)
+    catalog_path = tmp_path / "catalog_python_dict"
+    catalog_path.mkdir(parents=True, exist_ok=True)
+    pyo3_catalog = ParquetDataCatalog(str(catalog_path))
+
+    metadata = {"source": "python", "format": "json-dict"}
+    identifier = "PYTHON-DICT"
+    data_type = DataType("JsonBlobPython", metadata, identifier)
+    original_payloads = [
+        {"symbol": "AAPL", "nested": {"count": 2, "enabled": True}},
+        {"symbol": "MSFT", "values": [1, 2, 3], "ratio": 1.25},
+    ]
+    original_data = [
+        JsonBlobPython(1, 1, "first", original_payloads[0]),
+        JsonBlobPython(2, 2, "second", original_payloads[1]),
+    ]
+    wrapped = [CustomData(data_type, item) for item in original_data]
+
+    assert JsonBlobPython._schema.field("payload").type == pa.string()
+    assert [custom_data_backend_kind(item) for item in wrapped] == ["python", "python"]
+
+    arrow_row = original_data[0].to_arrow().to_pylist()[0]
+    assert arrow_row["payload"] == json_module.dumps(original_payloads[0], sort_keys=True)
+
+    pyo3_catalog.write_custom_data(wrapped)
+    result = pyo3_catalog.query(
+        "JsonBlobPython",
+        None,
+        None,
+        None,
+        None,
+        None,
+        True,
+    )
+
+    roundtripped = []
+
+    for item in result:
+        assert isinstance(item, CustomData), f"Expected CustomData, found {type(item)}"
+        assert custom_data_backend_kind(item) == "python"
+        inner = item.data
+        assert isinstance(inner, JsonBlobPython), (
+            f"Expected JsonBlobPython in .data, found {type(inner)}"
+        )
+        assert isinstance(inner.payload, dict)
+        roundtripped.append(inner)
+
+    assert len(roundtripped) == len(original_data)
+
+    for item in result:
+        assert item.data_type.type_name == "JsonBlobPython"
+        assert item.data_type.metadata == metadata
+        assert item.data_type.identifier == identifier
+
+    for expected, expected_payload, actual in zip(
+        original_data,
+        original_payloads,
+        roundtripped,
+        strict=True,
+    ):
+        assert expected.name == actual.name
+        assert actual.payload == expected_payload
+        assert expected.ts_event == actual.ts_event
+        assert expected.ts_init == actual.ts_init
+
+    def assert_json_blob(orig, rt):
+        assert orig.name == rt.name
+        assert rt.payload == orig.payload
+        assert orig.ts_event == rt.ts_event
+        assert orig.ts_init == rt.ts_init
+
+    _assert_custom_data_json_roundtrip(result, JsonBlobPython, assert_json_blob)
 
 
 def test_python_custom_data_equality_by_identity():

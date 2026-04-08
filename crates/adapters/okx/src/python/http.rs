@@ -18,7 +18,7 @@
 use chrono::{DateTime, Utc};
 use nautilus_core::python::{IntoPyObjectNautilusExt, to_pyruntime_err, to_pyvalue_err};
 use nautilus_model::{
-    data::BarType,
+    data::{BarType, forward::ForwardPrice},
     enums::{OrderSide, OrderType, PositionSide, TimeInForce, TriggerType},
     identifiers::{AccountId, ClientOrderId, InstrumentId, StrategyId, TraderId},
     python::instruments::{instrument_any_to_pyobject, pyobject_to_instrument_any},
@@ -87,10 +87,10 @@ impl OKXHttpClient {
         api_secret=None,
         api_passphrase=None,
         base_url=None,
-        timeout_secs=None,
-        max_retries=None,
-        retry_delay_ms=None,
-        retry_delay_max_ms=None,
+        timeout_secs=60,
+        max_retries=3,
+        retry_delay_ms=1_000,
+        retry_delay_max_ms=10_000,
         is_demo=false,
         proxy_url=None,
     ))]
@@ -100,10 +100,10 @@ impl OKXHttpClient {
         api_secret: Option<String>,
         api_passphrase: Option<String>,
         base_url: Option<String>,
-        timeout_secs: Option<u64>,
-        max_retries: Option<u32>,
-        retry_delay_ms: Option<u64>,
-        retry_delay_max_ms: Option<u64>,
+        timeout_secs: u64,
+        max_retries: u32,
+        retry_delay_ms: u64,
+        retry_delay_max_ms: u64,
         is_demo: bool,
         proxy_url: Option<String>,
     ) -> PyResult<Self> {
@@ -370,6 +370,7 @@ impl OKXHttpClient {
         })
     }
 
+    /// Requests an order book snapshot as `OrderBookDeltas` for the `instrument_id`.
     #[pyo3(name = "request_orderbook_snapshot")]
     #[pyo3(signature = (instrument_id, depth=None))]
     fn py_request_orderbook_snapshot<'py>(
@@ -390,6 +391,7 @@ impl OKXHttpClient {
         })
     }
 
+    /// Requests historical funding rates for the `instrument_id`.
     #[pyo3(name = "request_funding_rates")]
     #[pyo3(signature = (instrument_id, start=None, end=None, limit=None))]
     fn py_request_funding_rates<'py>(
@@ -410,6 +412,35 @@ impl OKXHttpClient {
 
             Python::attach(|py| {
                 let pylist = PyList::new(py, rates.into_iter().map(|r| r.into_py_any_unwrap(py)))?;
+                Ok(pylist.into_py_any_unwrap(py))
+            })
+        })
+    }
+
+    /// Requests forward prices for OKX options using the option summary endpoint.
+    #[pyo3(name = "request_forward_prices")]
+    #[pyo3(signature = (underlying, instrument_id=None))]
+    fn py_request_forward_prices<'py>(
+        &self,
+        py: Python<'py>,
+        underlying: String,
+        instrument_id: Option<InstrumentId>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let forward_prices: Vec<ForwardPrice> = client
+                .request_forward_prices(&underlying, instrument_id)
+                .await
+                .map_err(to_pyvalue_err)?;
+
+            Python::attach(|py| {
+                let pylist = PyList::new(
+                    py,
+                    forward_prices
+                        .into_iter()
+                        .map(|price| price.into_py_any_unwrap(py)),
+                )?;
                 Ok(pylist.into_py_any_unwrap(py))
             })
         })
@@ -669,6 +700,8 @@ impl OKXHttpClient {
         quote_quantity=None,
         position_side=None,
         attach_algo_ords=None,
+        px_usd=None,
+        px_vol=None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn py_place_order<'py>(
@@ -689,6 +722,8 @@ impl OKXHttpClient {
         quote_quantity: Option<bool>,
         position_side: Option<PositionSide>,
         attach_algo_ords: Option<Vec<Py<PyDict>>>,
+        px_usd: Option<String>,
+        px_vol: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let attach_algo_ords = parse_attach_algo_ords(py, attach_algo_ords)?;
         let client = self.clone();
@@ -711,6 +746,8 @@ impl OKXHttpClient {
                     quote_quantity,
                     position_side,
                     attach_algo_ords,
+                    px_usd,
+                    px_vol,
                 )
                 .await
                 .map_err(to_pyvalue_err)?;

@@ -402,6 +402,7 @@ class KrakenExecutionClient(LiveExecutionClient):
                     end=end,
                     open_only=command.open_only,
                 )
+
                 for pyo3_report in pyo3_reports:
                     report = OrderStatusReport.from_pyo3(pyo3_report)
                     self._log.debug(f"Received {report}", LogColor.MAGENTA)
@@ -416,6 +417,7 @@ class KrakenExecutionClient(LiveExecutionClient):
                     end=end,
                     open_only=command.open_only,
                 )
+
                 for pyo3_report in pyo3_reports:
                     report = OrderStatusReport.from_pyo3(pyo3_report)
                     self._log.debug(f"Received {report}", LogColor.MAGENTA)
@@ -563,6 +565,7 @@ class KrakenExecutionClient(LiveExecutionClient):
                     start=start,
                     end=end,
                 )
+
                 for pyo3_report in pyo3_reports:
                     report = FillReport.from_pyo3(pyo3_report)
                     self._log.debug(f"Received {report}", LogColor.MAGENTA)
@@ -576,6 +579,7 @@ class KrakenExecutionClient(LiveExecutionClient):
                     start=start,
                     end=end,
                 )
+
                 for pyo3_report in pyo3_reports:
                     report = FillReport.from_pyo3(pyo3_report)
                     self._log.debug(f"Received {report}", LogColor.MAGENTA)
@@ -609,6 +613,7 @@ class KrakenExecutionClient(LiveExecutionClient):
                     account_id=self.pyo3_account_id,
                     instrument_id=pyo3_instrument_id,
                 )
+
                 for pyo3_report in pyo3_reports:
                     report = PositionStatusReport.from_pyo3(pyo3_report)
                     self._log.debug(f"Received {report}", LogColor.MAGENTA)
@@ -619,6 +624,7 @@ class KrakenExecutionClient(LiveExecutionClient):
                     account_id=self.pyo3_account_id,
                     instrument_id=pyo3_instrument_id,
                 )
+
                 for pyo3_report in pyo3_reports:
                     report = PositionStatusReport.from_pyo3(pyo3_report)
                     self._log.debug(f"Received {report}", LogColor.MAGENTA)
@@ -817,6 +823,7 @@ class KrakenExecutionClient(LiveExecutionClient):
         # Futures: batch limit/stop orders, submit market orders individually
         # (Kraken batch endpoint only supports limit and stop orders)
         futures_batch_orders: list[Order] = []
+
         for order in futures_orders:
             if order.order_type == OrderType.MARKET:
                 await self._submit_order(
@@ -837,6 +844,7 @@ class KrakenExecutionClient(LiveExecutionClient):
             self._log.warning(
                 "No futures HTTP client, submitting futures orders individually",
             )
+
             for order in futures_orders:
                 await self._submit_order(
                     SubmitOrder(
@@ -1335,13 +1343,18 @@ class KrakenExecutionClient(LiveExecutionClient):
                 ts_event=report.ts_last,
             )
         elif report.order_status == OrderStatus.TRIGGERED:
-            self.generate_order_triggered(
-                strategy_id=order.strategy_id,
-                instrument_id=report.instrument_id,
-                client_order_id=report.client_order_id,
-                venue_order_id=report.venue_order_id,
-                ts_event=report.ts_last,
-            )
+            if order.order_type in (
+                OrderType.STOP_LIMIT,
+                OrderType.TRAILING_STOP_LIMIT,
+                OrderType.LIMIT_IF_TOUCHED,
+            ):
+                self.generate_order_triggered(
+                    strategy_id=order.strategy_id,
+                    instrument_id=report.instrument_id,
+                    client_order_id=report.client_order_id,
+                    venue_order_id=report.venue_order_id,
+                    ts_event=report.ts_last,
+                )
         else:
             self._log.debug(f"Received unhandled OrderStatusReport: {report}")
 

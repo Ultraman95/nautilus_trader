@@ -489,7 +489,8 @@ impl LimitOrder {
         let is_post_only = get_required::<bool>(values, "is_post_only")?;
         let is_reduce_only = get_required::<bool>(values, "is_reduce_only")?;
         let is_quote_quantity = get_required::<bool>(values, "is_quote_quantity")?;
-        let display_qty = get_optional::<Quantity>(values, "display_qty")?;
+        let display_qty =
+            get_optional_parsed(values, "display_qty", |s| Ok(Quantity::from(s.as_str())))?;
         let emulation_trigger = get_optional_parsed(values, "emulation_trigger", |s| {
             s.parse::<TriggerType>().map_err(|e| e.to_string())
         })?;
@@ -624,6 +625,7 @@ impl LimitOrder {
             || dict.set_item("exec_algorithm_id", py.None()),
             |x| dict.set_item("exec_algorithm_id", x.to_string()),
         )?;
+
         match &self.exec_algorithm_params {
             Some(exec_algorithm_params) => {
                 let py_exec_algorithm_params = PyDict::new(py);

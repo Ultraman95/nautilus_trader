@@ -34,9 +34,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import re
 import sys
+from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -143,9 +143,7 @@ def collect_source_docs(src_dir: Path) -> dict[tuple[str | None, str], list[str]
                 continue
 
             if stripped.startswith("///"):
-                content = stripped[3:]
-                if content.startswith(" "):
-                    content = content[1:]
+                content = stripped[3:].removeprefix(" ")
                 doc_block.append(content)
                 continue
 
@@ -259,6 +257,7 @@ def format_as_doc_comment(doc_lines: list[str], indent: str) -> list[str]:
     Format lines as Rust ``///`` doc comments with the given indentation.
     """
     formatted = []
+
     for line in doc_lines:
         if line:
             formatted.append(f"{indent}/// {line}")

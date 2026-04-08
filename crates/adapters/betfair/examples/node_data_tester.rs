@@ -21,7 +21,7 @@
 //! - `BETFAIR_USERNAME`: Your Betfair username
 //! - `BETFAIR_PASSWORD`: Your Betfair password
 //! - `BETFAIR_APP_KEY`: Your Betfair application key
-//! - `BETFAIR_MARKET_ID`: Optional market ID override. Defaults to `1.254209667`
+//! - `BETFAIR_MARKET_ID`: Required active market ID to load and test
 //!
 //! Market IDs can be found from `https://www.betfair.com.au/exchange/plus/`
 
@@ -46,8 +46,7 @@ use nautilus_testkit::testers::{DataTester, DataTesterConfig};
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
-    let market_id =
-        std::env::var("BETFAIR_MARKET_ID").unwrap_or_else(|_| "1.254209667".to_string());
+    let market_id = std::env::var("BETFAIR_MARKET_ID").expect("BETFAIR_MARKET_ID must be set");
     let (account_currency, instruments) = load_market_context(&market_id).await?;
     let instrument_ids = instrument_ids(&instruments);
 
@@ -73,12 +72,15 @@ async fn main() -> anyhow::Result<()> {
         .with_delay_post_stop_secs(5)
         .build()?;
 
-    let tester_config = DataTesterConfig::new(client_id, instrument_ids)
-        .with_subscribe_book_deltas(true)
-        .with_subscribe_trades(true)
-        .with_subscribe_instrument_status(true)
-        .with_can_unsubscribe(false)
-        .with_log_data(true);
+    let tester_config = DataTesterConfig::builder()
+        .client_id(client_id)
+        .instrument_ids(instrument_ids)
+        .subscribe_book_deltas(true)
+        .subscribe_trades(true)
+        .subscribe_instrument_status(true)
+        .can_unsubscribe(false)
+        .manage_book(true)
+        .build();
 
     let tester = DataTester::new(tester_config);
 

@@ -33,6 +33,7 @@ from py_clob_client.clob_types import PostOrdersArgs
 from py_clob_client.exceptions import PolyApiException
 
 from nautilus_trader.adapters.polymarket.common.cache import get_polymarket_trades_key
+from nautilus_trader.adapters.polymarket.common.constants import DUST_SNAP_THRESHOLD
 from nautilus_trader.adapters.polymarket.common.constants import POLYMARKET_CANCEL_ALREADY_DONE
 from nautilus_trader.adapters.polymarket.common.constants import POLYMARKET_FINALIZED_TRADE_STATUSES
 from nautilus_trader.adapters.polymarket.common.constants import POLYMARKET_INVALID_API_KEY
@@ -311,7 +312,8 @@ class PolymarketExecutionClient(LiveExecutionClient):
         request.
 
         """
-        base_url = "https://data-api.polymarket.com/positions"
+        base_url = (self._config.base_url_data_api or "https://data-api.polymarket.com").rstrip("/")
+        base_url = f"{base_url}/positions"
         results: list[dict[str, Any]] = []
         offset = 0
 
@@ -452,6 +454,7 @@ class PolymarketExecutionClient(LiveExecutionClient):
                 )
 
             venue_order_id_fill_reports: dict[VenueOrderId, list[FillReport]] = defaultdict(list)
+
             for fill in fill_reports:
                 if fill.venue_order_id in known_venue_order_ids:
                     continue  # Already reported
@@ -628,6 +631,7 @@ class PolymarketExecutionClient(LiveExecutionClient):
                 # Uncomment for development
                 # self._log.info(f"Processing {len(response)} trades", LogColor.MAGENTA)
                 parsed_fill_keys: set[tuple[TradeId, VenueOrderId]] = set()
+
                 for json_obj in response:
                     self._parse_trades_response_object(
                         command=command,
@@ -653,18 +657,17 @@ class PolymarketExecutionClient(LiveExecutionClient):
         else:
             instrument_ids = [inst.id for inst in self._cache.instruments(venue=POLYMARKET_VENUE)]
 
-        if self._config.use_data_api:
-            # Fetch all positions once (bulk operation)
-            quantities_by_instrument = await self._fetch_quantities_from_gamma_api(instrument_ids)
-        else:
-            # Fetch positions individually (one API call per instrument)
-            quantities_by_instrument = await self._fetch_quantities_from_clob_api(instrument_ids)
+        quantities_by_instrument = await self._fetch_quantities_from_gamma_api(instrument_ids)
 
-        # Generate reports from quantities
+        # Generate reports from quantities (filter dust positions)
         for instrument_id, quantity in quantities_by_instrument.items():
-            position_side = PositionSide.LONG if quantity.raw > 0 else PositionSide.FLAT
-            if position_side == PositionSide.LONG:
-                self._log.info(f"Long position for {instrument_id} of {quantity} shares")
+            size = float(quantity)
+            if 0.0 < size < DUST_SNAP_THRESHOLD:
+                self._log.debug(f"Filtering dust position: {instrument_id}, size={size}")
+            if size < DUST_SNAP_THRESHOLD:
+                continue
+            position_side = PositionSide.LONG
+            self._log.info(f"Long position for {instrument_id} of {quantity} shares")
 
             now = self._clock.timestamp_ns()
             report = PositionStatusReport(
@@ -759,6 +762,7 @@ class PolymarketExecutionClient(LiveExecutionClient):
 
         # Map asset (token id) -> size (shares)
         size_by_asset: dict[str, float] = {}
+
         for p in positions:
             instrument_id = InstrumentId.from_str(
                 p.get("conditionId", "") + "-" + str(p.get("asset", "")) + ".POLYMARKET",
@@ -779,35 +783,6 @@ class PolymarketExecutionClient(LiveExecutionClient):
             size = size_by_asset.get(instrument_id, 0.0)
             # Gamma API returns size as decimal float (e.g., 1.5 shares)
             quantities[instrument_id] = Quantity(float(size), precision=USDC_POS.precision)
-
-        return quantities
-
-    async def _fetch_quantities_from_clob_api(
-        self,
-        instrument_ids: list[InstrumentId],
-    ) -> dict[InstrumentId, Quantity]:
-        """
-        Fetch position quantities using CLOB API (individual queries).
-        """
-        quantities: dict[InstrumentId, Quantity] = {}
-
-        for instrument_id in instrument_ids:
-            self._log.debug(f"Requesting position for {instrument_id} from CLOB API")
-            token_id = str(get_polymarket_token_id(instrument_id))
-
-            params = BalanceAllowanceParams(
-                asset_type=AssetType.CONDITIONAL,
-                token_id=token_id,
-                signature_type=self._config.signature_type,
-            )
-            response: dict[str, Any] = await asyncio.to_thread(
-                self._http_client.get_balance_allowance,
-                params,
-            )
-            quantities[instrument_id] = Quantity.from_raw(
-                usdce_from_units(int(response["balance"])).raw,
-                precision=USDC_POS.precision,
-            )
 
         return quantities
 
@@ -946,6 +921,7 @@ class PolymarketExecutionClient(LiveExecutionClient):
 
         # Filter orders that are actually open
         valid_cancels: list[CancelOrder] = []
+
         for cancel in command.cancels:
             if cancel.client_order_id in open_order_ids:
                 valid_cancels.append(cancel)
@@ -959,6 +935,7 @@ class PolymarketExecutionClient(LiveExecutionClient):
         retry_manager = await self._retry_manager_pool.acquire()
         try:
             order_ids = []
+
             for cancel in valid_cancels:
                 order = self._cache.order(cancel.client_order_id)
                 if order and order.venue_order_id:
@@ -1076,6 +1053,7 @@ class PolymarketExecutionClient(LiveExecutionClient):
                     f"Cancel all result: {len(canceled)} canceled, "
                     f"{len(not_canceled)} not canceled",
                 )
+
                 for order_id, reason in not_canceled.items():
                     self._log.warning(f"Order {order_id} not canceled: {reason}")
         finally:
@@ -1136,6 +1114,7 @@ class PolymarketExecutionClient(LiveExecutionClient):
                     f"Cancel market orders result: {len(canceled)} canceled, "
                     f"{len(not_canceled)} not canceled",
                 )
+
                 for order_id, reason in not_canceled.items():
                     self._log.warning(f"Order {order_id} not canceled: {reason}")
         finally:
@@ -1265,6 +1244,7 @@ class PolymarketExecutionClient(LiveExecutionClient):
 
         # Validate all orders before processing
         valid_orders = []
+
         for order in orders:
             denial_reason = self._validate_order_for_batch(order)
             if denial_reason:

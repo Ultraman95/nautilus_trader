@@ -91,6 +91,16 @@ pub const LIMIT_ORDER_TYPES: &[OrderType] = &[
     OrderType::TrailingStopLimit,
 ];
 
+/// Order types that support the TRIGGERED order status.
+///
+/// Market-style stops (StopMarket, MarketIfTouched, TrailingStopMarket) execute
+/// immediately on trigger and have no intermediate TRIGGERED state.
+pub const TRIGGERABLE_ORDER_TYPES: &[OrderType] = &[
+    OrderType::StopLimit,
+    OrderType::TrailingStopLimit,
+    OrderType::LimitIfTouched,
+];
+
 /// Order statuses for locally active orders (pre-submission to venue).
 pub const LOCAL_ACTIVE_ORDER_STATUSES: &[OrderStatus] = &[
     OrderStatus::Initialized,
@@ -240,6 +250,7 @@ impl OrderStatus {
             (Self::PendingUpdate, OrderEventAny::PendingUpdate(_)) => Self::PendingUpdate,  // Allow multiple requests
             (Self::PendingUpdate, OrderEventAny::PendingCancel(_)) => Self::PendingCancel,
             (Self::PendingUpdate, OrderEventAny::ModifyRejected(_)) => Self::PendingUpdate,  // Handled by modify_rejected to restore previous_status
+            (Self::PendingUpdate, OrderEventAny::Updated(_)) => Self::PendingUpdate,  // Handled by updated to restore previous_status
             (Self::PendingUpdate, OrderEventAny::Filled(_)) => Self::Filled,
             (Self::PendingCancel, OrderEventAny::Rejected(_)) => Self::Rejected,
             (Self::PendingCancel, OrderEventAny::PendingCancel(_)) => Self::PendingCancel,  // Allow multiple requests
@@ -703,6 +714,12 @@ impl OrderCore {
             return Err(OrderError::DuplicateFill(fill.trade_id));
         }
 
+        if matches!(event, OrderEventAny::Triggered(_))
+            && !TRIGGERABLE_ORDER_TYPES.contains(&self.order_type)
+        {
+            return Err(OrderError::InvalidOrderEvent);
+        }
+
         let new_status = self.status.transition(&event)?;
         self.status = new_status;
 
@@ -787,6 +804,12 @@ impl OrderCore {
     }
 
     fn updated(&mut self, event: &OrderUpdated) {
+        if self.status == OrderStatus::PendingUpdate
+            && let Some(previous) = self.previous_status
+        {
+            self.status = previous;
+        }
+
         if let Some(venue_order_id) = &event.venue_order_id
             && (self.venue_order_id.is_none()
                 || venue_order_id != self.venue_order_id.as_ref().unwrap())
@@ -944,14 +967,17 @@ mod tests {
 
     use super::*;
     use crate::{
-        enums::{OrderSide, OrderStatus, PositionSide},
+        enums::{OrderSide, OrderStatus, PositionSide, TriggerType},
         events::order::{
             accepted::OrderAcceptedBuilder, canceled::OrderCanceledBuilder,
             denied::OrderDeniedBuilder, filled::OrderFilledBuilder,
-            initialized::OrderInitializedBuilder, submitted::OrderSubmittedBuilder,
-            triggered::OrderTriggeredBuilder, updated::OrderUpdatedBuilder,
+            initialized::OrderInitializedBuilder, pending_update::OrderPendingUpdateBuilder,
+            submitted::OrderSubmittedBuilder, triggered::OrderTriggeredBuilder,
+            updated::OrderUpdatedBuilder,
         },
-        orders::MarketOrder,
+        identifiers::InstrumentId,
+        orders::{MarketOrder, builder::OrderTestBuilder},
+        types::{Price, Quantity},
     };
 
     // TODO: WIP
@@ -1553,6 +1579,37 @@ mod tests {
     }
 
     #[rstest]
+    fn test_pending_update_order_restores_status_on_updated() {
+        let init = OrderInitializedBuilder::default()
+            .quantity(Quantity::from(100_000))
+            .build()
+            .unwrap();
+        let submitted = OrderSubmittedBuilder::default().build().unwrap();
+        let accepted = OrderAcceptedBuilder::default().build().unwrap();
+        let pending_update = OrderPendingUpdateBuilder::default().build().unwrap();
+        let updated = OrderUpdatedBuilder::default()
+            .quantity(Quantity::from(50_000))
+            .build()
+            .unwrap();
+
+        let mut order: MarketOrder = init.into();
+        order.apply(OrderEventAny::Submitted(submitted)).unwrap();
+        order.apply(OrderEventAny::Accepted(accepted)).unwrap();
+
+        assert_eq!(order.status(), OrderStatus::Accepted);
+
+        order
+            .apply(OrderEventAny::PendingUpdate(pending_update))
+            .unwrap();
+        assert_eq!(order.status(), OrderStatus::PendingUpdate);
+
+        order.apply(OrderEventAny::Updated(updated)).unwrap();
+
+        assert_eq!(order.status(), OrderStatus::Accepted);
+        assert_eq!(order.quantity(), Quantity::from(50_000));
+    }
+
+    #[rstest]
     fn test_partially_filled_order_can_be_updated() {
         // Test that a partially filled order can receive an Updated event
         // and remain in PartiallyFilled status
@@ -1590,10 +1647,7 @@ mod tests {
     fn test_triggered_order_can_be_updated() {
         // Test that a triggered order can receive an Updated event
         // and remain in Triggered status
-        let init = OrderInitializedBuilder::default()
-            .quantity(Quantity::from(100_000))
-            .build()
-            .unwrap();
+        let instrument_id = InstrumentId::from("ETHUSDT-LINEAR.BYBIT");
         let submitted = OrderSubmittedBuilder::default().build().unwrap();
         let accepted = OrderAcceptedBuilder::default().build().unwrap();
         let triggered = OrderTriggeredBuilder::default().build().unwrap();
@@ -1602,7 +1656,13 @@ mod tests {
             .build()
             .unwrap();
 
-        let mut order: MarketOrder = init.into();
+        let mut order = OrderTestBuilder::new(OrderType::StopLimit)
+            .instrument_id(instrument_id)
+            .quantity(Quantity::from(100_000))
+            .price(Price::from("0.99500"))
+            .trigger_price(Price::from("1.00000"))
+            .trigger_type(TriggerType::LastPrice)
+            .build();
         order.apply(OrderEventAny::Submitted(submitted)).unwrap();
         order.apply(OrderEventAny::Accepted(accepted)).unwrap();
         order.apply(OrderEventAny::Triggered(triggered)).unwrap();
@@ -1666,5 +1726,78 @@ mod tests {
 
         assert!(!order.is_quote_quantity());
         assert_eq!(order.quantity(), Quantity::new(8.0, 6));
+    }
+
+    #[rstest]
+    fn test_canceled_then_partial_fill_then_canceled() {
+        let mut order: MarketOrder = OrderInitializedBuilder::default().build().unwrap().into();
+        let submitted = OrderSubmittedBuilder::default().build().unwrap();
+        let accepted = OrderAcceptedBuilder::default().build().unwrap();
+        let canceled1 = OrderCanceledBuilder::default().build().unwrap();
+        let fill = OrderFilledBuilder::default()
+            .last_qty(Quantity::from(50_000))
+            .trade_id(TradeId::from("FILL-1"))
+            .build()
+            .unwrap();
+        let canceled2 = OrderCanceledBuilder::default().build().unwrap();
+
+        order.apply(OrderEventAny::Submitted(submitted)).unwrap();
+        order.apply(OrderEventAny::Accepted(accepted)).unwrap();
+        order.apply(OrderEventAny::Canceled(canceled1)).unwrap();
+        assert_eq!(order.status(), OrderStatus::Canceled);
+        assert!(order.is_closed());
+
+        // Fill arrives after cancel (real-world race condition)
+        order.apply(OrderEventAny::Filled(fill)).unwrap();
+        assert_eq!(order.status(), OrderStatus::PartiallyFilled);
+        assert_eq!(order.filled_qty(), Quantity::from(50_000));
+        assert!(order.is_open());
+
+        // Re-emitted cancel restores terminal state
+        order.apply(OrderEventAny::Canceled(canceled2)).unwrap();
+        assert_eq!(order.status(), OrderStatus::Canceled);
+        assert!(order.is_closed());
+    }
+
+    #[rstest]
+    fn test_apply_triggered_to_stop_market_order_returns_error() {
+        let instrument_id = InstrumentId::from("ETHUSDT-LINEAR.BYBIT");
+        let submitted = OrderSubmittedBuilder::default().build().unwrap();
+        let accepted = OrderAcceptedBuilder::default().build().unwrap();
+        let triggered = OrderTriggeredBuilder::default().build().unwrap();
+
+        let mut order = OrderTestBuilder::new(OrderType::StopMarket)
+            .instrument_id(instrument_id)
+            .quantity(Quantity::from(1))
+            .trigger_price(Price::from("1.00000"))
+            .trigger_type(TriggerType::LastPrice)
+            .build();
+        order.apply(OrderEventAny::Submitted(submitted)).unwrap();
+        order.apply(OrderEventAny::Accepted(accepted)).unwrap();
+
+        let result = order.apply(OrderEventAny::Triggered(triggered));
+        assert!(result.is_err());
+        assert_eq!(order.status(), OrderStatus::Accepted);
+    }
+
+    #[rstest]
+    fn test_apply_triggered_to_stop_limit_order_succeeds() {
+        let instrument_id = InstrumentId::from("ETHUSDT-LINEAR.BYBIT");
+        let submitted = OrderSubmittedBuilder::default().build().unwrap();
+        let accepted = OrderAcceptedBuilder::default().build().unwrap();
+        let triggered = OrderTriggeredBuilder::default().build().unwrap();
+
+        let mut order = OrderTestBuilder::new(OrderType::StopLimit)
+            .instrument_id(instrument_id)
+            .quantity(Quantity::from(1))
+            .price(Price::from("0.99500"))
+            .trigger_price(Price::from("1.00000"))
+            .trigger_type(TriggerType::LastPrice)
+            .build();
+        order.apply(OrderEventAny::Submitted(submitted)).unwrap();
+        order.apply(OrderEventAny::Accepted(accepted)).unwrap();
+        order.apply(OrderEventAny::Triggered(triggered)).unwrap();
+
+        assert_eq!(order.status(), OrderStatus::Triggered);
     }
 }

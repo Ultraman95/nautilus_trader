@@ -70,8 +70,8 @@ pub struct NautilusKernel {
     pub exec_engine: Rc<RefCell<ExecutionEngine>>,
     /// The order emulator for handling emulated orders.
     pub order_emulator: OrderEmulatorAdapter,
-    /// The trader component.
-    pub trader: Trader,
+    /// The trader component (shared for [`Controller`](crate::controller::Controller) access).
+    pub trader: Rc<RefCell<Trader>>,
     /// The UNIX timestamp (nanoseconds) when the kernel was created.
     pub ts_created: UnixNanos,
     /// The UNIX timestamp (nanoseconds) when the kernel was last started.
@@ -149,14 +149,14 @@ impl NautilusKernel {
         RiskEngine::register_msgbus_handlers(&risk_engine);
         ExecutionEngine::register_msgbus_handlers(&exec_engine);
 
-        let trader = Trader::new(
+        let trader = Rc::new(RefCell::new(Trader::new(
             config.trader_id(),
             instance_id,
             config.environment(),
             clock.clone(),
             cache.clone(),
             portfolio.clone(),
-        );
+        )));
 
         let ts_created = clock.borrow().timestamp_ns();
 
@@ -370,9 +370,9 @@ impl NautilusKernel {
         &self.exec_engine
     }
 
-    /// Returns the kernel's trader.
+    /// Returns the kernel's trader (shared reference).
     #[must_use]
-    pub const fn trader(&self) -> &Trader {
+    pub fn trader(&self) -> &Rc<RefCell<Trader>> {
         &self.trader
     }
 
@@ -382,7 +382,7 @@ impl NautilusKernel {
         self.start_engines();
 
         log::info!("Initializing trader");
-        if let Err(e) = self.trader.initialize() {
+        if let Err(e) = self.trader.borrow_mut().initialize() {
             log::error!("Error initializing trader: {e:?}");
             return;
         }
@@ -408,7 +408,7 @@ impl NautilusKernel {
     /// This should be called after clients are connected and instruments are cached.
     pub fn start_trader(&mut self) {
         log::info!("Starting trader...");
-        if let Err(e) = self.trader.start() {
+        if let Err(e) = self.trader.borrow_mut().start() {
             log::error!("Error starting trader: {e:?}");
         }
         log::info!("Trader started");
@@ -420,13 +420,13 @@ impl NautilusKernel {
     /// which may trigger residual events such as order cancellations. The caller should
     /// continue processing events after calling this method to handle these residual events.
     pub fn stop_trader(&mut self) {
-        if !self.trader.is_running() {
+        if !self.trader.borrow().is_running() {
             return;
         }
 
         log::info!("Stopping trader...");
 
-        if let Err(e) = self.trader.stop() {
+        if let Err(e) = self.trader.borrow_mut().stop() {
             log::error!("Error stopping trader: {e}");
         }
     }
@@ -452,7 +452,7 @@ impl NautilusKernel {
     pub fn reset(&mut self) {
         log::info!("Resetting");
 
-        if let Err(e) = self.trader.reset() {
+        if let Err(e) = self.trader.borrow_mut().reset() {
             log::error!("Error resetting trader: {e:?}");
         }
 
@@ -470,7 +470,7 @@ impl NautilusKernel {
     pub fn dispose(&mut self) {
         log::info!("Disposing");
 
-        if let Err(e) = self.trader.dispose() {
+        if let Err(e) = self.trader.borrow_mut().dispose() {
             log::error!("Error disposing trader: {e:?}");
         }
 
@@ -551,13 +551,23 @@ impl NautilusKernel {
         }
     }
 
-    /// Connects all engine clients.
+    /// Connects data engine clients.
     ///
-    /// Connection failures are logged but do not prevent the node from running.
+    /// Data clients are connected first so that instruments are published
+    /// and can be drained into the cache before execution clients connect.
     #[allow(clippy::await_holding_refcell_ref)] // Single-threaded runtime, intentional design
-    pub async fn connect_clients(&mut self) {
-        log::info!("Connecting clients...");
+    pub async fn connect_data_clients(&mut self) {
+        log::info!("Connecting data clients...");
         self.data_engine.borrow_mut().connect().await;
+    }
+
+    /// Connects execution engine clients.
+    ///
+    /// Must be called after data clients are connected and instrument events
+    /// have been drained into the cache, so execution clients can load instruments.
+    #[allow(clippy::await_holding_refcell_ref)] // Single-threaded runtime, intentional design
+    pub async fn connect_exec_clients(&mut self) {
+        log::info!("Connecting execution clients...");
         self.exec_engine.borrow_mut().connect().await;
     }
 

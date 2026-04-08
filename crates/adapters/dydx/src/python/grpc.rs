@@ -19,13 +19,16 @@
 
 use std::sync::Arc;
 
-use nautilus_core::python::{IntoPyObjectNautilusExt, to_pyruntime_err};
+use nautilus_core::{
+    hex,
+    python::{IntoPyObjectNautilusExt, to_pyruntime_err},
+};
 use pyo3::prelude::*;
 
 use crate::grpc::DydxGrpcClient;
 
 #[pyclass(name = "DydxGrpcClient", from_py_object)]
-#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.adapters.dydx")]
+#[pyo3_stub_gen::derive::gen_stub_pyclass(module = "nautilus_trader.dydx")]
 #[derive(Debug, Clone)]
 pub struct PyDydxGrpcClient {
     pub(crate) inner: Arc<DydxGrpcClient>,

@@ -3497,6 +3497,91 @@ class SyntheticInstrument:
     def calculate(self, inputs: list[float]) -> Price: ...
     def calculate_from_map(self, inputs: dict[str, float]) -> Price: ...
 
+class TokenizedAsset:
+    def __init__(
+        self,
+        instrument_id: InstrumentId,
+        raw_symbol: Symbol,
+        asset_class: AssetClass,
+        base_currency: Currency,
+        quote_currency: Currency,
+        price_precision: int,
+        size_precision: int,
+        price_increment: Price,
+        size_increment: Quantity,
+        ts_event: int,
+        ts_init: int,
+        isin: str | None = None,
+        multiplier: Quantity | None = None,
+        lot_size: Quantity | None = None,
+        max_quantity: Quantity | None = None,
+        min_quantity: Quantity | None = None,
+        max_notional: Money | None = None,
+        min_notional: Money | None = None,
+        max_price: Price | None = None,
+        min_price: Price | None = None,
+        margin_init: Decimal | None = None,
+        margin_maint: Decimal | None = None,
+        maker_fee: Decimal | None = None,
+        taker_fee: Decimal | None = None,
+        info: dict[str, Any] | None = None,
+    ) -> None: ...
+    @property
+    def type_name(self) -> str: ...
+    @property
+    def id(self) -> InstrumentId: ...
+    @property
+    def raw_symbol(self) -> Symbol: ...
+    @property
+    def asset_class(self) -> AssetClass: ...
+    @property
+    def base_currency(self) -> Currency: ...
+    @property
+    def quote_currency(self) -> Currency: ...
+    @property
+    def isin(self) -> str | None: ...
+    @property
+    def price_precision(self) -> int: ...
+    @property
+    def size_precision(self) -> int: ...
+    @property
+    def price_increment(self) -> Price: ...
+    @property
+    def size_increment(self) -> Quantity: ...
+    @property
+    def multiplier(self) -> Quantity: ...
+    @property
+    def lot_size(self) -> Quantity | None: ...
+    @property
+    def max_quantity(self) -> Quantity | None: ...
+    @property
+    def min_quantity(self) -> Quantity | None: ...
+    @property
+    def max_notional(self) -> Money | None: ...
+    @property
+    def min_notional(self) -> Money | None: ...
+    @property
+    def max_price(self) -> Price | None: ...
+    @property
+    def min_price(self) -> Price | None: ...
+    @property
+    def margin_init(self) -> Decimal: ...
+    @property
+    def margin_maint(self) -> Decimal: ...
+    @property
+    def maker_fee(self) -> Decimal: ...
+    @property
+    def taker_fee(self) -> Decimal: ...
+    @property
+    def info(self) -> dict[str, Any]: ...
+    @property
+    def ts_event(self) -> int: ...
+    @property
+    def ts_init(self) -> int: ...
+    @classmethod
+    def from_dict(cls, values: dict[str, str]) -> TokenizedAsset: ...
+    def to_dict(self) -> dict[str, Any]: ...
+
 type Instrument = Union[
     BettingInstrument,
     BinaryOption,
@@ -3509,6 +3594,7 @@ type Instrument = Union[
     OptionContract,
     OptionSpread,
     PerpetualContract,
+    TokenizedAsset,
 ]
 
 # Events
@@ -4672,7 +4758,7 @@ class PostgresCacheDatabase:
     def update_order(self, order: object) -> None: ...
     def update_account(self, account: Account) -> None: ...
 
-class ParquetDataCatalogV2:
+class ParquetDataCatalog:
     def __init__(
         self,
         base_path: str,
@@ -4734,6 +4820,8 @@ class ParquetDataCatalogV2:
     def instruments(
         self,
         instrument_ids: list[str] | None = None,
+        start: int | None = None,
+        end: int | None = None,
     ) -> list[object]: ...
     def write_custom_data(
         self,
@@ -4897,7 +4985,7 @@ class ParquetDataCatalogV2:
         use_ts_event_for_ts_init: bool = False,
     ) -> None: ...
 
-class StreamingFeatherWriterV2:
+class StreamingFeatherWriter:
     def __init__(
         self,
         path: str,
@@ -5131,6 +5219,13 @@ class DataBackendSession:
     def add_file(
         self,
         data_type: NautilusDataType,
+        table_name: str,
+        file_path: str,
+        sql_query: str | None = None,
+    ) -> None: ...
+    def add_custom_file(
+        self,
+        type_name: str,
         table_name: str,
         file_path: str,
         sql_query: str | None = None,
@@ -6216,10 +6311,10 @@ class AxHttpClient:
         self,
         base_url: str | None = None,
         orders_base_url: str | None = None,
-        timeout_secs: int | None = None,
-        max_retries: int | None = None,
-        retry_delay_ms: int | None = None,
-        retry_delay_max_ms: int | None = None,
+        timeout_secs: int = 60,
+        max_retries: int = 3,
+        retry_delay_ms: int = 1_000,
+        retry_delay_max_ms: int = 10_000,
         proxy_url: str | None = None,
     ) -> None: ...
     @staticmethod
@@ -6228,10 +6323,10 @@ class AxHttpClient:
         api_secret: str,
         base_url: str | None = None,
         orders_base_url: str | None = None,
-        timeout_secs: int | None = None,
-        max_retries: int | None = None,
-        retry_delay_ms: int | None = None,
-        retry_delay_max_ms: int | None = None,
+        timeout_secs: int = 60,
+        max_retries: int = 3,
+        retry_delay_ms: int = 1_000,
+        retry_delay_max_ms: int = 10_000,
         proxy_url: str | None = None,
     ) -> AxHttpClient: ...
     @property
@@ -6239,6 +6334,7 @@ class AxHttpClient:
     @property
     def api_key_masked(self) -> str: ...
     def cancel_all_requests(self) -> None: ...
+    async def cancel_all_orders(self, instrument_id: InstrumentId) -> None: ...
     def cache_instrument(self, instrument: Any) -> None: ...
     async def authenticate(
         self,
@@ -6309,10 +6405,10 @@ class AxMdWebSocketClient:
         self,
         url: str,
         auth_token: str,
-        heartbeat: int | None = None,
+        heartbeat: int = 30,
     ) -> None: ...
     @staticmethod
-    def without_auth(url: str, heartbeat: int | None = None) -> AxMdWebSocketClient: ...
+    def without_auth(url: str, heartbeat: int = 30) -> AxMdWebSocketClient: ...
     @property
     def url(self) -> str: ...
     def is_active(self) -> bool: ...
@@ -6327,10 +6423,14 @@ class AxMdWebSocketClient:
         self, instrument_id: InstrumentId, level: AxMarketDataLevel
     ) -> None: ...
     async def subscribe_bars(self, bar_type: BarType) -> None: ...
+    async def subscribe_mark_prices(self, instrument_id: InstrumentId) -> None: ...
+    async def subscribe_instrument_status(self, instrument_id: InstrumentId) -> None: ...
     async def unsubscribe_quotes(self, instrument_id: InstrumentId) -> None: ...
     async def unsubscribe_trades(self, instrument_id: InstrumentId) -> None: ...
     async def unsubscribe_book_deltas(self, instrument_id: InstrumentId) -> None: ...
     async def unsubscribe_bars(self, bar_type: BarType) -> None: ...
+    async def unsubscribe_mark_prices(self, instrument_id: InstrumentId) -> None: ...
+    async def unsubscribe_instrument_status(self, instrument_id: InstrumentId) -> None: ...
     async def disconnect(self) -> None: ...
     async def close(self) -> None: ...
 
@@ -6340,7 +6440,7 @@ class AxOrdersWebSocketClient:
         url: str,
         account_id: AccountId,
         trader_id: TraderId,
-        heartbeat: int | None = None,
+        heartbeat: int = 30,
     ) -> None: ...
     @property
     def url(self) -> str: ...
@@ -6755,11 +6855,11 @@ class BybitRawHttpClient:
         base_url: str | None = None,
         demo: bool = False,
         testnet: bool = False,
-        timeout_secs: int | None = None,
-        max_retries: int | None = None,
-        retry_delay_ms: int | None = None,
-        retry_delay_max_ms: int | None = None,
-        recv_window_ms: int | None = None,
+        timeout_secs: int = 60,
+        max_retries: int = 3,
+        retry_delay_ms: int = 1_000,
+        retry_delay_max_ms: int = 10_000,
+        recv_window_ms: int = 5_000,
         proxy_url: str | None = None,
     ) -> None: ...
     @property
@@ -6792,11 +6892,11 @@ class BybitHttpClient:
         base_url: str | None = None,
         demo: bool = False,
         testnet: bool = False,
-        timeout_secs: int | None = None,
-        max_retries: int | None = None,
-        retry_delay_ms: int | None = None,
-        retry_delay_max_ms: int | None = None,
-        recv_window_ms: int | None = None,
+        timeout_secs: int = 60,
+        max_retries: int = 3,
+        retry_delay_ms: int = 1_000,
+        retry_delay_max_ms: int = 10_000,
+        recv_window_ms: int = 5_000,
         proxy_url: str | None = None,
     ) -> None: ...
     @property
@@ -6971,7 +7071,7 @@ class BybitWebSocketClient:
         product_type: BybitProductType,
         environment: BybitEnvironment,
         url: str | None = None,
-        heartbeat: int | None = None,
+        heartbeat: int = 20,
     ) -> BybitWebSocketClient: ...
     @staticmethod
     def new_private(
@@ -6979,7 +7079,7 @@ class BybitWebSocketClient:
         api_key: str | None = None,
         api_secret: str | None = None,
         url: str | None = None,
-        heartbeat: int | None = None,
+        heartbeat: int = 20,
     ) -> BybitWebSocketClient: ...
     @staticmethod
     def new_trade(
@@ -6987,7 +7087,7 @@ class BybitWebSocketClient:
         api_key: str | None = None,
         api_secret: str | None = None,
         url: str | None = None,
-        heartbeat: int | None = None,
+        heartbeat: int = 20,
     ) -> BybitWebSocketClient: ...
     @property
     def api_key_masked(self) -> str | None: ...
@@ -7033,6 +7133,7 @@ class BybitWebSocketClient:
         time_in_force: TimeInForce | None = None,
         price: Price | None = None,
         trigger_price: Price | None = None,
+        trigger_type: TriggerType | None = None,
         post_only: bool | None = None,
         reduce_only: bool | None = None,
         is_leverage: bool = False,
@@ -7087,9 +7188,12 @@ class BybitWebSocketClient:
         time_in_force: TimeInForce | None = None,
         price: Price | None = None,
         trigger_price: Price | None = None,
+        trigger_type: TriggerType | None = None,
         post_only: bool | None = None,
         reduce_only: bool | None = None,
         is_leverage: bool = False,
+        take_profit: Price | None = None,
+        stop_loss: Price | None = None,
     ) -> BybitWsPlaceOrderParams: ...
     def build_amend_order_params(
         self,
@@ -7135,6 +7239,8 @@ class BybitWsPlaceOrderParams:
     tp_order_type: str | None
     sl_limit_price: str | None
     tp_limit_price: str | None
+    order_iv: str | None
+    mmp: bool | None
 
 class BybitWsAmendOrderParams:
     category: BybitProductType
@@ -7148,6 +7254,7 @@ class BybitWsAmendOrderParams:
     stop_loss: str | None
     tp_trigger_by: str | None
     sl_trigger_by: str | None
+    order_iv: str | None
 
 class BybitWsCancelOrderParams:
     category: BybitProductType
@@ -7425,7 +7532,7 @@ class DatabentoHistoricalClient:
         use_exchange_as_venue: bool,
     ) -> None: ...
     @property
-    def key(self) -> str: ...
+    def api_key(self) -> str: ...
     async def get_dataset_range(self, dataset: str) -> dict[str, str]: ...
     async def get_range_instruments(
         self,
@@ -7516,8 +7623,6 @@ class DatabentoLiveClient:
         reconnect_timeout_mins: int | None = None,
     ) -> None: ...
     @property
-    def key(self) -> str: ...
-    @property
     def dataset(self) -> str: ...
     def is_running(self) -> bool: ...
     def is_closed(self) -> bool: ...
@@ -7545,10 +7650,10 @@ class DeribitHttpClient:
         api_secret: str | None = None,
         base_url: str | None = None,
         is_testnet: bool = False,
-        timeout_secs: int | None = None,
-        max_retries: int | None = None,
-        retry_delay_ms: int | None = None,
-        retry_delay_max_ms: int | None = None,
+        timeout_secs: int = 10,
+        max_retries: int = 3,
+        retry_delay_ms: int = 1_000,
+        retry_delay_max_ms: int = 10_000,
         proxy_url: str | None = None,
     ) -> None: ...
     @property
@@ -7609,7 +7714,7 @@ class DeribitWebSocketClient:
         url: str | None = None,
         api_key: str | None = None,
         api_secret: str | None = None,
-        heartbeat_interval: int | None = None,
+        heartbeat_interval: int = 30,
         is_testnet: bool = False,
     ) -> None: ...
     @staticmethod
@@ -7742,7 +7847,7 @@ class DeribitWebSocketClient:
         post_only: bool = False,
         reduce_only: bool = False,
         trigger_price: Price | None = None,
-        trigger: str | None = None,
+        trigger_type: TriggerType | None = None,
     ) -> None: ...
     async def modify_order(
         self,
@@ -7991,10 +8096,10 @@ class OKXHttpClient:
         api_secret: str | None = None,
         api_passphrase: str | None = None,
         base_url: str | None = None,
-        timeout_secs: int | None = None,
-        max_retries: int | None = None,
-        retry_delay_ms: int | None = None,
-        retry_delay_max_ms: int | None = None,
+        timeout_secs: int = 60,
+        max_retries: int = 3,
+        retry_delay_ms: int = 1_000,
+        retry_delay_max_ms: int = 10_000,
         is_demo: bool = False,
         proxy_url: str | None = None,
     ) -> None: ...
@@ -8109,6 +8214,8 @@ class OKXHttpClient:
         quote_quantity: bool | None = None,
         position_side: PositionSide | None = None,
         attach_algo_ords: list[dict[str, str]] | None = None,
+        px_usd: str | None = None,
+        px_vol: str | None = None,
     ) -> Any: ...
     async def place_algo_order(
         self,
@@ -8265,6 +8372,8 @@ class OKXWebSocketClient:
         quote_quantity: bool | None = None,
         position_side: PositionSide | None = None,
         attach_algo_ords: list[dict[str, str]] | None = None,
+        px_usd: str | None = None,
+        px_vol: str | None = None,
     ) -> None: ...
     async def cancel_order(
         self,
@@ -8283,6 +8392,8 @@ class OKXWebSocketClient:
         venue_order_id: VenueOrderId | None = None,
         price: Price | None = None,
         quantity: Quantity | None = None,
+        new_px_usd: str | None = None,
+        new_px_vol: str | None = None,
     ) -> None: ...
     async def batch_submit_orders(
         self,
@@ -8387,13 +8498,13 @@ class BitmexHttpClient:
         api_secret: str | None = None,
         base_url: str | None = None,
         testnet: bool = False,
-        timeout_secs: int | None = None,
-        max_retries: int | None = None,
-        retry_delay_ms: int | None = None,
-        retry_delay_max_ms: int | None = None,
-        recv_window_ms: int | None = None,
-        max_requests_per_second: int | None = None,
-        max_requests_per_minute: int | None = None,
+        timeout_secs: int = 60,
+        max_retries: int = 3,
+        retry_delay_ms: int = 1_000,
+        retry_delay_max_ms: int = 10_000,
+        recv_window_ms: int = 10_000,
+        max_requests_per_second: int = 10,
+        max_requests_per_minute: int = 120,
         proxy_url: str | None = None,
     ) -> None: ...
     @staticmethod
@@ -8514,7 +8625,7 @@ class BitmexWebSocketClient:
         api_key: str | None = None,
         api_secret: str | None = None,
         account_id: AccountId | None = None,
-        heartbeat: int | None = None,
+        heartbeat: int = 5,
         testnet: bool = False,
     ) -> None: ...
     @property
@@ -8675,7 +8786,6 @@ HYPERLIQUID_POST_ONLY_WOULD_MATCH: Final[str]
 
 def hyperliquid_product_type_from_symbol(symbol: str) -> HyperliquidProductType: ...
 def hyperliquid_cloid_from_client_order_id(client_order_id: ClientOrderId) -> str: ...
-def revoke_hyperliquid_builder_fee(non_interactive: bool = False) -> bool: ...
 def get_hyperliquid_http_base_url(is_testnet: bool = False) -> str: ...
 def get_hyperliquid_ws_url(is_testnet: bool = False) -> str: ...
 
@@ -8719,7 +8829,7 @@ class HyperliquidHttpClient:
         vault_address: str | None = None,
         account_address: str | None = None,
         is_testnet: bool = False,
-        timeout_secs: int | None = None,
+        timeout_secs: int = 60,
         proxy_url: str | None = None,
         normalize_prices: bool = True,
     ) -> None: ...
@@ -8730,7 +8840,7 @@ class HyperliquidHttpClient:
         private_key: str,
         vault_address: str | None = None,
         is_testnet: bool = False,
-        timeout_secs: int | None = None,
+        timeout_secs: int = 60,
         proxy_url: str | None = None,
     ) -> HyperliquidHttpClient: ...
     def cache_instrument(self, instrument: Instrument) -> None: ...
@@ -8743,8 +8853,9 @@ class HyperliquidHttpClient:
     async def info_user_fees(self) -> str: ...
     async def load_instrument_definitions(
         self,
-        include_perp: bool = True,
         include_spot: bool = True,
+        include_perps: bool = True,
+        include_perps_hip3: bool = False,
     ) -> list[Instrument]: ...
     async def request_order_status_reports(
         self,
@@ -8886,12 +8997,12 @@ class KrakenSpotHttpClient:
         api_secret: str | None = None,
         base_url: str | None = None,
         demo: bool = False,
-        timeout_secs: int | None = None,
+        timeout_secs: int = 60,
         max_retries: int | None = None,
         retry_delay_ms: int | None = None,
         retry_delay_max_ms: int | None = None,
         proxy_url: str | None = None,
-        max_requests_per_second: int | None = None,
+        max_requests_per_second: int = 5,
     ) -> None: ...
     @property
     def base_url(self) -> str: ...
@@ -8987,12 +9098,12 @@ class KrakenFuturesHttpClient:
         api_secret: str | None = None,
         base_url: str | None = None,
         demo: bool = False,
-        timeout_secs: int | None = None,
+        timeout_secs: int = 60,
         max_retries: int | None = None,
         retry_delay_ms: int | None = None,
         retry_delay_max_ms: int | None = None,
         proxy_url: str | None = None,
-        max_requests_per_second: int | None = None,
+        max_requests_per_second: int = 5,
     ) -> None: ...
     @property
     def base_url(self) -> str: ...
@@ -9157,7 +9268,7 @@ class KrakenFuturesWebSocketClient:
         self,
         environment: KrakenEnvironment | None = None,
         base_url: str | None = None,
-        heartbeat_secs: int | None = None,
+        heartbeat_secs: int = 60,
         api_key: str | None = None,
         api_secret: str | None = None,
     ) -> None: ...
@@ -9417,7 +9528,11 @@ class GreeksData(Data):
     ): ...
     @classmethod
     def from_delta(
-        cls, instrument_id: InstrumentId, delta: float, ts_event: int = 0
+        cls,
+        instrument_id: InstrumentId,
+        delta: float,
+        multiplier: float,
+        ts_event: int = 0,
     ) -> GreeksData: ...
 
 class PortfolioGreeks(Data):

@@ -53,9 +53,9 @@ use nautilus_okx::{
         error::OKXHttpError,
         models::OKXAttachAlgoOrdRequest,
         query::{
-            GetAlgoOrdersParamsBuilder, GetInstrumentsParamsBuilder, GetOrderHistoryParams,
-            GetOrderListParams, GetOrderParamsBuilder, GetPositionTiersParamsBuilder,
-            GetPositionsParamsBuilder, GetTradeFeeParamsBuilder,
+            GetAlgoOrdersParamsBuilder, GetInstrumentsParamsBuilder, GetOptionSummaryParamsBuilder,
+            GetOrderHistoryParams, GetOrderListParams, GetOrderParamsBuilder,
+            GetPositionTiersParamsBuilder, GetPositionsParamsBuilder, GetTradeFeeParamsBuilder,
             GetTransactionDetailsParamsBuilder, SetPositionModeParamsBuilder,
         },
     },
@@ -71,6 +71,8 @@ struct TestServerState {
     last_pending_orders_query: Arc<tokio::sync::Mutex<Option<HashMap<String, String>>>>,
     last_order_history_query: Arc<tokio::sync::Mutex<Option<HashMap<String, String>>>>,
     last_order_detail_query: Arc<tokio::sync::Mutex<Option<HashMap<String, String>>>>,
+    option_summary_queries: Arc<tokio::sync::Mutex<Vec<HashMap<String, String>>>>,
+    option_summary_response: Arc<tokio::sync::Mutex<Option<Value>>>,
     algo_pending_queries: Arc<tokio::sync::Mutex<Vec<HashMap<String, String>>>>,
     algo_history_queries: Arc<tokio::sync::Mutex<Vec<HashMap<String, String>>>>,
     last_order_body: Arc<tokio::sync::Mutex<Option<Value>>>,
@@ -118,6 +120,10 @@ fn load_swap_instruments_any() -> Vec<InstrumentAny> {
     load_instruments_from("http_get_instruments_swap.json")
 }
 
+fn load_option_instruments_any() -> Vec<InstrumentAny> {
+    load_instruments_from("http_get_instruments_option.json")
+}
+
 fn load_instruments_from(filename: &str) -> Vec<InstrumentAny> {
     let payload = load_test_data(filename);
     let response: OKXResponse<OKXInstrument> = serde_json::from_value(payload).unwrap();
@@ -136,6 +142,7 @@ fn load_instruments_from(filename: &str) -> Vec<InstrumentAny> {
 fn create_router(state: Arc<TestServerState>) -> Router {
     let instruments_state = state.clone();
     let history_state = state.clone();
+    let option_summary_state = state.clone();
     let pending_state = state.clone();
     let order_history_state = state.clone();
     let order_detail_state = state.clone();
@@ -171,6 +178,19 @@ fn create_router(state: Arc<TestServerState>) -> Router {
         .route(
             "/api/v5/public/mark-price",
             get(|| async { Json(load_test_data("http_get_mark_price.json")) }),
+        )
+        .route(
+            "/api/v5/public/opt-summary",
+            get(move |Query(params): Query<HashMap<String, String>>| {
+                let state = option_summary_state.clone();
+                async move {
+                    state.option_summary_queries.lock().await.push(params);
+                    let override_resp = state.option_summary_response.lock().await.clone();
+                    let data = override_resp
+                        .unwrap_or_else(|| load_test_data("http_get_option_summary.json"));
+                    Json(data).into_response()
+                }
+            }),
         )
         .route(
             "/api/v5/market/history-trades",
@@ -571,16 +591,8 @@ async fn test_http_get_instruments_returns_data() {
         .inst_type(OKXInstrumentType::Spot)
         .build()
         .unwrap();
-    let client = OKXRawHttpClient::new(
-        Some(base_url.clone()),
-        Some(60),
-        None,
-        None,
-        None,
-        false,
-        None,
-    )
-    .unwrap();
+    let client =
+        OKXRawHttpClient::new(Some(base_url.clone()), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let instruments = client.get_instruments(params).await.unwrap();
 
@@ -594,8 +606,7 @@ async fn test_http_get_balance_requires_credentials() {
     let addr = start_test_server(Arc::new(TestServerState::default())).await;
     let base_url = format!("http://{addr}");
 
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let result = client.get_balance().await;
 
@@ -616,10 +627,10 @@ async fn test_http_get_balance_with_credentials_succeeds() {
         "test_secret".to_string(),
         "passphrase".to_string(),
         base_url.clone(),
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -641,18 +652,11 @@ async fn test_http_get_instruments_handles_rate_limit_error() {
         .inst_type(OKXInstrumentType::Spot)
         .build()
         .unwrap();
-    let client = OKXRawHttpClient::new(
-        Some(base_url.clone()),
-        Some(60),
-        Some(0),
-        None,
-        None,
-        false,
-        None,
-    )
-    .unwrap();
+    let client =
+        OKXRawHttpClient::new(Some(base_url.clone()), 60, 0, 1000, 10_000, false, None).unwrap();
 
     let mut last_error = None;
+
     for _ in 0..5 {
         match client.get_instruments(params.clone()).await {
             Ok(_) => {}
@@ -675,8 +679,7 @@ async fn test_http_get_pending_orders_requires_credentials() {
     let addr = start_test_server(Arc::new(TestServerState::default())).await;
     let base_url = format!("http://{addr}");
 
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let params = GetOrderListParams {
         inst_type: Some(OKXInstrumentType::Swap),
@@ -706,10 +709,10 @@ async fn test_http_get_pending_orders_returns_live_orders() {
         "secret".to_string(),
         "pass".to_string(),
         base_url.clone(),
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -753,10 +756,10 @@ async fn test_http_get_order_history_applies_filters() {
         "secret".to_string(),
         "pass".to_string(),
         base_url.clone(),
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -796,10 +799,10 @@ async fn test_http_get_order_by_client_and_exchange_ids() {
         "secret".to_string(),
         "pass".to_string(),
         base_url.clone(),
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -829,8 +832,7 @@ async fn test_request_trades_pagination_parameters() {
     let addr = start_test_server(state.clone()).await;
     let base_url = format!("http://{addr}");
 
-    let client =
-        OKXHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     for instrument in load_instruments_any() {
         client.cache_instrument(instrument);
@@ -925,8 +927,7 @@ async fn test_request_trades_latest_mode() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     for instrument in load_instruments_any() {
         client.cache_instrument(instrument);
@@ -1027,8 +1028,7 @@ async fn test_request_trades_chronological_order() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     for instrument in load_instruments_any() {
         client.cache_instrument(instrument);
@@ -1095,6 +1095,7 @@ async fn test_request_trades_range_mode_pagination() {
 
                     let data = if let Some(after_id) = after_trade_id {
                         let mut trades = Vec::new();
+
                         for i in 0..100 {
                             let trade_id = after_id - i - 1;
                             if trade_id <= 0 {
@@ -1165,8 +1166,7 @@ async fn test_request_trades_range_mode_pagination() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     for instrument in load_instruments_any() {
         client.cache_instrument(instrument);
@@ -1234,6 +1234,7 @@ async fn test_request_bars_range_mode_pagination() {
 
                     let data = if let Some(a) = after {
                         let mut bars = Vec::new();
+
                         for i in 0..10 {
                             let ts = a - ((i + 1) * 60_000);
 
@@ -1277,6 +1278,7 @@ async fn test_request_bars_range_mode_pagination() {
 
                     let data = if let Some(a) = after {
                         let mut bars = Vec::new();
+
                         for i in 0..50 {
                             let ts = a - ((i + 1) * 60_000);
 
@@ -1323,8 +1325,7 @@ async fn test_request_bars_range_mode_pagination() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     for instrument in load_instruments_any() {
         client.cache_instrument(instrument);
@@ -1374,8 +1375,7 @@ async fn test_request_trades_multi_page_chronological_order() {
     let addr = start_test_server(state.clone()).await;
     let base_url = format!("http://{addr}");
 
-    let client =
-        OKXHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     for instrument in load_instruments_any() {
         client.cache_instrument(instrument);
@@ -1478,8 +1478,7 @@ async fn test_request_trades_overlapping_pages_chronological_order() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     for instrument in load_instruments_any() {
         client.cache_instrument(instrument);
@@ -1515,6 +1514,7 @@ async fn test_request_trades_overlapping_pages_chronological_order() {
 
     // Verify no duplicate trade IDs (should deduplicate overlapping trade ID 1008)
     let mut seen_ids = std::collections::HashSet::new();
+
     for trade in &trades {
         assert!(
             seen_ids.insert(trade.trade_id),
@@ -1586,8 +1586,7 @@ async fn test_request_trades_default_limit_with_end_only() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     for instrument in load_instruments_any() {
         client.cache_instrument(instrument);
@@ -1668,6 +1667,7 @@ async fn test_request_trades_historical_with_filtered_pages() {
                             vec![]
                         } else {
                             let mut trades = Vec::new();
+
                             for i in 0..100 {
                                 let trade_id = after_id - i - 1;
                                 if trade_id < 3102 {
@@ -1726,8 +1726,7 @@ async fn test_request_trades_historical_with_filtered_pages() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     for instrument in load_instruments_any() {
         client.cache_instrument(instrument);
@@ -1822,8 +1821,7 @@ async fn test_request_trades_multiple_trades_same_id() {
     });
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     for instrument in load_instruments_any() {
         client.cache_instrument(instrument);
@@ -1873,8 +1871,7 @@ async fn test_http_get_order_algo_pending_requires_credentials() {
     let addr = start_test_server(Arc::new(TestServerState::default())).await;
     let base_url = format!("http://{addr}");
 
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let params = GetAlgoOrdersParamsBuilder::default()
         .inst_type(OKXInstrumentType::Swap)
@@ -1904,10 +1901,10 @@ async fn test_http_get_order_algo_pending_returns_data() {
         "test_secret".to_string(),
         "test_passphrase".to_string(),
         base_url,
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -1935,10 +1932,10 @@ async fn test_http_get_order_algo_history_returns_data() {
         "test_secret".to_string(),
         "test_passphrase".to_string(),
         base_url,
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -1969,10 +1966,10 @@ async fn test_http_request_algo_order_status_report_parses_close_fraction_condit
         Some("test_secret".to_string()),
         Some("test_passphrase".to_string()),
         Some(base_url),
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2012,10 +2009,10 @@ async fn test_http_request_algo_order_status_report_queries_attached_oco_with_or
         Some("test_secret".to_string()),
         Some("test_passphrase".to_string()),
         Some(base_url),
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2061,10 +2058,10 @@ async fn test_http_request_order_status_reports_preserves_attached_tp_sl_child_i
         Some("test_secret".to_string()),
         Some("test_passphrase".to_string()),
         Some(base_url),
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2111,10 +2108,10 @@ async fn test_http_place_algo_order_with_close_fraction_uses_conditional_close_o
         Some("test_secret".to_string()),
         Some("test_passphrase".to_string()),
         Some(base_url),
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2177,10 +2174,10 @@ async fn test_http_place_order_with_attached_tp_sl_uses_single_oco_payload() {
         Some("test_secret".to_string()),
         Some("test_passphrase".to_string()),
         Some(base_url),
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2213,6 +2210,8 @@ async fn test_http_place_order_with_attached_tp_sl_uses_single_oco_payload() {
                 tp_ord_px: Some("-1".to_string()),
                 tp_trigger_px_type: Some(OKXTriggerType::Last),
             }]),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -2253,8 +2252,7 @@ async fn test_http_set_position_mode_requires_credentials() {
     let addr = start_test_server(Arc::new(TestServerState::default())).await;
     let base_url = format!("http://{addr}");
 
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let params = SetPositionModeParamsBuilder::default()
         .pos_mode(OKXPositionMode::LongShortMode)
@@ -2280,10 +2278,10 @@ async fn test_http_set_position_mode_returns_response() {
         "test_secret".to_string(),
         "test_passphrase".to_string(),
         base_url,
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2315,10 +2313,10 @@ async fn test_http_get_position_tiers_returns_data() {
         "test_secret".to_string(),
         "test_passphrase".to_string(),
         base_url,
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2336,8 +2334,7 @@ async fn test_http_get_trade_fee_requires_credentials() {
     let addr = start_test_server(Arc::new(TestServerState::default())).await;
     let base_url = format!("http://{addr}");
 
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let params = GetTradeFeeParamsBuilder::default()
         .inst_type(OKXInstrumentType::Spot)
@@ -2371,10 +2368,10 @@ async fn test_http_get_trade_fee_returns_data() {
         "test_secret".to_string(),
         "test_passphrase".to_string(),
         base_url,
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2392,8 +2389,7 @@ async fn test_http_get_positions_requires_credentials() {
     let addr = start_test_server(Arc::new(TestServerState::default())).await;
     let base_url = format!("http://{addr}");
 
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let params = GetPositionsParamsBuilder::default().build().unwrap();
 
@@ -2417,10 +2413,10 @@ async fn test_http_get_positions_returns_data() {
         "test_secret".to_string(),
         "test_passphrase".to_string(),
         base_url,
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2438,8 +2434,7 @@ async fn test_http_get_fills_requires_credentials() {
     let addr = start_test_server(Arc::new(TestServerState::default())).await;
     let base_url = format!("http://{addr}");
 
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let params = GetTransactionDetailsParamsBuilder::default()
         .build()
@@ -2467,10 +2462,10 @@ async fn test_http_get_fills_returns_data() {
         "test_secret".to_string(),
         "test_passphrase".to_string(),
         base_url,
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2488,8 +2483,7 @@ async fn test_http_get_fills_returns_data() {
 async fn test_http_network_error_invalid_port() {
     let base_url = "http://127.0.0.1:1".to_string();
 
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(1), Some(0), None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 1, 0, 1000, 10_000, false, None).unwrap();
 
     let params = GetInstrumentsParamsBuilder::default()
         .inst_type(OKXInstrumentType::Spot)
@@ -2534,8 +2528,7 @@ async fn test_http_okx_error_response() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let params = GetInstrumentsParamsBuilder::default()
         .inst_type(OKXInstrumentType::Spot)
@@ -2604,10 +2597,10 @@ async fn test_http_okx_error_falls_back_to_s_msg_on_http_200() {
         "test_secret".to_string(),
         "test_passphrase".to_string(),
         base_url,
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2681,10 +2674,10 @@ async fn test_http_okx_error_falls_back_to_s_msg_on_http_400() {
         "test_secret".to_string(),
         "test_passphrase".to_string(),
         base_url,
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2755,10 +2748,10 @@ async fn test_http_okx_error_falls_back_to_s_code_when_s_msg_empty() {
         "test_secret".to_string(),
         "test_passphrase".to_string(),
         base_url,
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -2802,8 +2795,7 @@ async fn test_http_malformed_json_response() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let params = GetInstrumentsParamsBuilder::default()
         .inst_type(OKXInstrumentType::Spot)
@@ -2848,8 +2840,7 @@ async fn test_http_500_internal_server_error() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let params = GetInstrumentsParamsBuilder::default()
         .inst_type(OKXInstrumentType::Spot)
@@ -2892,8 +2883,7 @@ async fn test_http_503_service_unavailable() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), Some(0), None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 0, 1000, 10_000, false, None).unwrap();
 
     let params = GetInstrumentsParamsBuilder::default()
         .inst_type(OKXInstrumentType::Spot)
@@ -2942,8 +2932,7 @@ async fn test_http_invalid_response_structure() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let params = GetInstrumentsParamsBuilder::default()
         .inst_type(OKXInstrumentType::Spot)
@@ -2995,10 +2984,10 @@ async fn test_http_rate_limit_error_different_code() {
         "test_secret".to_string(),
         "test_passphrase".to_string(),
         base_url,
-        Some(60),
-        Some(0),
-        None,
-        None,
+        60,
+        0,
+        1000,
+        10_000,
         false,
         None,
     )
@@ -3045,8 +3034,7 @@ async fn test_http_empty_response_data() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXRawHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     let params = GetInstrumentsParamsBuilder::default()
         .inst_type(OKXInstrumentType::Spot)
@@ -3084,8 +3072,7 @@ async fn test_request_book_snapshot() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     for instrument in load_swap_instruments_any() {
         client.cache_instrument(instrument);
@@ -3128,8 +3115,7 @@ async fn test_request_funding_rates() {
     wait_for_server(addr, "/api/v5/public/instruments").await;
 
     let base_url = format!("http://{addr}");
-    let client =
-        OKXHttpClient::new(Some(base_url), Some(60), None, None, None, false, None).unwrap();
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
 
     for instrument in load_swap_instruments_any() {
         client.cache_instrument(instrument);
@@ -3154,6 +3140,330 @@ async fn test_request_funding_rates() {
         rates[1].instrument_id,
         InstrumentId::from("BTC-USDT-SWAP.OKX")
     );
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_http_get_option_summary_returns_data() {
+    let state = Arc::new(TestServerState::default());
+    let addr = start_test_server(state.clone()).await;
+    let base_url = format!("http://{addr}");
+    let client = OKXRawHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
+
+    let params = GetOptionSummaryParamsBuilder::default()
+        .inst_family("BTC-USD")
+        .exp_time("241217")
+        .build()
+        .unwrap();
+    let summaries = client.get_option_summary(params).await.unwrap();
+
+    assert_eq!(summaries.len(), 4);
+    assert_eq!(summaries[0].inst_id, Ustr::from("BTC-USD-241217-92000-C"));
+
+    let queries = state.option_summary_queries.lock().await;
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].get("instFamily"), Some(&"BTC-USD".to_string()));
+    assert_eq!(queries[0].get("expTime"), Some(&"241217".to_string()));
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_request_forward_prices_for_single_instrument_uses_inst_family_and_exp_time() {
+    let state = Arc::new(TestServerState::default());
+    let addr = start_test_server(state.clone()).await;
+    let base_url = format!("http://{addr}");
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
+
+    for instrument in load_option_instruments_any() {
+        client.cache_instrument(instrument);
+    }
+
+    let instrument_id = InstrumentId::from("BTC-USD-241217-92000-C.OKX");
+    let forward_prices = client
+        .request_forward_prices("BTC", Some(instrument_id))
+        .await
+        .unwrap();
+
+    assert_eq!(forward_prices.len(), 1);
+    assert_eq!(forward_prices[0].instrument_id, instrument_id);
+    assert_eq!(forward_prices[0].forward_price.to_string(), "97000");
+    assert_eq!(
+        forward_prices[0].underlying_index.as_deref(),
+        Some("BTC-USD")
+    );
+
+    let queries = state.option_summary_queries.lock().await;
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].get("instFamily"), Some(&"BTC-USD".to_string()));
+    assert_eq!(queries[0].get("expTime"), Some(&"241217".to_string()));
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_request_forward_prices_bulk_deduplicates_by_expiry() {
+    let state = Arc::new(TestServerState::default());
+    let addr = start_test_server(state.clone()).await;
+    let base_url = format!("http://{addr}");
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
+
+    for instrument in load_option_instruments_any() {
+        client.cache_instrument(instrument);
+    }
+
+    let forward_prices = client.request_forward_prices("BTC", None).await.unwrap();
+
+    assert_eq!(forward_prices.len(), 1);
+    assert_eq!(
+        forward_prices[0].instrument_id,
+        InstrumentId::from("BTC-USD-241217-92000-C.OKX")
+    );
+    assert_eq!(forward_prices[0].forward_price.to_string(), "97000");
+
+    let queries = state.option_summary_queries.lock().await;
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].get("instFamily"), Some(&"BTC-USD".to_string()));
+    assert!(!queries[0].contains_key("expTime"));
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_request_forward_prices_errors_on_empty_cache() {
+    let state = Arc::new(TestServerState::default());
+    let addr = start_test_server(state.clone()).await;
+    let base_url = format!("http://{addr}");
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
+
+    let result = client.request_forward_prices("BTC", None).await;
+
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("No cached OKX option families"),
+        "unexpected error: {err}"
+    );
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_request_forward_prices_skips_zero_fwd_px() {
+    let response = json!({
+        "code": "0",
+        "msg": "",
+        "data": [
+            {
+                "instType": "OPTION",
+                "instId": "BTC-USD-241217-92000-C",
+                "uly": "BTC-USD",
+                "bidVol": "0.45",
+                "askVol": "0.46",
+                "markVol": "0.455",
+                "fwdPx": "0",
+                "ts": "1734166000000"
+            },
+            {
+                "instType": "OPTION",
+                "instId": "BTC-USD-241217-94000-C",
+                "uly": "BTC-USD",
+                "bidVol": "0.45",
+                "askVol": "0.46",
+                "markVol": "0.455",
+                "fwdPx": "97000",
+                "ts": "1734166000000"
+            }
+        ]
+    });
+    let state = Arc::new(TestServerState::default());
+    *state.option_summary_response.lock().await = Some(response);
+    let addr = start_test_server(state.clone()).await;
+    let base_url = format!("http://{addr}");
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
+
+    for instrument in load_option_instruments_any() {
+        client.cache_instrument(instrument);
+    }
+
+    let instrument_id = InstrumentId::from("BTC-USD-241217-94000-C.OKX");
+    let forward_prices = client
+        .request_forward_prices("BTC", Some(instrument_id))
+        .await
+        .unwrap();
+
+    assert_eq!(forward_prices.len(), 1);
+    assert_eq!(forward_prices[0].instrument_id, instrument_id);
+    assert_eq!(forward_prices[0].forward_price.to_string(), "97000");
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_request_forward_prices_skips_non_option_inst_type() {
+    let response = json!({
+        "code": "0",
+        "msg": "",
+        "data": [
+            {
+                "instType": "SWAP",
+                "instId": "BTC-USD-241217-92000-C",
+                "uly": "BTC-USD",
+                "bidVol": "0.45",
+                "askVol": "0.46",
+                "markVol": "0.455",
+                "fwdPx": "97000",
+                "ts": "1734166000000"
+            },
+            {
+                "instType": "OPTION",
+                "instId": "BTC-USD-241217-94000-C",
+                "uly": "BTC-USD",
+                "bidVol": "0.45",
+                "askVol": "0.46",
+                "markVol": "0.455",
+                "fwdPx": "97000",
+                "ts": "1734166000000"
+            }
+        ]
+    });
+    let state = Arc::new(TestServerState::default());
+    *state.option_summary_response.lock().await = Some(response);
+    let addr = start_test_server(state.clone()).await;
+    let base_url = format!("http://{addr}");
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
+
+    for instrument in load_option_instruments_any() {
+        client.cache_instrument(instrument);
+    }
+
+    let instrument_id = InstrumentId::from("BTC-USD-241217-94000-C.OKX");
+    let forward_prices = client
+        .request_forward_prices("BTC", Some(instrument_id))
+        .await
+        .unwrap();
+
+    assert_eq!(forward_prices.len(), 1);
+    assert_eq!(forward_prices[0].instrument_id, instrument_id);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_request_forward_prices_skips_invalid_fwd_px() {
+    let response = json!({
+        "code": "0",
+        "msg": "",
+        "data": [
+            {
+                "instType": "OPTION",
+                "instId": "BTC-USD-241217-92000-C",
+                "uly": "BTC-USD",
+                "bidVol": "0.45",
+                "askVol": "0.46",
+                "markVol": "0.455",
+                "fwdPx": "not_a_number",
+                "ts": "1734166000000"
+            },
+            {
+                "instType": "OPTION",
+                "instId": "BTC-USD-241217-94000-C",
+                "uly": "BTC-USD",
+                "bidVol": "0.45",
+                "askVol": "0.46",
+                "markVol": "0.455",
+                "fwdPx": "97000",
+                "ts": "1734166000000"
+            }
+        ]
+    });
+    let state = Arc::new(TestServerState::default());
+    *state.option_summary_response.lock().await = Some(response);
+    let addr = start_test_server(state.clone()).await;
+    let base_url = format!("http://{addr}");
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
+
+    for instrument in load_option_instruments_any() {
+        client.cache_instrument(instrument);
+    }
+
+    let instrument_id = InstrumentId::from("BTC-USD-241217-94000-C.OKX");
+    let forward_prices = client
+        .request_forward_prices("BTC", Some(instrument_id))
+        .await
+        .unwrap();
+
+    assert_eq!(forward_prices.len(), 1);
+    assert_eq!(forward_prices[0].instrument_id, instrument_id);
+    assert_eq!(forward_prices[0].forward_price.to_string(), "97000");
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_request_forward_prices_bulk_deduplicates_across_multiple_expiries() {
+    let response = json!({
+        "code": "0",
+        "msg": "",
+        "data": [
+            {
+                "instType": "OPTION",
+                "instId": "BTC-USD-241217-92000-C",
+                "uly": "BTC-USD",
+                "bidVol": "0.45",
+                "askVol": "0.46",
+                "markVol": "0.455",
+                "fwdPx": "97000",
+                "ts": "1734166000000"
+            },
+            {
+                "instType": "OPTION",
+                "instId": "BTC-USD-241217-94000-P",
+                "uly": "BTC-USD",
+                "bidVol": "0.45",
+                "askVol": "0.46",
+                "markVol": "0.455",
+                "fwdPx": "97000",
+                "ts": "1734166000000"
+            },
+            {
+                "instType": "OPTION",
+                "instId": "BTC-USD-250117-100000-C",
+                "uly": "BTC-USD",
+                "bidVol": "0.50",
+                "askVol": "0.51",
+                "markVol": "0.505",
+                "fwdPx": "99000",
+                "ts": "1734166000000"
+            },
+            {
+                "instType": "OPTION",
+                "instId": "BTC-USD-250117-105000-P",
+                "uly": "BTC-USD",
+                "bidVol": "0.50",
+                "askVol": "0.51",
+                "markVol": "0.505",
+                "fwdPx": "99000",
+                "ts": "1734166000000"
+            }
+        ]
+    });
+    let state = Arc::new(TestServerState::default());
+    *state.option_summary_response.lock().await = Some(response);
+    let addr = start_test_server(state.clone()).await;
+    let base_url = format!("http://{addr}");
+    let client = OKXHttpClient::new(Some(base_url), 60, 3, 1000, 10_000, false, None).unwrap();
+
+    for instrument in load_option_instruments_any() {
+        client.cache_instrument(instrument);
+    }
+
+    let forward_prices = client.request_forward_prices("BTC", None).await.unwrap();
+
+    assert_eq!(forward_prices.len(), 2);
+    assert_eq!(
+        forward_prices[0].instrument_id,
+        InstrumentId::from("BTC-USD-241217-92000-C.OKX")
+    );
+    assert_eq!(forward_prices[0].forward_price.to_string(), "97000");
+    assert_eq!(
+        forward_prices[1].instrument_id,
+        InstrumentId::from("BTC-USD-250117-100000-C.OKX")
+    );
+    assert_eq!(forward_prices[1].forward_price.to_string(), "99000");
 }
 
 #[rstest]
@@ -3186,10 +3496,10 @@ async fn test_http_place_algo_order_returns_error_on_nonzero_scode() {
         Some("test_secret".to_string()),
         Some("test_passphrase".to_string()),
         Some(base_url),
-        Some(60),
-        None,
-        None,
-        None,
+        60,
+        3,
+        1000,
+        10_000,
         false,
         None,
     )
