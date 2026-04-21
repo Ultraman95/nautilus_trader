@@ -120,10 +120,14 @@ pub fn parse_gamma_market(market: &GammaMarket) -> anyhow::Result<Vec<Polymarket
         .map_err(|e| anyhow::anyhow!("Failed to parse tick size '{tick_size_str}': {e}"))?;
     let price_precision = tick_size.scale() as u8;
 
-    // Gamma API fee fields are unreliable, actual fees come from
-    // the CLOB API at trade time (matches Python adapter behavior)
-    let maker_fee: Option<Decimal> = None;
-    let taker_fee: Option<Decimal> = None;
+    // Polymarket charges fees using `feeSchedule.rate` on the Gamma market.
+    // Only takers pay; makers are always zero.
+    // Reference: https://docs.polymarket.com/trading/fees
+    let maker_fee: Option<Decimal> = market.fee_schedule.as_ref().map(|_| Decimal::ZERO);
+    let taker_fee: Option<Decimal> = market
+        .fee_schedule
+        .as_ref()
+        .and_then(|fs| Decimal::try_from(fs.rate).ok());
 
     let min_size: Option<Decimal> = market
         .order_min_size
@@ -198,7 +202,10 @@ pub fn create_instrument_from_def(
 
     let max_price = Some(Price::from(MAX_PRICE));
     let min_price = Some(Price::from(MIN_PRICE));
-    let min_quantity = def.min_size.map(|s| Quantity::from(s.to_string()));
+    // Polymarket exposes `orderMinSize` (limit-order minimum shares) and a separate
+    // $1 market-order minimum amount; the instrument model can only carry one
+    // `min_quantity`, so leave it unset and let the venue reject out-of-bounds orders.
+    let min_quantity: Option<Quantity> = None;
 
     let info: Params = serde_json::from_value(build_info_json(def))?;
 
@@ -282,7 +289,7 @@ pub fn rebuild_instrument_with_tick_size(
         bo.outcome,
         bo.description,
         bo.max_quantity,
-        bo.min_quantity,
+        None, // min_quantity: see `create_instrument_from_def`
         bo.max_notional,
         bo.min_notional,
         bo.max_price,
@@ -431,6 +438,11 @@ mod tests {
         assert_eq!(map_handicap_defs[0].game_id, Some(1_427_074));
         assert_eq!(money_line_defs[0].fee_schedule, money_line.fee_schedule);
         assert_eq!(map_handicap_defs[0].fee_schedule, map_handicap.fee_schedule);
+
+        // Maker fee is always zero for feeSchedule-backed markets
+        assert_eq!(money_line_defs[0].maker_fee, Some(Decimal::ZERO));
+        // Taker fee comes from feeSchedule.rate (sports rate = 0.03)
+        assert_eq!(money_line_defs[0].taker_fee, Some(dec!(0.03)));
     }
 
     #[rstest]

@@ -13,4 +13,29 @@
 //  limitations under the License.
 // -------------------------------------------------------------------------------------------------
 
-// Python bindings will be added as the adapter matures.
+//! Python bindings from `pyo3`.
+
+pub mod config;
+pub mod enums;
+
+use pyo3::prelude::*;
+
+use crate::{
+    common::consts::COINBASE,
+    config::{CoinbaseDataClientConfig, CoinbaseExecClientConfig},
+};
+
+/// Loaded as `nautilus_pyo3.coinbase`.
+///
+/// # Errors
+///
+/// Returns an error if any bindings fail to register with the Python module.
+#[pymodule]
+pub fn coinbase(_: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add(stringify!(COINBASE), COINBASE)?;
+    m.add_class::<crate::common::enums::CoinbaseEnvironment>()?;
+    m.add_class::<CoinbaseDataClientConfig>()?;
+    m.add_class::<CoinbaseExecClientConfig>()?;
+
+    Ok(())
+}

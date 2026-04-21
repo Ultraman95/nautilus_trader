@@ -28,7 +28,11 @@ use std::{
     time::Duration,
 };
 
-use nautilus_betfair::{config::BetfairExecConfig, execution::BetfairExecutionClient};
+use nautilus_betfair::{
+    common::consts::{METHOD_CANCEL_ORDERS, METHOD_LIST_CURRENT_ORDERS, METHOD_PLACE_ORDERS},
+    config::BetfairExecConfig,
+    execution::BetfairExecutionClient,
+};
 use nautilus_common::{
     cache::Cache,
     clients::ExecutionClient,
@@ -36,8 +40,10 @@ use nautilus_common::{
     messages::{
         DataEvent, ExecutionEvent,
         execution::{
+            ExecutionReport,
             cancel::{CancelAllOrders, CancelOrder},
             modify::ModifyOrder,
+            query::QueryOrder,
             report::{GenerateFillReportsBuilder, GenerateOrderStatusReportsBuilder},
             submit::SubmitOrder,
         },
@@ -61,7 +67,6 @@ use serde_json::Value;
 
 use crate::common::*;
 
-#[allow(clippy::type_complexity)]
 fn create_test_execution_client(
     addr: SocketAddr,
     stream_port: u16,
@@ -320,10 +325,11 @@ async fn test_cancel_order_bet_taken_or_lapsed_treated_as_success() {
 
     let fixture = load_fixture("rest/betting_cancel_orders_bet_taken_or_lapsed.json");
     let v: Value = serde_json::from_str(&fixture).unwrap();
-    state.betting_overrides.lock().unwrap().insert(
-        "SportsAPING/v1.0/cancelOrders".to_string(),
-        v["result"].clone(),
-    );
+    state
+        .betting_overrides
+        .lock()
+        .unwrap()
+        .insert(METHOD_CANCEL_ORDERS.to_string(), v["result"].clone());
 
     let (stream_port, listener) = start_mock_stream().await;
     let (mut client, mut rx, _data_rx, _cache) = create_test_execution_client(addr, stream_port);
@@ -339,7 +345,7 @@ async fn test_cancel_order_bet_taken_or_lapsed_treated_as_success() {
     while rx.try_recv().is_ok() {}
 
     let cmd = make_cancel_order("1.179082386-235-0.BETFAIR", "O-001", "1");
-    client.cancel_order(&cmd).unwrap();
+    client.cancel_order(cmd).unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -359,11 +365,14 @@ async fn test_cancel_order_instruction_failure_emits_rejected() {
     let (addr, state) = start_mock_http().await;
 
     let fixture = load_fixture("rest/betting_cancel_orders_error.json");
-    let v: Value = serde_json::from_str(&fixture).unwrap();
-    state.betting_overrides.lock().unwrap().insert(
-        "SportsAPING/v1.0/cancelOrders".to_string(),
-        v["result"].clone(),
-    );
+    let mut v: Value = serde_json::from_str(&fixture).unwrap();
+    v["result"]["instructionReports"][0]["errorMessage"] =
+        Value::String("Betfair returned a detailed cancel validation error".to_string());
+    state
+        .betting_overrides
+        .lock()
+        .unwrap()
+        .insert(METHOD_CANCEL_ORDERS.to_string(), v["result"].clone());
 
     let (stream_port, listener) = start_mock_stream().await;
     let (mut client, mut rx, _data_rx, _cache) = create_test_execution_client(addr, stream_port);
@@ -379,7 +388,7 @@ async fn test_cancel_order_instruction_failure_emits_rejected() {
     while rx.try_recv().is_ok() {}
 
     let cmd = make_cancel_order("1.179082386-235-0.BETFAIR", "O-002", "1");
-    client.cancel_order(&cmd).unwrap();
+    client.cancel_order(cmd).unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
@@ -390,10 +399,14 @@ async fn test_cancel_order_instruction_failure_emits_rejected() {
         ExecutionEvent::Order(OrderEventAny::CancelRejected(rejected)) => {
             assert_eq!(rejected.client_order_id, ClientOrderId::from("O-002"));
             assert!(
-                rejected.reason.as_str().contains("ErrorInOrder"),
-                "Expected ErrorInOrder reason, found: {}",
+                rejected
+                    .reason
+                    .as_str()
+                    .contains("Betfair returned a detailed cancel validation error"),
+                "Expected detailed Betfair error message, found: {}",
                 rejected.reason,
             );
+            assert!(rejected.reason.as_str().contains("ErrorInOrder"));
         }
         other => panic!("Expected CancelRejected event, found: {other:?}"),
     }
@@ -409,10 +422,11 @@ async fn test_cancel_order_result_failure_no_instructions_emits_rejected() {
 
     let fixture = load_fixture("rest/betting_cancel_orders_result_failure.json");
     let v: Value = serde_json::from_str(&fixture).unwrap();
-    state.betting_overrides.lock().unwrap().insert(
-        "SportsAPING/v1.0/cancelOrders".to_string(),
-        v["result"].clone(),
-    );
+    state
+        .betting_overrides
+        .lock()
+        .unwrap()
+        .insert(METHOD_CANCEL_ORDERS.to_string(), v["result"].clone());
 
     let (stream_port, listener) = start_mock_stream().await;
     let (mut client, mut rx, _data_rx, _cache) = create_test_execution_client(addr, stream_port);
@@ -428,7 +442,7 @@ async fn test_cancel_order_result_failure_no_instructions_emits_rejected() {
     while rx.try_recv().is_ok() {}
 
     let cmd = make_cancel_order("1.179082386-235-0.BETFAIR", "O-003", "1");
-    client.cancel_order(&cmd).unwrap();
+    client.cancel_order(cmd).unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
@@ -458,10 +472,11 @@ async fn test_cancel_order_success_no_rejected_event() {
 
     let fixture = load_fixture("rest/betting_cancel_orders_success.json");
     let v: Value = serde_json::from_str(&fixture).unwrap();
-    state.betting_overrides.lock().unwrap().insert(
-        "SportsAPING/v1.0/cancelOrders".to_string(),
-        v["result"].clone(),
-    );
+    state
+        .betting_overrides
+        .lock()
+        .unwrap()
+        .insert(METHOD_CANCEL_ORDERS.to_string(), v["result"].clone());
 
     let (stream_port, listener) = start_mock_stream().await;
     let (mut client, mut rx, _data_rx, _cache) = create_test_execution_client(addr, stream_port);
@@ -477,7 +492,7 @@ async fn test_cancel_order_success_no_rejected_event() {
     while rx.try_recv().is_ok() {}
 
     let cmd = make_cancel_order("1.179082386-235-0.BETFAIR", "O-004", "1");
-    client.cancel_order(&cmd).unwrap();
+    client.cancel_order(cmd).unwrap();
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -548,7 +563,7 @@ async fn test_submit_order_success_emits_accepted() {
     add_order_to_cache(&cache, order.clone());
 
     let cmd = make_submit_order_cmd(&order);
-    client.submit_order(&cmd).unwrap();
+    client.submit_order(cmd).unwrap();
 
     // First event should be OrderSubmitted (emitted synchronously)
     let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
@@ -584,11 +599,14 @@ async fn test_submit_order_error_emits_rejected() {
     let (addr, state) = start_mock_http().await;
 
     let fixture = load_fixture("rest/betting_place_order_error.json");
-    let v: Value = serde_json::from_str(&fixture).unwrap();
-    state.betting_overrides.lock().unwrap().insert(
-        "SportsAPING/v1.0/placeOrders".to_string(),
-        v["result"].clone(),
-    );
+    let mut v: Value = serde_json::from_str(&fixture).unwrap();
+    v["result"]["instructionReports"][0]["errorMessage"] =
+        Value::String("Betfair returned a detailed submit validation error".to_string());
+    state
+        .betting_overrides
+        .lock()
+        .unwrap()
+        .insert(METHOD_PLACE_ORDERS.to_string(), v["result"].clone());
 
     let (stream_port, listener) = start_mock_stream().await;
     let (mut client, mut rx, _data_rx, cache) = create_test_execution_client(addr, stream_port);
@@ -607,7 +625,7 @@ async fn test_submit_order_error_emits_rejected() {
     add_order_to_cache(&cache, order.clone());
 
     let cmd = make_submit_order_cmd(&order);
-    client.submit_order(&cmd).unwrap();
+    client.submit_order(cmd).unwrap();
 
     let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
@@ -625,6 +643,15 @@ async fn test_submit_order_error_emits_rejected() {
                 rejected.client_order_id,
                 ClientOrderId::from("O-SUBMIT-002")
             );
+            assert!(
+                rejected
+                    .reason
+                    .as_str()
+                    .contains("Betfair returned a detailed submit validation error"),
+                "Expected detailed Betfair error message, found: {}",
+                rejected.reason,
+            );
+            assert!(rejected.reason.as_str().contains("ErrorInOrder"));
         }
         other => panic!("Expected OrderRejected event, found: {other:?}"),
     }
@@ -667,7 +694,7 @@ async fn test_modify_order_price_and_quantity_rejects() {
         UnixNanos::default(),
         None,
     );
-    client.modify_order(&cmd).unwrap();
+    client.modify_order(cmd).unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
@@ -727,7 +754,7 @@ async fn test_modify_order_no_effective_change_rejects() {
         UnixNanos::default(),
         None,
     );
-    client.modify_order(&cmd).unwrap();
+    client.modify_order(cmd).unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
@@ -777,7 +804,7 @@ async fn test_cancel_all_orders_sends_request() {
         UnixNanos::default(),
         None,
     );
-    client.cancel_all_orders(&cmd).unwrap();
+    client.cancel_all_orders(cmd).unwrap();
 
     wait_until_async(
         || {
@@ -787,7 +814,7 @@ async fn test_cancel_all_orders_sends_request() {
                     .lock()
                     .unwrap()
                     .iter()
-                    .any(|m| m == "SportsAPING/v1.0/cancelOrders")
+                    .any(|m| m == METHOD_CANCEL_ORDERS)
             }
         },
         Duration::from_secs(5),
@@ -1101,7 +1128,7 @@ async fn test_submit_order_registers_customer_order_ref() {
     add_order_to_cache(&cache, order.clone());
 
     let cmd = make_submit_order_cmd(&order);
-    client.submit_order(&cmd).unwrap();
+    client.submit_order(cmd).unwrap();
 
     // Wait for submitted + accepted
     let _ = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
@@ -1113,7 +1140,7 @@ async fn test_submit_order_registers_customer_order_ref() {
         .lock()
         .unwrap()
         .iter()
-        .any(|m| m == "SportsAPING/v1.0/placeOrders");
+        .any(|m| m == METHOD_PLACE_ORDERS);
     assert!(has_place_orders, "Expected placeOrders call");
 
     client.disconnect().await.unwrap();
@@ -1183,10 +1210,11 @@ async fn test_generate_order_status_reports() {
     // Override listCurrentOrders to return executable orders
     let fixture = load_fixture("rest/list_current_orders_executable.json");
     let v: Value = serde_json::from_str(&fixture).unwrap();
-    state.betting_overrides.lock().unwrap().insert(
-        "SportsAPING/v1.0/listCurrentOrders".to_string(),
-        v["result"].clone(),
-    );
+    state
+        .betting_overrides
+        .lock()
+        .unwrap()
+        .insert(METHOD_LIST_CURRENT_ORDERS.to_string(), v["result"].clone());
 
     let (stream_port, listener) = start_mock_stream().await;
     let (mut client, mut rx, _data_rx, _cache) = create_test_execution_client(addr, stream_port);
@@ -1231,10 +1259,11 @@ async fn test_generate_fill_reports() {
     // Override listCurrentOrders to return executed orders with fills
     let fixture = load_fixture("rest/list_current_orders_execution_complete.json");
     let v: Value = serde_json::from_str(&fixture).unwrap();
-    state.betting_overrides.lock().unwrap().insert(
-        "SportsAPING/v1.0/listCurrentOrders".to_string(),
-        v["result"].clone(),
-    );
+    state
+        .betting_overrides
+        .lock()
+        .unwrap()
+        .insert(METHOD_LIST_CURRENT_ORDERS.to_string(), v["result"].clone());
 
     let (stream_port, listener) = start_mock_stream().await;
     let (mut client, mut rx, _data_rx, _cache) = create_test_execution_client(addr, stream_port);
@@ -1264,6 +1293,136 @@ async fn test_generate_fill_reports() {
     for report in &reports {
         assert!(report.last_qty.as_f64() > 0.0);
     }
+
+    client.disconnect().await.unwrap();
+    let _ = server.await;
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_query_order_emits_order_status_report() {
+    let (addr, state) = start_mock_http().await;
+
+    // The fixture contains two executable orders on different markets.
+    // query_order filters to the one matching the command's instrument_id.
+    let fixture = load_fixture("rest/list_current_orders_executable.json");
+    let v: Value = serde_json::from_str(&fixture).unwrap();
+    state
+        .betting_overrides
+        .lock()
+        .unwrap()
+        .insert(METHOD_LIST_CURRENT_ORDERS.to_string(), v["result"].clone());
+
+    let (stream_port, listener) = start_mock_stream().await;
+    let (mut client, mut rx, _data_rx, _cache) = create_test_execution_client(addr, stream_port);
+
+    let server = tokio::spawn(async move {
+        let (_reader, write_half) = accept_and_auth(&listener).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        drop(write_half);
+    });
+
+    client.connect().await.unwrap();
+
+    // Drain connection events (account state, subscription acks)
+    while tokio::time::timeout(Duration::from_millis(200), rx.recv())
+        .await
+        .is_ok()
+    {}
+
+    let client_order_id = ClientOrderId::from("O-20260418-QUERY-001");
+    let instrument_id = InstrumentId::from("1.180575118-39980.BETFAIR");
+    let cmd = QueryOrder::new(
+        TraderId::from("TESTER-001"),
+        Some(ClientId::from("BETFAIR")),
+        StrategyId::from("S-001"),
+        instrument_id,
+        client_order_id,
+        Some(VenueOrderId::from("228059754671")),
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+    );
+
+    client.query_order(cmd).unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for query_order event")
+        .expect("channel closed");
+
+    match event {
+        ExecutionEvent::Report(ExecutionReport::Order(report)) => {
+            assert_eq!(report.venue_order_id.as_str(), "228059754671");
+            assert_eq!(report.client_order_id, Some(client_order_id));
+            assert_eq!(report.instrument_id, instrument_id);
+        }
+        other => panic!("Expected OrderStatusReport, was {other:?}"),
+    }
+
+    client.disconnect().await.unwrap();
+    let _ = server.await;
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_query_order_no_match_emits_nothing() {
+    let (addr, state) = start_mock_http().await;
+
+    // Empty response: none of the lookups (ref, legacy ref, bet_id) return
+    // any orders, so query_order must log-and-skip without emitting.
+    let fixture = load_fixture("rest/list_current_orders_empty.json");
+    let v: Value = serde_json::from_str(&fixture).unwrap();
+    state
+        .betting_overrides
+        .lock()
+        .unwrap()
+        .insert(METHOD_LIST_CURRENT_ORDERS.to_string(), v["result"].clone());
+
+    let (stream_port, listener) = start_mock_stream().await;
+    let (mut client, mut rx, _data_rx, _cache) = create_test_execution_client(addr, stream_port);
+
+    let server = tokio::spawn(async move {
+        let (_reader, write_half) = accept_and_auth(&listener).await;
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        drop(write_half);
+    });
+
+    client.connect().await.unwrap();
+
+    while tokio::time::timeout(Duration::from_millis(200), rx.recv())
+        .await
+        .is_ok()
+    {}
+
+    let cmd = QueryOrder::new(
+        TraderId::from("TESTER-001"),
+        Some(ClientId::from("BETFAIR")),
+        StrategyId::from("S-001"),
+        InstrumentId::from("1.180575118-39980.BETFAIR"),
+        ClientOrderId::from("O-20260418-MISS"),
+        None,
+        UUID4::new(),
+        UnixNanos::default(),
+        None,
+    );
+
+    client.query_order(cmd).unwrap();
+
+    // Nothing should be emitted. Give the spawned task time to run and
+    // confirm no Report event lands.
+    let mut report_seen = false;
+
+    while let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+        if matches!(event, ExecutionEvent::Report(ExecutionReport::Order(_))) {
+            report_seen = true;
+            break;
+        }
+    }
+    assert!(
+        !report_seen,
+        "query_order should not emit a report when no orders match",
+    );
 
     client.disconnect().await.unwrap();
     let _ = server.await;

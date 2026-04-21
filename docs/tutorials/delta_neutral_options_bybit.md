@@ -45,8 +45,7 @@ It implements a short volatility strategy with automatic delta hedging:
    volatility (via Bybit's `order_iv` parameter). Entry is optional and
    disabled by default in the example.
 3. **Greeks tracking**: subscribes to `OptionGreeks` for both legs. Deltas
-   and IVs come directly from Bybit's option ticker stream, not from a
-   local pricing model.
+   and IVs come directly from Bybit's option ticker stream.
 4. **Rehedging**: computes portfolio delta and submits a market order on the
    BTCUSDT perpetual when the threshold is breached. Triggers on every Greeks
    update and on a periodic safety timer.
@@ -236,7 +235,7 @@ the strangle and hedge requires manual action or a separate exit strategy.
 ## Running the example
 
 ```bash
-cargo run --example bybit-delta-neutral --package nautilus-bybit
+cargo run --example bybit-delta-neutral --package nautilus-bybit --features examples
 ```
 
 The example runs with `enter_strangle: false` by default, so it does not

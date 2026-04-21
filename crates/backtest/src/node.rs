@@ -19,21 +19,20 @@ use std::iter::Peekable;
 
 use ahash::{AHashMap, AHashSet};
 use nautilus_core::UnixNanos;
-use nautilus_execution::models::{fee::FeeModelAny, fill::FillModelAny};
 use nautilus_model::{
     data::{
-        Bar, Data, HasTsInit, IndexPriceUpdate, InstrumentClose, MarkPriceUpdate, OrderBookDelta,
-        OrderBookDepth10, QuoteTick, TradeTick,
+        Bar, Data, HasTsInit, IndexPriceUpdate, InstrumentClose, InstrumentStatus, MarkPriceUpdate,
+        OrderBookDelta, OrderBookDepth10, QuoteTick, TradeTick,
     },
     enums::{BookType, OtoTriggerMode},
     identifiers::{InstrumentId, Venue},
+    instruments::Instrument,
     types::Money,
 };
 use nautilus_persistence::backend::{catalog::ParquetDataCatalog, session::QueryResult};
-use rust_decimal::{Decimal, prelude::FromPrimitive};
 
 use crate::{
-    config::{BacktestDataConfig, BacktestRunConfig, NautilusDataType},
+    config::{BacktestDataConfig, BacktestRunConfig, NautilusDataType, SimulatedVenueConfig},
     engine::BacktestEngine,
     result::BacktestResult,
 };
@@ -107,54 +106,51 @@ impl BacktestNode {
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| anyhow::anyhow!("Invalid starting balance: {e}"))?;
 
-                let default_leverage = venue_config.default_leverage().and_then(Decimal::from_f64);
-                let leverages: AHashMap<InstrumentId, Decimal> = venue_config
-                    .leverages()
-                    .map(|m| {
-                        m.iter()
-                            .map(|(k, v)| {
-                                Decimal::from_f64(*v).map(|d| (*k, d)).ok_or_else(|| {
-                                    anyhow::anyhow!("Invalid leverage {v} for instrument {k}")
-                                })
-                            })
-                            .collect::<anyhow::Result<AHashMap<_, _>>>()
-                    })
-                    .transpose()?
-                    .unwrap_or_default();
-
-                engine.add_venue(
-                    Venue::from(venue_config.name().as_str()),
-                    venue_config.oms_type(),
-                    venue_config.account_type(),
-                    venue_config.book_type(),
-                    starting_balances,
-                    venue_config.base_currency(),
-                    default_leverage,
-                    leverages,
-                    None, // margin_model
-                    Vec::new(),
-                    FillModelAny::default(),
-                    FeeModelAny::default(),
-                    None, // latency_model
-                    Some(venue_config.routing()),
-                    Some(venue_config.reject_stop_orders()),
-                    Some(venue_config.support_gtd_orders()),
-                    Some(venue_config.support_contingent_orders()),
-                    Some(venue_config.use_position_ids()),
-                    Some(venue_config.use_random_ids()),
-                    Some(venue_config.use_reduce_only()),
-                    None, // use_message_queue
-                    Some(venue_config.use_market_order_acks()),
-                    Some(venue_config.bar_execution()),
-                    Some(venue_config.bar_adaptive_high_low_ordering()),
-                    Some(venue_config.trade_execution()),
-                    Some(venue_config.liquidity_consumption()),
-                    Some(venue_config.allow_cash_borrowing()),
-                    Some(venue_config.frozen_account()),
-                    Some(venue_config.queue_position()),
-                    Some(venue_config.oto_trigger_mode() == OtoTriggerMode::Full),
-                    Some(venue_config.price_protection_points()),
-                )?;
+                let default_leverage = venue_config.default_leverage();
+                let leverages = venue_config.leverages().cloned().unwrap_or_default();
+                let margin_model = venue_config.margin_model().cloned();
+                let modules = venue_config
+                    .modules()
+                    .iter()
+                    .cloned()
+                    .map(Into::into)
+                    .collect();
+                let fill_model = venue_config.fill_model().cloned().unwrap_or_default();
+                let fee_model = venue_config.fee_model().cloned().unwrap_or_default();
+                let latency_model = venue_config.latency_model().cloned().map(Into::into);
+                let sim_config = SimulatedVenueConfig::builder()
+                    .venue(Venue::from(venue_config.name().as_str()))
+                    .oms_type(venue_config.oms_type())
+                    .account_type(venue_config.account_type())
+                    .book_type(venue_config.book_type())
+                    .starting_balances(starting_balances)
+                    .maybe_base_currency(venue_config.base_currency())
+                    .default_leverage(default_leverage)
+                    .leverages(leverages)
+                    .maybe_margin_model(margin_model)
+                    .modules(modules)
+                    .fill_model(fill_model)
+                    .fee_model(fee_model)
+                    .maybe_latency_model(latency_model)
+                    .routing(venue_config.routing())
+                    .reject_stop_orders(venue_config.reject_stop_orders())
+                    .support_gtd_orders(venue_config.support_gtd_orders())
+                    .support_contingent_orders(venue_config.support_contingent_orders())
+                    .use_position_ids(venue_config.use_position_ids())
+                    .use_random_ids(venue_config.use_random_ids())
+                    .use_reduce_only(venue_config.use_reduce_only())
+                    .use_market_order_acks(venue_config.use_market_order_acks())
+                    .bar_execution(venue_config.bar_execution())
+                    .bar_adaptive_high_low_ordering(venue_config.bar_adaptive_high_low_ordering())
+                    .trade_execution(venue_config.trade_execution())
+                    .liquidity_consumption(venue_config.liquidity_consumption())
+                    .allow_cash_borrowing(venue_config.allow_cash_borrowing())
+                    .frozen_account(venue_config.frozen_account())
+                    .queue_position(venue_config.queue_position())
+                    .oto_full_trigger(venue_config.oto_trigger_mode() == OtoTriggerMode::Full)
+                    .price_protection_points(venue_config.price_protection_points())
+                    .build();
+                engine.add_venue(sim_config)?;
             }
 
             for data_config in config.data() {
@@ -178,6 +174,26 @@ impl BacktestNode {
 
                 for instrument in instruments {
                     engine.add_instrument(&instrument)?;
+                }
+            }
+
+            for venue_config in config.venues() {
+                let Some(settlement_prices) = venue_config.settlement_prices() else {
+                    continue;
+                };
+                let venue = Venue::from(venue_config.name().as_str());
+
+                for (instrument_id, raw_price) in settlement_prices {
+                    let price = {
+                        let cache = engine.kernel().cache.borrow();
+                        let instrument = cache.instrument(instrument_id).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "No instrument found for settlement price configuration: {instrument_id}"
+                            )
+                        })?;
+                        instrument.make_price(*raw_price)
+                    };
+                    engine.set_settlement_price(venue, *instrument_id, price)?;
                 }
             }
 
@@ -483,13 +499,11 @@ fn create_catalog(config: &BacktestDataConfig) -> anyhow::Result<ParquetDataCata
         Some(protocol) => format!("{protocol}://{}", config.catalog_path()),
         None => config.catalog_path().to_string(),
     };
-    ParquetDataCatalog::from_uri(
-        &uri,
-        config.catalog_fs_storage_options().cloned(),
-        None,
-        None,
-        None,
-    )
+    let storage_options = config
+        .catalog_fs_rust_storage_options()
+        .cloned()
+        .or_else(|| config.catalog_fs_storage_options().cloned());
+    ParquetDataCatalog::from_uri(&uri, storage_options, None, None, None)
 }
 
 fn load_data(
@@ -537,6 +551,9 @@ fn dispatch_query(
         }
         NautilusDataType::IndexPriceUpdate => {
             catalog.query::<IndexPriceUpdate>(identifiers, start, end, filter, None, optimize)
+        }
+        NautilusDataType::InstrumentStatus => {
+            catalog.query::<InstrumentStatus>(identifiers, start, end, filter, None, optimize)
         }
         NautilusDataType::InstrumentClose => {
             catalog.query::<InstrumentClose>(identifiers, start, end, filter, None, optimize)

@@ -491,6 +491,17 @@ class BlackScholesGreeksResult:
 
 @typing.final
 class Block:
+    def __init__(
+        self,
+        chain: Blockchain,
+        hash: str,
+        parent_hash: str,
+        number: int,
+        miner: str,
+        gas_limit: int,
+        gas_used: int,
+        timestamp: int,
+    ) -> None: ...
     @property
     def chain(self) -> Blockchain | None: ...
     @property
@@ -2701,7 +2712,10 @@ class OptionGreeks:
         open_interest: float | None = None,
         ts_event: int = 0,
         ts_init: int = 0,
+        convention: GreeksConvention | None = None,
     ) -> None: ...
+    @property
+    def convention(self) -> GreeksConvention: ...
     @property
     def instrument_id(self) -> InstrumentId: ...
     @property
@@ -4507,6 +4521,10 @@ class PositionAdjusted:
 
 @typing.final
 class PositionChanged:
+    @staticmethod
+    def create(
+        position: Position, fill: OrderFilled, event_id: core.UUID4, ts_init: int
+    ) -> PositionChanged: ...
     @property
     def trader_id(self) -> TraderId: ...
     @property
@@ -4556,6 +4574,10 @@ class PositionChanged:
 
 @typing.final
 class PositionClosed:
+    @staticmethod
+    def create(
+        position: Position, fill: OrderFilled, event_id: core.UUID4, ts_init: int
+    ) -> PositionClosed: ...
     @property
     def trader_id(self) -> TraderId: ...
     @property
@@ -4623,6 +4645,10 @@ class PositionId:
 
 @typing.final
 class PositionOpened:
+    @staticmethod
+    def create(
+        position: Position, fill: OrderFilled, event_id: core.UUID4, ts_init: int
+    ) -> PositionOpened: ...
     @property
     def trader_id(self) -> TraderId: ...
     @property
@@ -5983,6 +6009,22 @@ class DefiData(Enum):
     PoolLiquidityUpdate = ...
     PoolFeeCollect = ...
     PoolFlash = ...
+
+@typing.final
+class GreeksConvention(Enum):
+    BLACK_SCHOLES = ...
+    PRICE_ADJUSTED = ...
+
+    def __init__(self, value: typing.Any) -> None: ...
+    def __hash__(self) -> int: ...
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+    @classmethod
+    def variants(cls) -> EnumIterator: ...
+    @classmethod
+    def from_str(cls, data: typing.Any) -> GreeksConvention: ...
 
 @typing.final
 class InstrumentClass(Enum):

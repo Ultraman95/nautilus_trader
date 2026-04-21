@@ -286,11 +286,10 @@ fn send_data(sender: &tokio::sync::mpsc::UnboundedSender<DataEvent>, data: Data)
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Cached funding state per symbol: (funding_rate, next_funding_time, funding_interval_hour).
 type FundingCacheEntry = (Option<String>, Option<String>, Option<String>);
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_ws_message(
     message: &BybitWsMessage,
     data_sender: &tokio::sync::mpsc::UnboundedSender<DataEvent>,
@@ -630,7 +629,7 @@ impl DataClient for BybitDataClient {
         for product_type in &product_types {
             let fetched = self
                 .http_client
-                .request_instruments(*product_type, None)
+                .request_instruments(*product_type, None, None)
                 .await
                 .with_context(|| {
                     format!("failed to request Bybit instruments for {product_type:?}")
@@ -820,7 +819,7 @@ impl DataClient for BybitDataClient {
         !self.is_connected()
     }
 
-    fn subscribe_book_deltas(&mut self, cmd: &SubscribeBookDeltas) -> anyhow::Result<()> {
+    fn subscribe_book_deltas(&mut self, cmd: SubscribeBookDeltas) -> anyhow::Result<()> {
         if cmd.book_type != BookType::L2_MBP {
             anyhow::bail!("Bybit only supports L2_MBP order book deltas");
         }
@@ -859,7 +858,7 @@ impl DataClient for BybitDataClient {
         Ok(())
     }
 
-    fn subscribe_quotes(&mut self, cmd: &SubscribeQuotes) -> anyhow::Result<()> {
+    fn subscribe_quotes(&mut self, cmd: SubscribeQuotes) -> anyhow::Result<()> {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
@@ -905,7 +904,7 @@ impl DataClient for BybitDataClient {
         Ok(())
     }
 
-    fn subscribe_trades(&mut self, cmd: &SubscribeTrades) -> anyhow::Result<()> {
+    fn subscribe_trades(&mut self, cmd: SubscribeTrades) -> anyhow::Result<()> {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
@@ -929,7 +928,7 @@ impl DataClient for BybitDataClient {
         Ok(())
     }
 
-    fn subscribe_funding_rates(&mut self, cmd: &SubscribeFundingRates) -> anyhow::Result<()> {
+    fn subscribe_funding_rates(&mut self, cmd: SubscribeFundingRates) -> anyhow::Result<()> {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
@@ -964,7 +963,7 @@ impl DataClient for BybitDataClient {
         Ok(())
     }
 
-    fn subscribe_mark_prices(&mut self, cmd: &SubscribeMarkPrices) -> anyhow::Result<()> {
+    fn subscribe_mark_prices(&mut self, cmd: SubscribeMarkPrices) -> anyhow::Result<()> {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
@@ -999,7 +998,7 @@ impl DataClient for BybitDataClient {
         Ok(())
     }
 
-    fn subscribe_index_prices(&mut self, cmd: &SubscribeIndexPrices) -> anyhow::Result<()> {
+    fn subscribe_index_prices(&mut self, cmd: SubscribeIndexPrices) -> anyhow::Result<()> {
         let instrument_id = cmd.instrument_id;
         let product_type = self
             .get_product_type_for_instrument(instrument_id)
@@ -1034,7 +1033,7 @@ impl DataClient for BybitDataClient {
         Ok(())
     }
 
-    fn subscribe_bars(&mut self, cmd: &SubscribeBars) -> anyhow::Result<()> {
+    fn subscribe_bars(&mut self, cmd: SubscribeBars) -> anyhow::Result<()> {
         let bar_type = cmd.bar_type;
         let instrument_id = bar_type.instrument_id();
         let product_type = self
@@ -1333,7 +1332,7 @@ impl DataClient for BybitDataClient {
         Ok(())
     }
 
-    fn subscribe_option_greeks(&mut self, cmd: &SubscribeOptionGreeks) -> anyhow::Result<()> {
+    fn subscribe_option_greeks(&mut self, cmd: SubscribeOptionGreeks) -> anyhow::Result<()> {
         let instrument_id = cmd.instrument_id;
         self.option_greeks_subs.insert(instrument_id);
 
@@ -1409,7 +1408,7 @@ impl DataClient for BybitDataClient {
 
     fn subscribe_instrument_status(
         &mut self,
-        cmd: &SubscribeInstrumentStatus,
+        cmd: SubscribeInstrumentStatus,
     ) -> anyhow::Result<()> {
         log::debug!(
             "subscribe_instrument_status: {id} (status changes detected via periodic instrument info polling)",
@@ -1454,7 +1453,7 @@ impl DataClient for BybitDataClient {
             let mut all_instruments = Vec::new();
 
             for product_type in product_types {
-                match http.request_instruments(product_type, None).await {
+                match http.request_instruments(product_type, None, None).await {
                     Ok(instruments) => {
                         for instrument in instruments {
                             upsert_instrument(&instruments_cache, instrument.clone());
@@ -1506,7 +1505,7 @@ impl DataClient for BybitDataClient {
 
         get_runtime().spawn(async move {
             match http
-                .request_instruments(product_type, Some(raw_symbol))
+                .request_instruments(product_type, Some(raw_symbol), None)
                 .await
                 .context("fetch instrument from API")
             {
@@ -1927,7 +1926,7 @@ mod tests {
         map
     }
 
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     fn empty_subs() -> (
         Arc<AtomicSet<InstrumentId>>,
         Arc<AtomicMap<InstrumentId, AHashSet<&'static str>>>,

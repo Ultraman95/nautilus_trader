@@ -160,6 +160,16 @@ pub enum BybitAccountType {
     Unified,
 }
 
+/// API key authentication type returned by `/v5/user/list-sub-apikeys`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+pub enum BybitApiKeyType {
+    /// HMAC-SHA256 signed keys (the default).
+    Hmac = 1,
+    /// RSA-signed keys.
+    Rsa = 2,
+}
+
 /// Environments supported by the Bybit API stack.
 #[derive(
     Copy,
@@ -266,15 +276,10 @@ pub enum BybitInnovationFlag {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum BybitInstrumentStatus {
-    Trading,
-    Settled,
-    Delivering,
-    ListedOnly,
-    PendingListing,
     PreLaunch,
-    PreTrading,
+    Trading,
+    Delivering,
     Closed,
-    Suspended,
     #[serde(other)]
     Other,
 }

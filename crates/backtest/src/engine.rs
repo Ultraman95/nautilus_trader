@@ -38,26 +38,28 @@ use nautilus_common::{
 };
 use nautilus_core::{UUID4, UnixNanos, datetime::unix_nanos_to_iso8601, formatting::Separable};
 use nautilus_data::client::DataClientAdapter;
-use nautilus_execution::models::{fee::FeeModelAny, fill::FillModelAny, latency::LatencyModel};
+use nautilus_execution::models::fill::FillModelAny;
 use nautilus_model::{
-    accounts::{Account, AccountAny, margin_model::MarginModelAny},
+    accounts::{Account, AccountAny},
     data::{Data, HasTsInit},
-    enums::{AccountType, BookType, OmsType},
+    enums::AccountType,
     identifiers::{AccountId, ClientId, InstrumentId, TraderId, Venue},
     instruments::{Instrument, InstrumentAny},
     orders::Order,
     position::Position,
-    types::{Currency, Money},
+    types::Price,
 };
 use nautilus_system::{config::NautilusKernelConfig, kernel::NautilusKernel};
 use nautilus_trading::{ExecutionAlgorithm, strategy::Strategy};
-use rust_decimal::Decimal;
 
 use crate::{
-    accumulator::TimeEventAccumulator, config::BacktestEngineConfig,
-    data_client::BacktestDataClient, data_iterator::BacktestDataIterator,
-    exchange::SimulatedExchange, execution_client::BacktestExecutionClient,
-    modules::SimulationModule, result::BacktestResult,
+    accumulator::TimeEventAccumulator,
+    config::{BacktestEngineConfig, SimulatedVenueConfig},
+    data_client::BacktestDataClient,
+    data_iterator::BacktestDataIterator,
+    exchange::SimulatedExchange,
+    execution_client::BacktestExecutionClient,
+    result::BacktestResult,
 };
 
 /// Core backtesting engine for running event-driven strategy backtests on historical data.
@@ -183,83 +185,15 @@ impl BacktestEngine {
     /// # Errors
     ///
     /// Returns an error if initializing the simulated exchange for the venue fails.
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_venue(
-        &mut self,
-        venue: Venue,
-        oms_type: OmsType,
-        account_type: AccountType,
-        book_type: BookType,
-        starting_balances: Vec<Money>,
-        base_currency: Option<Currency>,
-        default_leverage: Option<Decimal>,
-        leverages: AHashMap<InstrumentId, Decimal>,
-        margin_model: Option<MarginModelAny>,
-        modules: Vec<Box<dyn SimulationModule>>,
-        fill_model: FillModelAny,
-        fee_model: FeeModelAny,
-        latency_model: Option<Box<dyn LatencyModel>>,
-        routing: Option<bool>,
-        reject_stop_orders: Option<bool>,
-        support_gtd_orders: Option<bool>,
-        support_contingent_orders: Option<bool>,
-        use_position_ids: Option<bool>,
-        use_random_ids: Option<bool>,
-        use_reduce_only: Option<bool>,
-        use_message_queue: Option<bool>,
-        use_market_order_acks: Option<bool>,
-        bar_execution: Option<bool>,
-        bar_adaptive_high_low_ordering: Option<bool>,
-        trade_execution: Option<bool>,
-        liquidity_consumption: Option<bool>,
-        allow_cash_borrowing: Option<bool>,
-        frozen_account: Option<bool>,
-        queue_position: Option<bool>,
-        oto_full_trigger: Option<bool>,
-        price_protection_points: Option<u32>,
-    ) -> anyhow::Result<()> {
-        let default_leverage: Decimal = default_leverage.unwrap_or_else(|| {
-            if account_type == AccountType::Margin {
-                Decimal::from(10)
-            } else {
-                Decimal::from(0)
-            }
-        });
+    pub fn add_venue(&mut self, config: SimulatedVenueConfig) -> anyhow::Result<()> {
+        // `routing` and `frozen_account` flow to the exec client, so capture
+        // them before the config is consumed by the exchange constructor.
+        let venue = config.venue;
+        let routing = Some(config.routing);
+        let frozen_account = Some(config.frozen_account);
 
-        let exchange = SimulatedExchange::new(
-            venue,
-            oms_type,
-            account_type,
-            starting_balances,
-            base_currency,
-            default_leverage,
-            leverages,
-            margin_model,
-            modules,
-            self.kernel.cache.clone(),
-            self.kernel.clock.clone(),
-            fill_model,
-            fee_model,
-            book_type,
-            latency_model,
-            bar_execution,
-            bar_adaptive_high_low_ordering,
-            trade_execution,
-            liquidity_consumption,
-            reject_stop_orders,
-            support_gtd_orders,
-            support_contingent_orders,
-            use_position_ids,
-            use_random_ids,
-            use_reduce_only,
-            use_message_queue,
-            use_market_order_acks,
-            allow_cash_borrowing,
-            frozen_account,
-            queue_position,
-            oto_full_trigger,
-            price_protection_points,
-        )?;
+        let exchange =
+            SimulatedExchange::new(config, self.kernel.cache.clone(), self.kernel.clock.clone())?;
         let exchange = Rc::new(RefCell::new(exchange));
         self.venues.insert(venue, exchange.clone());
 
@@ -288,6 +222,27 @@ impl BacktestEngine {
 
         log::info!("Adding exchange {venue} to engine");
 
+        Ok(())
+    }
+
+    /// Sets the settlement price for the specified venue instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the venue has not been added to the engine.
+    pub fn set_settlement_price(
+        &mut self,
+        venue: Venue,
+        instrument_id: InstrumentId,
+        price: Price,
+    ) -> anyhow::Result<()> {
+        let exchange = self
+            .venues
+            .get_mut(&venue)
+            .ok_or_else(|| anyhow::anyhow!("Unknown venue {venue}"))?;
+        exchange
+            .borrow_mut()
+            .set_settlement_price(instrument_id, price);
         Ok(())
     }
 
@@ -472,7 +427,11 @@ impl BacktestEngine {
     ) -> anyhow::Result<()> {
         self.run_impl(start, end, run_config_id, streaming)?;
 
-        if !streaming {
+        // Finalize on non-streaming runs, or when a shutdown was triggered
+        // at any point during the run (including the trailing settle, module,
+        // and flush callbacks that execute after the main data loop) so the
+        // trader and engines actually stop.
+        if !streaming || self.force_stop || self.kernel.is_shutdown_requested() {
             self.end();
         }
 
@@ -519,6 +478,7 @@ impl BacktestEngine {
 
             // Reset force stop flag
             self.force_stop = false;
+            self.kernel.reset_shutdown_flag();
 
             // Initialize sync command senders (once per thread)
             Self::init_command_senders();
@@ -558,6 +518,11 @@ impl BacktestEngine {
         }
 
         loop {
+            if self.kernel.is_shutdown_requested() {
+                log::info!("Shutdown requested via ShutdownSystem, ending backtest");
+                self.force_stop = true;
+            }
+
             if self.force_stop {
                 log::error!("Force stop triggered, ending backtest");
                 break;
@@ -635,10 +600,18 @@ impl BacktestEngine {
         // Flush remaining timer events to the backtest end boundary so that
         // tail alerts/expiries scheduled after the last data point still fire.
         // Must run before stopping engines since DataEngine::stop() cancels
-        // bar aggregator timers.
+        // bar aggregator timers. When a shutdown was requested, cap the flush
+        // at the last processed timestamp so timers scheduled past the stop
+        // point do not fire extra callbacks after the graceful stop request.
         if self.end_ns.as_u64() > 0 {
             let clocks = self.collect_all_clocks();
-            self.flush_accumulator_events(&clocks, self.end_ns);
+            let flush_ts = if self.force_stop || self.kernel.is_shutdown_requested() {
+                self.last_ns
+            } else {
+                self.end_ns
+            };
+
+            self.flush_accumulator_events(&clocks, flush_ts);
         }
 
         // Stop trader
@@ -889,6 +862,7 @@ impl BacktestEngine {
                 Data::Quote(quote) => exchange.process_quote_tick(quote),
                 Data::Trade(trade) => exchange.process_trade_tick(trade),
                 Data::Bar(bar) => exchange.process_bar(*bar),
+                Data::InstrumentStatus(status) => exchange.process_instrument_status(*status),
                 Data::InstrumentClose(close) => exchange.process_instrument_close(*close),
                 Data::Depth10(depth) => exchange.process_order_book_depth10(depth),
                 Data::MarkPriceUpdate(_) | Data::IndexPriceUpdate(_) | Data::Custom(_) => {
@@ -1340,4 +1314,62 @@ fn log_portfolio_performance(analyzer: &PortfolioAnalyzer) {
         log::info!("{line}");
     }
     log_info!("-----------------------------------------------------------------", color = LogColor::Cyan);
+}
+
+#[cfg(test)]
+mod tests {
+    use nautilus_model::{
+        data::{Data, InstrumentStatus},
+        enums::{AccountType, BookType, MarketStatus, MarketStatusAction, OmsType},
+        identifiers::Venue,
+        instruments::{
+            CryptoPerpetual, Instrument, InstrumentAny, stubs::crypto_perpetual_ethusdt,
+        },
+        types::Money,
+    };
+    use rstest::*;
+
+    use super::*;
+
+    fn create_engine() -> BacktestEngine {
+        let mut engine = BacktestEngine::new(BacktestEngineConfig::default()).unwrap();
+        let venue_config = SimulatedVenueConfig::builder()
+            .venue(Venue::from("BINANCE"))
+            .oms_type(OmsType::Netting)
+            .account_type(AccountType::Margin)
+            .book_type(BookType::L1_MBP)
+            .starting_balances(vec![Money::from("1_000_000 USDT")])
+            .build();
+        engine.add_venue(venue_config).unwrap();
+        engine
+    }
+
+    #[rstest]
+    fn test_route_data_to_exchange_instrument_status(crypto_perpetual_ethusdt: CryptoPerpetual) {
+        let mut engine = create_engine();
+        let instrument = InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt);
+        let instrument_id = instrument.id();
+        engine.add_instrument(&instrument).unwrap();
+
+        let status = InstrumentStatus::new(
+            instrument_id,
+            MarketStatusAction::Close,
+            UnixNanos::from(1),
+            UnixNanos::from(1),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        engine.route_data_to_exchange(&Data::InstrumentStatus(status));
+
+        let exchange = engine.venues.get(&instrument_id.venue).unwrap().borrow();
+        let market_status = exchange
+            .get_matching_engine(&instrument_id)
+            .unwrap()
+            .market_status;
+        assert_eq!(market_status, MarketStatus::Closed);
+    }
 }

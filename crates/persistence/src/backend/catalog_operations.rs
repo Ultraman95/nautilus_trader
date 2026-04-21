@@ -829,9 +829,9 @@ impl ParquetDataCatalog {
         let mut existing_files = self.list_parquet_files(&directory)?;
         existing_files.sort();
 
-        // Track files to remove and maintain existing_files list
-        let mut files_to_remove = AHashSet::new();
-        let original_files_count = existing_files.len();
+        // Capture the overall window's left bound before the loop consumes queries_to_execute,
+        // a source file is only deleted when its interval is fully consumed by the consolidation.
+        let overall_query_start = queries_to_execute[0].query_start;
 
         // Phase 2: Execute queries, write, and delete
         let mut file_start_ns: Option<u64> = None; // Track contiguity across periods
@@ -896,36 +896,19 @@ impl ParquetDataCatalog {
             let end_ts = UnixNanos::from(final_end_ns);
             self.write_to_parquet(period_data, Some(start_ts), Some(end_ts), Some(true))?;
 
-            // Identify files that are completely covered by this period
-            // Only remove files AFTER successfully writing a new file
-            // Use slice copy to avoid modification during iteration (match Python logic)
+            // Delete files fully consumed by this period; keep straddlers so no data is lost
             for file in existing_files.clone() {
                 if let Some(interval) = parse_filename_timestamps(&file)
                     && interval.1 <= query_info.query_end
+                    && interval.0 >= overall_query_start
                 {
-                    files_to_remove.insert(file.clone());
                     existing_files.retain(|f| f != &file);
-                }
-            }
-
-            // Remove files as soon as we have some to remove
-            if !files_to_remove.is_empty() {
-                for file in files_to_remove.drain() {
                     self.delete_file(&file)?;
                 }
             }
+
             // Reset so next period starts a new contiguous segment
             file_start_ns = None;
-        }
-
-        // Remove any remaining files that weren't removed in the loop
-        // This matches the Python implementation's final cleanup step
-        // Only remove files if any consolidation actually happened (i.e., files were processed)
-        let files_were_processed = existing_files.len() < original_files_count;
-        if files_were_processed {
-            for file in existing_files {
-                self.delete_file(&file)?;
-            }
         }
 
         Ok(())
@@ -988,9 +971,9 @@ impl ParquetDataCatalog {
         let mut existing_files = self.list_parquet_files(&directory)?;
         existing_files.sort();
 
-        // Track files to remove and maintain existing_files list
-        let mut files_to_remove = AHashSet::new();
-        let original_files_count = existing_files.len();
+        // Capture the overall window's left bound before the loop consumes queries_to_execute,
+        // a source file is only deleted when its interval is fully consumed by the consolidation.
+        let overall_query_start = queries_to_execute[0].query_start;
 
         // Phase 2: Execute queries, write, and delete
         let mut file_start_ns: Option<u64> = None; // Track contiguity across periods
@@ -1067,33 +1050,19 @@ impl ParquetDataCatalog {
                 self.write_custom_data_batch(items, Some(start_ts), Some(end_ts), Some(true))?;
             }
 
-            // Identify files that are completely covered by this period
-            // Only remove files AFTER successfully writing a new file
+            // Delete files fully consumed by this period; keep straddlers so no data is lost
             for file in existing_files.clone() {
                 if let Some(interval) = parse_filename_timestamps(&file)
                     && interval.1 <= query_info.query_end
+                    && interval.0 >= overall_query_start
                 {
-                    files_to_remove.insert(file.clone());
                     existing_files.retain(|f| f != &file);
-                }
-            }
-
-            // Remove files as soon as we have some to remove
-            if !files_to_remove.is_empty() {
-                for file in files_to_remove.drain() {
                     self.delete_file(&file)?;
                 }
             }
+
             // Reset so next period starts a new contiguous segment
             file_start_ns = None;
-        }
-
-        // Remove any remaining files that weren't removed in the loop
-        let files_were_processed = existing_files.len() < original_files_count;
-        if files_were_processed {
-            for file in existing_files {
-                self.delete_file(&file)?;
-            }
         }
 
         Ok(())
@@ -1259,7 +1228,7 @@ impl ParquetDataCatalog {
     /// 3. Identifies and creates split operations for data preservation.
     /// 4. Generates period-based consolidation queries.
     /// 5. Checks for existing target files.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn prepare_consolidation_queries(
         &self,
         type_name: &str,
@@ -1297,9 +1266,9 @@ impl ParquetDataCatalog {
             );
         }
 
-        // Group intervals into contiguous groups to preserve holes between groups
-        // but allow consolidation within each contiguous group
-        let contiguous_groups = self.group_contiguous_intervals(&filtered_intervals);
+        // Group intervals by the target period: split only when the gap between files
+        // exceeds one period, since sub-period gaps land in the same consolidated file.
+        let contiguous_groups = self.group_contiguous_intervals(&filtered_intervals, period_nanos);
 
         let mut queries_to_execute = Vec::new();
 
@@ -1401,69 +1370,59 @@ impl ParquetDataCatalog {
         Ok(queries_to_execute)
     }
 
-    /// Groups intervals into contiguous groups for efficient consolidation.
+    /// Groups intervals for period-based consolidation.
     ///
-    /// This method analyzes a list of time intervals and groups them into contiguous sequences.
-    /// Intervals are considered contiguous if the end of one interval is exactly one nanosecond
-    /// before the start of the next interval. This grouping preserves data gaps while allowing
-    /// consolidation within each contiguous group.
+    /// Groups adjacent intervals into the same bucket unless the gap between them exceeds
+    /// `period_nanos`. Sub-period gaps land in the same consolidated file anyway, so they
+    /// do not warrant a split. Gaps larger than one period represent genuine data holes.
     ///
     /// # Parameters
     ///
-    /// - `intervals`: A slice of timestamp intervals as (start, end) tuples.
+    /// - `intervals`: A slice of timestamp intervals as (start, end) tuples, sorted by start.
+    /// - `period_nanos`: The target consolidation period; gaps larger than this split groups.
     ///
     /// # Returns
     ///
-    /// Returns a vector of groups, where each group is a vector of contiguous intervals.
-    /// Returns an empty vector if the input is empty.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Starts with the first interval in a new group.
-    /// 2. For each subsequent interval, checks if it's contiguous with the previous.
-    /// 3. If contiguous (`prev_end` + 1 == `curr_start`), adds to current group.
-    /// 4. If not contiguous, starts a new group.
-    /// 5. Returns all groups.
+    /// Returns a vector of groups. Returns an empty vector if the input is empty.
     ///
     /// # Examples
     ///
     /// ```text
-    /// Contiguous intervals: [(1,5), (6,10), (11,15)]
-    /// Returns: [[(1,5), (6,10), (11,15)]]
+    /// Legacy chunked files with period=86_400_000_000_000 (1 day):
+    ///   [(1,5), (6,10), (11,15)] -> [[(1,5), (6,10), (11,15)]]
     ///
-    /// Non-contiguous intervals: [(1,5), (8,10), (12,15)]
-    /// Returns: [[(1,5)], [(8,10)], [(12,15)]]
+    /// Small period=1 with mixed gaps:
+    ///   [(1,5), (8,10), (12,15)] -> [[(1,5)], [(8,10)], [(12,15)]]
     /// ```
-    ///
-    /// # Notes
-    ///
-    /// - Input intervals should be sorted by start timestamp.
-    /// - Gaps between groups are preserved and not consolidated.
-    /// - Used internally by period-based consolidation methods.
     #[must_use]
-    pub fn group_contiguous_intervals(&self, intervals: &[(u64, u64)]) -> Vec<Vec<(u64, u64)>> {
+    pub fn group_contiguous_intervals(
+        &self,
+        intervals: &[(u64, u64)],
+        period_nanos: u64,
+    ) -> Vec<Vec<(u64, u64)>> {
         if intervals.is_empty() {
             return Vec::new();
         }
 
+        // Split groups only when the gap between files exceeds one period,
+        // since sub-period gaps land in the same consolidated file anyway.
+        // This works for both legacy chunked files (gap ~1ns) and fragment-per-flush
+        // catalogs (gap ~bar interval) without inferring spacing from the data.
         let mut contiguous_groups = Vec::new();
         let mut current_group = vec![intervals[0]];
 
         for i in 1..intervals.len() {
-            let prev_interval = intervals[i - 1];
-            let curr_interval = intervals[i];
+            let prev_end = intervals[i - 1].1;
+            let curr_start = intervals[i].0;
 
-            // Check if current interval is contiguous with previous (end + 1 == start)
-            if prev_interval.1 + 1 == curr_interval.0 {
-                current_group.push(curr_interval);
-            } else {
-                // Gap found, start new group
+            if curr_start.saturating_sub(prev_end) > period_nanos {
                 contiguous_groups.push(current_group);
-                current_group = vec![curr_interval];
+                current_group = vec![intervals[i]];
+            } else {
+                current_group.push(intervals[i]);
             }
         }
 
-        // Add the last group
         contiguous_groups.push(current_group);
 
         contiguous_groups

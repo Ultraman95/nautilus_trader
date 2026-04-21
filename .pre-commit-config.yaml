@@ -30,7 +30,7 @@ repos:
       - id: gitlint
 
   - repo: https://github.com/scop/pre-commit-shfmt
-    rev: v3.13.0-1
+    rev: v3.13.1-1
     hooks:
       - id: shfmt
         args: ["-i", "2", "-ci", "-sr", "-ln", "bash", "-w"]
@@ -92,7 +92,7 @@ repos:
         description: Checks GitHub Actions workflow syntax and structural correctness
 
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
-    rev: v1.23.1
+    rev: v1.24.1
     hooks:
       - id: zizmor
         name: zizmor (security)
@@ -298,7 +298,7 @@ repos:
         types: [python]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.9
+    rev: v0.15.11
     hooks:
       - id: ruff
         name: ruff
@@ -335,7 +335,7 @@ repos:
           ]
 
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.20.0
+    rev: v1.20.1
     hooks:
       - id: mypy
         language_version: python3.13 # Pin to 3.13 due to incompatibility with 3.14
@@ -352,7 +352,7 @@ repos:
           ]
 
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.11.3 # Must match [tool.uv] required-version in pyproject.toml
+    rev: 0.11.7 # Must match [tool.uv] required-version in pyproject.toml
     hooks:
       - id: uv-lock
         files: ^(uv\.lock|python/uv\.lock)$

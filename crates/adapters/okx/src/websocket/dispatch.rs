@@ -186,7 +186,7 @@ impl WsDispatchState {
 /// proper order events (OrderAccepted, OrderCanceled, OrderFilled, etc.).
 /// For untracked orders (external or pre-existing), falls back to execution
 /// reports for downstream reconciliation.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn dispatch_ws_message(
     message: OKXWsMessage,
     emitter: &ExecutionEventEmitter,
@@ -486,7 +486,7 @@ pub fn dispatch_ws_message(
 
 /// Dispatches order messages, producing proper order events for tracked orders
 /// and falling back to execution reports for untracked/external orders.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn dispatch_order_messages(
     order_msgs: &[OKXOrderMsg],
     emitter: &ExecutionEventEmitter,
@@ -640,7 +640,7 @@ fn dispatch_order_messages(
 /// Guarantees the `Submitted -> Accepted -> ...` lifecycle by synthesizing
 /// `OrderAccepted` before any other event when one has not yet been emitted.
 /// Duplicate `Accepted` events (e.g. from reconnect replays) are suppressed.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn dispatch_parsed_order_event(
     event: ParsedOrderEvent,
     client_order_id: ClientOrderId,
@@ -853,7 +853,7 @@ fn fill_report_to_order_filled(
 }
 
 /// Falls back to the report path for a single order message.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn dispatch_order_msg_as_report(
     msg: &OKXOrderMsg,
     account_id: AccountId,
@@ -924,6 +924,8 @@ pub fn dispatch_execution_reports(
             ExecutionReport::Order(order_report) => {
                 if let Some(cid) = order_report.client_order_id {
                     match order_report.order_status {
+                        // Guard form reformats awkwardly across multiple lines
+                        #[expect(clippy::collapsible_match)]
                         OrderStatus::Accepted => {
                             if state.filled_orders.contains(&cid)
                                 || state.triggered_orders.contains(&cid)

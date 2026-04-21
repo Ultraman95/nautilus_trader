@@ -45,14 +45,16 @@ extension-module = [
   "nautilus-execution/extension-module",
   "nautilus-hyperliquid/extension-module",
   "nautilus-indicators/extension-module",
-  "nautilus-kraken/extension-module",
   "nautilus-infrastructure/extension-module",
+  "nautilus-interactive-brokers/extension-module",
+  "nautilus-kraken/extension-module",
   "nautilus-live/extension-module",
   "nautilus-model/extension-module",
   "nautilus-okx/extension-module",
   "nautilus-polymarket/extension-module",
   "nautilus-sandbox/extension-module",
   "nautilus-persistence/extension-module",
+  "nautilus-risk/extension-module",
   "nautilus-serialization/extension-module",
   "nautilus-tardis/extension-module",
   "nautilus-testkit/extension-module",
@@ -93,7 +95,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 nautilus-analysis = { workspace = true, features = ["python"] }
-nautilus-backtest = { workspace = true, features = ["python"] }
+nautilus-backtest = { workspace = true, features = ["python", "examples"] }
 nautilus-common = { workspace = true, features = ["python"] }
 nautilus-core = { workspace = true, features = ["python"] }
 nautilus-cryptography = { workspace = true, features = ["python"] }
@@ -101,10 +103,11 @@ nautilus-data = { workspace = true, features = ["python"] }
 nautilus-execution = { workspace = true, features = ["python"] }
 nautilus-indicators = { workspace = true, features = ["python"] }
 nautilus-infrastructure = { workspace = true, features = ["python"] }
-nautilus-live = { workspace = true, features = ["python"] }
+nautilus-live = { workspace = true, features = ["python", "examples"] }
 nautilus-model = { workspace = true, features = ["python"] }
 nautilus-network = { workspace = true, features = ["python"] }
 nautilus-persistence = { workspace = true, features = ["python"] }
+nautilus-risk = { workspace = true, features = ["python"] }
 nautilus-serialization = { workspace = true, features = ["python"] }
 nautilus-testkit = { workspace = true, features = ["python"] }
 nautilus-trading = { workspace = true, features = ["python"] }
@@ -122,6 +125,7 @@ nautilus-databento = { workspace = true, features = ["python", "live"] }
 nautilus-deribit = { workspace = true, features = ["python"] }
 nautilus-dydx = { workspace = true, features = ["python"] }
 nautilus-hyperliquid = { workspace = true, features = ["python"] }
+nautilus-interactive-brokers = { workspace = true, features = ["python"] }
 nautilus-kraken = { workspace = true, features = ["python"] }
 nautilus-okx = { workspace = true, features = ["python"] }
 nautilus-polymarket = { workspace = true, features = ["python"] }
@@ -136,3 +140,4 @@ pyo3-stub-gen = { workspace = true }
 name = "python-stub-gen"
 path = "bin/stub_gen.rs"
 doc = false
+test = false

@@ -37,7 +37,7 @@ from nautilus_trader.adapters.binance.common.schemas.account import BinanceOrder
 from nautilus_trader.adapters.binance.common.schemas.account import BinanceUserTrade
 from nautilus_trader.adapters.binance.common.symbol import BinanceSymbol
 from nautilus_trader.adapters.binance.common.urls import get_ws_api_base_url
-from nautilus_trader.adapters.binance.common.urls import get_ws_base_url
+from nautilus_trader.adapters.binance.common.urls import get_ws_private_base_url
 from nautilus_trader.adapters.binance.config import BinanceExecClientConfig
 from nautilus_trader.adapters.binance.http.account import BinanceAccountHttpAPI
 from nautilus_trader.adapters.binance.http.client import BinanceHttpClient
@@ -221,7 +221,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
         stream_base_url: str | None = None
 
         if account_type.is_futures:
-            stream_base_url = config.base_url_ws_stream or get_ws_base_url(
+            stream_base_url = config.base_url_ws_stream or get_ws_private_base_url(
                 account_type=account_type,
                 environment=environment,
                 is_us=config.us,
@@ -254,6 +254,7 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
             is_ed25519=is_ed25519,
             http_client=http_client_for_ws,
             account_type=account_type_for_ws,
+            on_resubscribe=self._reconcile_after_resubscribe,
         )
 
         self._submit_order_method: dict[
@@ -1545,6 +1546,15 @@ class BinanceCommonExecutionClient(LiveExecutionClient):
                     )
             finally:
                 await self._retry_manager_pool.release(retry_manager)
+
+    async def _reconcile_after_resubscribe(self) -> None:
+        # Listen key rotation leaves a brief window where Binance may have sent
+        # events into a stream with no active subscriber. Request a full mass
+        # status (no lookback cap) so resting GTC orders older than any cap
+        # still reconcile if they were canceled or filled during the gap.
+        mass_status = await self.generate_mass_status(lookback_mins=None)
+        if mass_status is not None:
+            self._send_mass_status_report(mass_status)
 
     def _handle_user_ws_message(self, raw: bytes) -> None:
         # Implement in child class

@@ -22,10 +22,13 @@ use nautilus_model::{
         MarkPriceUpdate, OrderBookDelta, OrderBookDepth10, QuoteTick, TradeTick,
         depth::DEPTH10_LEN, is_monotonically_increasing_by_init, to_variant,
     },
-    enums::{AggregationSource, AggressorSide, BarAggregation, BookAction, OrderSide, PriceType},
+    enums::{
+        AggregationSource, AggressorSide, BarAggregation, BookAction, CurrencyType, OrderSide,
+        PriceType,
+    },
     identifiers::{InstrumentId, Symbol, TradeId},
     instruments::{
-        CurrencyPair, Instrument, InstrumentAny,
+        CryptoPerpetual, CurrencyPair, Instrument, InstrumentAny,
         stubs::{audusd_sim, equity_aapl},
     },
     types::{Currency, Price, Quantity},
@@ -98,7 +101,7 @@ fn create_order_book_depth10(ts_init: u64) -> OrderBookDepth10 {
     let mut quantity = 100.0;
     let mut order_id = 1;
 
-    #[allow(clippy::needless_range_loop)]
+    #[expect(clippy::needless_range_loop)]
     for i in 0..DEPTH10_LEN {
         let order = BookOrder::new(
             OrderSide::Buy,
@@ -119,7 +122,7 @@ fn create_order_book_depth10(ts_init: u64) -> OrderBookDepth10 {
     quantity = 100.0;
     order_id = 11;
 
-    #[allow(clippy::needless_range_loop)]
+    #[expect(clippy::needless_range_loop)]
     for i in 0..DEPTH10_LEN {
         let order = BookOrder::new(
             OrderSide::Sell,
@@ -1081,6 +1084,49 @@ fn test_consolidate_data_by_period_ensure_contiguous_files_false() {
 }
 
 #[rstest]
+fn test_consolidate_data_by_period_fragment_per_flush() {
+    // Regression for #3857: fragment-per-flush catalogs (one bar per file, with the file
+    // interval shaped as [ts, ts]) were split into single-file groups under the old
+    // `prev_end + 1 == curr_start` rule, causing pairwise merging. Period-based grouping
+    // collapses an hour's worth of single-bar files into one daily file.
+    let (_temp_dir, mut catalog) = create_temp_catalog();
+
+    let hour_ns: u64 = 3_600_000_000_000;
+    let mut last_bar_type: Option<String> = None;
+
+    for i in 0..24 {
+        let bar = create_bar(i * hour_ns + 1);
+        last_bar_type = Some(bar.bar_type.to_string());
+        catalog
+            .write_to_parquet(vec![bar], None, None, Some(true))
+            .unwrap();
+    }
+
+    let bar_type = last_bar_type.unwrap();
+    assert_eq!(
+        catalog
+            .get_intervals("bars", Some(&bar_type))
+            .unwrap()
+            .len(),
+        24
+    );
+
+    catalog
+        .consolidate_data_by_period(
+            "bars",
+            Some(bar_type.as_str()),
+            Some(86_400_000_000_000),
+            None,
+            None,
+            Some(false),
+        )
+        .unwrap();
+
+    let intervals = catalog.get_intervals("bars", Some(&bar_type)).unwrap();
+    assert_eq!(intervals.len(), 1);
+}
+
+#[rstest]
 fn test_consolidate_catalog_by_period_basic() {
     let (_temp_dir, mut catalog) = create_temp_catalog();
 
@@ -1696,30 +1742,62 @@ fn test_group_contiguous_intervals_moved() {
 
     let catalog = ParquetDataCatalog::new(&base_dir, None, None, None, None);
 
-    // Test contiguous intervals
+    // Legacy chunked files: gap of 1ns, one group regardless of period
     let intervals = vec![(1, 5), (6, 10), (11, 15)];
-    let groups = catalog.group_contiguous_intervals(&intervals);
+    let groups = catalog.group_contiguous_intervals(&intervals, 1);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0], intervals);
 
-    // Test non-contiguous intervals (gap between 5 and 8)
+    // Non-contiguous intervals (gaps of 3 and 2) split under a tight period
     let intervals = vec![(1, 5), (8, 10), (12, 15)];
-    let groups = catalog.group_contiguous_intervals(&intervals);
+    let groups = catalog.group_contiguous_intervals(&intervals, 1);
     assert_eq!(groups.len(), 3);
     assert_eq!(groups[0], vec![(1, 5)]);
     assert_eq!(groups[1], vec![(8, 10)]);
     assert_eq!(groups[2], vec![(12, 15)]);
 
-    // Test empty intervals
-    let intervals = vec![];
-    let groups = catalog.group_contiguous_intervals(&intervals);
+    // Same intervals collapse into one group when the period tolerates the gaps
+    let groups = catalog.group_contiguous_intervals(&intervals, 5);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0], intervals);
+
+    // Fragment-per-flush pattern (one bar per file, start == end): consecutive intervals
+    // are separated by the bar interval (one hour), not by 1ns. The old contiguity rule
+    // split these into single-file groups; the period-based rule collapses them under a
+    // 1-day period.
+    let hour: u64 = 3_600_000_000_000;
+    let day: u64 = 86_400_000_000_000;
+    let intervals = vec![(0, 0), (hour, hour), (2 * hour, 2 * hour)];
+    let groups = catalog.group_contiguous_intervals(&intervals, day);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0], intervals);
+
+    // Same fragment-per-flush intervals split under a tight (sub-hour) period
+    let groups = catalog.group_contiguous_intervals(&intervals, 60);
+    assert_eq!(groups.len(), 3);
+
+    // Empty intervals
+    let intervals: Vec<(u64, u64)> = vec![];
+    let groups = catalog.group_contiguous_intervals(&intervals, 1);
     assert_eq!(groups.len(), 0);
 
-    // Test single interval
+    // Single interval
     let intervals = vec![(1, 5)];
-    let groups = catalog.group_contiguous_intervals(&intervals);
+    let groups = catalog.group_contiguous_intervals(&intervals, 1);
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0], vec![(1, 5)]);
+
+    // Boundary: gap exactly equal to period merges (comparison is strict `>`)
+    let period: u64 = 1_000;
+    let intervals = vec![(0, 0), (period, period)];
+    let groups = catalog.group_contiguous_intervals(&intervals, period);
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0], intervals);
+
+    // Boundary: one nanosecond past the period splits
+    let intervals = vec![(0, 0), (period + 1, period + 1)];
+    let groups = catalog.group_contiguous_intervals(&intervals, period);
+    assert_eq!(groups.len(), 2);
 }
 
 #[rstest]
@@ -1748,7 +1826,7 @@ fn test_prepare_consolidation_queries_basic_moved() {
 }
 
 #[rstest]
-#[allow(clippy::needless_collect)] // Collect needed for .len() and .iter().find()
+#[expect(clippy::needless_collect)] // Collect needed for .len() and .iter().find()
 fn test_prepare_consolidation_queries_with_splits_moved() {
     let tmp = tempfile::tempdir().unwrap();
     let base_dir = tmp.path().join("catalog");
@@ -3000,6 +3078,7 @@ fn test_rust_custom_data_roundtrip_with_params_field() {
 /// Regression: write_data_enum groups custom data by full DataType (type_name + identifier + metadata).
 /// Same type_name with different identifiers must produce separate batches and be readable back.
 #[rstest]
+#[ignore = "Slow regression test (>120s) for custom data identifier batching; run manually when changing catalog custom data write/query paths"]
 fn test_write_data_enum_mixed_custom_data_identifiers() {
     use std::sync::Arc;
 
@@ -3643,4 +3722,65 @@ fn test_write_instruments_groups_by_type_and_id_before_encoding() {
     assert!(matches!(read[1], InstrumentAny::Equity(_)));
     assert_eq!(HasTsInit::ts_init(&read[0]), UnixNanos::from(1_000));
     assert_eq!(HasTsInit::ts_init(&read[1]), UnixNanos::from(2_000));
+}
+
+// Regression: instrument decode must not fail on base currencies that are not
+// pre-registered in CURRENCY_MAP (e.g. newly listed exchange assets). See issue #3898.
+#[rstest]
+fn test_instrument_roundtrip_with_unregistered_base_currency() {
+    // Use a deliberately unusual code that is not pre-registered in CURRENCY_MAP,
+    // and construct the Currency via `Currency::new` so the write path does not
+    // register it in the global map. This mirrors the fresh-session read scenario
+    // reported in issue #3898.
+    let unknown_code = "XUNREG1";
+    assert!(
+        Currency::try_from_str(unknown_code).is_none(),
+        "test precondition: '{unknown_code}' must not be pre-registered",
+    );
+
+    let base_currency = Currency::new(unknown_code, 8, 0, unknown_code, CurrencyType::Crypto);
+    let quote_currency = Currency::from("USDT");
+
+    let instrument_id = InstrumentId::from("XUNREG1USDT-PERP.BINANCE");
+    let perp = CryptoPerpetual::new(
+        instrument_id,
+        Symbol::from("XUNREG1USDT"),
+        base_currency,
+        quote_currency,
+        quote_currency,
+        false,
+        4,
+        0,
+        Price::from("0.0001"),
+        Quantity::from("1"),
+        None,
+        None,
+        None,
+        Some(Quantity::from("1")),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(Decimal::from(2) / Decimal::from(10_000)),
+        Some(Decimal::from(4) / Decimal::from(10_000)),
+        None,
+        UnixNanos::default(),
+        UnixNanos::default(),
+    );
+
+    let (_temp_dir, catalog) = create_temp_catalog();
+    catalog
+        .write_instruments(vec![InstrumentAny::CryptoPerpetual(perp)])
+        .unwrap();
+
+    let ids = vec![instrument_id.to_string()];
+    let read = catalog.query_instruments(Some(&ids)).unwrap();
+    assert_eq!(read.len(), 1);
+    let InstrumentAny::CryptoPerpetual(decoded) = &read[0] else {
+        panic!("expected CryptoPerpetual");
+    };
+    assert_eq!(decoded.base_currency.code.as_str(), unknown_code);
+    assert_eq!(decoded.base_currency.currency_type, CurrencyType::Crypto);
 }

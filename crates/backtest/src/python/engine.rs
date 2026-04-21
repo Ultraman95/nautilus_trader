@@ -31,18 +31,19 @@ use nautilus_execution::models::{
         ProbabilisticFillModel, SizeAwareFillModel, ThreeTierFillModel, TwoTierFillModel,
         VolumeSensitiveFillModel,
     },
-    latency::{LatencyModel, StaticLatencyModel},
+    latency::{LatencyModelAny, StaticLatencyModel},
 };
 use nautilus_model::{
     accounts::margin_model::{LeveragedMarginModel, MarginModelAny, StandardMarginModel},
     data::{
-        Bar, Data, IndexPriceUpdate, InstrumentClose, MarkPriceUpdate, OrderBookDelta,
-        OrderBookDeltas, OrderBookDeltas_API, OrderBookDepth10, QuoteTick, TradeTick,
+        Bar, Data, IndexPriceUpdate, InstrumentClose, InstrumentStatus, MarkPriceUpdate,
+        OrderBookDelta, OrderBookDeltas, OrderBookDeltas_API, OrderBookDepth10, QuoteTick,
+        TradeTick,
     },
     enums::{AccountType, BookType, OmsType, OtoTriggerMode},
     identifiers::{ActorId, ClientId, ComponentId, InstrumentId, StrategyId, TraderId, Venue},
     python::instruments::pyobject_to_instrument_any,
-    types::{Currency, Money},
+    types::{Currency, Money, Price},
 };
 use nautilus_trading::{
     ImportableStrategyConfig,
@@ -53,9 +54,9 @@ use rust_decimal::Decimal;
 
 use super::node::create_config_instance;
 use crate::{
-    config::BacktestEngineConfig,
+    config::{BacktestEngineConfig, SimulatedVenueConfig},
     engine::BacktestEngine,
-    modules::{FXRolloverInterestModule, SimulationModule},
+    modules::{FXRolloverInterestModule, SimulationModuleAny},
     result::BacktestResult,
 };
 
@@ -116,9 +117,10 @@ impl PyBacktestEngine {
             frozen_account = false,
             oto_trigger_mode = OtoTriggerMode::Partial,
             price_protection_points = None,
+            settlement_prices = None,
         )
     )]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn py_add_venue(
         &mut self,
         venue: Venue,
@@ -152,8 +154,12 @@ impl PyBacktestEngine {
         frozen_account: bool,
         oto_trigger_mode: OtoTriggerMode,
         price_protection_points: Option<u32>,
+        settlement_prices: Option<HashMap<InstrumentId, Price>>,
     ) -> PyResult<()> {
         let leverages: AHashMap<InstrumentId, Decimal> = leverages
+            .map(|m| m.into_iter().collect())
+            .unwrap_or_default();
+        let settlement_prices: AHashMap<InstrumentId, Price> = settlement_prices
             .map(|m| m.into_iter().collect())
             .unwrap_or_default();
         let margin_model = margin_model
@@ -168,57 +174,71 @@ impl PyBacktestEngine {
             .transpose()?
             .unwrap_or_default();
         let latency_model = latency_model
-            .map(|obj| Python::attach(|py| pyobject_to_latency_model(py, obj.bind(py))))
-            .transpose()?;
+            .map(|obj| Python::attach(|py| pyobject_to_latency_model_any(py, obj.bind(py))))
+            .transpose()?
+            .map(Into::into);
         let modules = modules
             .map(|objs| {
                 objs.into_iter()
-                    .map(|obj| Python::attach(|py| pyobject_to_simulation_module(py, obj.bind(py))))
+                    .map(|obj| {
+                        Python::attach(|py| pyobject_to_simulation_module_any(py, obj.bind(py)))
+                    })
                     .collect::<PyResult<Vec<_>>>()
             })
             .transpose()?
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect();
 
-        self.0
-            .add_venue(
-                venue,
-                oms_type,
-                account_type,
-                book_type,
-                starting_balances,
-                base_currency,
-                default_leverage,
-                leverages,
-                margin_model,
-                modules,
-                fill_model,
-                fee_model,
-                latency_model,
-                Some(routing),
-                Some(reject_stop_orders),
-                Some(support_gtd_orders),
-                Some(support_contingent_orders),
-                Some(use_position_ids),
-                Some(use_random_ids),
-                Some(use_reduce_only),
-                Some(use_message_queue),
-                Some(use_market_order_acks),
-                Some(bar_execution),
-                Some(bar_adaptive_high_low_ordering),
-                Some(trade_execution),
-                Some(liquidity_consumption),
-                Some(allow_cash_borrowing),
-                Some(frozen_account),
-                Some(queue_position),
-                Some(oto_trigger_mode == OtoTriggerMode::Full),
-                price_protection_points,
-            )
-            .map_err(to_pyruntime_err)
+        let sim_config = SimulatedVenueConfig::builder()
+            .venue(venue)
+            .oms_type(oms_type)
+            .account_type(account_type)
+            .book_type(book_type)
+            .starting_balances(starting_balances)
+            .maybe_base_currency(base_currency)
+            .maybe_default_leverage(default_leverage)
+            .leverages(leverages)
+            .maybe_margin_model(margin_model)
+            .modules(modules)
+            .fill_model(fill_model)
+            .fee_model(fee_model)
+            .maybe_latency_model(latency_model)
+            .routing(routing)
+            .reject_stop_orders(reject_stop_orders)
+            .support_gtd_orders(support_gtd_orders)
+            .support_contingent_orders(support_contingent_orders)
+            .use_position_ids(use_position_ids)
+            .use_random_ids(use_random_ids)
+            .use_reduce_only(use_reduce_only)
+            .use_message_queue(use_message_queue)
+            .use_market_order_acks(use_market_order_acks)
+            .bar_execution(bar_execution)
+            .bar_adaptive_high_low_ordering(bar_adaptive_high_low_ordering)
+            .trade_execution(trade_execution)
+            .liquidity_consumption(liquidity_consumption)
+            .allow_cash_borrowing(allow_cash_borrowing)
+            .frozen_account(frozen_account)
+            .queue_position(queue_position)
+            .oto_full_trigger(oto_trigger_mode == OtoTriggerMode::Full)
+            .maybe_price_protection_points(price_protection_points)
+            .build();
+
+        self.0.add_venue(sim_config).map_err(to_pyruntime_err)?;
+
+        for (instrument_id, price) in settlement_prices {
+            self.0
+                .set_settlement_price(venue, instrument_id, price)
+                .map_err(to_pyruntime_err)?;
+        }
+
+        Ok(())
     }
 
     /// Changes the fill model for a venue.
     #[pyo3(name = "change_fill_model")]
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     fn py_change_fill_model(
         &mut self,
         py: Python,
@@ -266,7 +286,7 @@ impl PyBacktestEngine {
         reason = "Required for Python actor component registration"
     )]
     #[pyo3(name = "add_actor_from_config")]
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     fn py_add_actor_from_config(
         &mut self,
         _py: Python,
@@ -406,7 +426,7 @@ impl PyBacktestEngine {
         reason = "Required for Python strategy component registration"
     )]
     #[pyo3(name = "add_strategy_from_config")]
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     fn py_add_strategy_from_config(
         &mut self,
         _py: Python,
@@ -541,6 +561,63 @@ impl PyBacktestEngine {
         Ok(())
     }
 
+    /// Adds a native Rust strategy from its config.
+    ///
+    /// The config type determines which built-in strategy is constructed.
+    /// All execution happens in Rust; Python is the configuration layer.
+    #[cfg(feature = "examples")]
+    #[pyo3(name = "add_native_strategy")]
+    fn py_add_native_strategy(&mut self, config: &Bound<'_, PyAny>) -> PyResult<()> {
+        use nautilus_trading::examples::strategies::{
+            DeltaNeutralVol, DeltaNeutralVolConfig, EmaCross, EmaCrossConfig, GridMarketMaker,
+            GridMarketMakerConfig, HurstVpinDirectional, HurstVpinDirectionalConfig,
+        };
+
+        if let Ok(config) = config.extract::<EmaCrossConfig>() {
+            self.0
+                .add_strategy(EmaCross::from_config(config))
+                .map_err(to_pyruntime_err)
+        } else if let Ok(config) = config.extract::<GridMarketMakerConfig>() {
+            self.0
+                .add_strategy(GridMarketMaker::new(config))
+                .map_err(to_pyruntime_err)
+        } else if let Ok(config) = config.extract::<DeltaNeutralVolConfig>() {
+            self.0
+                .add_strategy(DeltaNeutralVol::new(config))
+                .map_err(to_pyruntime_err)
+        } else if let Ok(config) = config.extract::<HurstVpinDirectionalConfig>() {
+            self.0
+                .add_strategy(HurstVpinDirectional::new(config))
+                .map_err(to_pyruntime_err)
+        } else {
+            let type_name = config.get_type().name()?;
+            Err(to_pytype_err(format!(
+                "Unsupported native strategy config type: {type_name}",
+            )))
+        }
+    }
+
+    /// Adds a native Rust actor from its config.
+    ///
+    /// The config type determines which built-in actor is constructed.
+    /// All execution happens in Rust; Python is the configuration layer.
+    #[cfg(feature = "examples")]
+    #[pyo3(name = "add_native_actor")]
+    fn py_add_native_actor(&mut self, config: &Bound<'_, PyAny>) -> PyResult<()> {
+        use nautilus_trading::examples::actors::{BookImbalanceActor, BookImbalanceActorConfig};
+
+        if let Ok(config) = config.extract::<BookImbalanceActorConfig>() {
+            self.0
+                .add_actor(BookImbalanceActor::from_config(config))
+                .map_err(to_pyruntime_err)
+        } else {
+            let type_name = config.get_type().name()?;
+            Err(to_pytype_err(format!(
+                "Unsupported native actor config type: {type_name}",
+            )))
+        }
+    }
+
     /// Runs the backtest engine.
     #[pyo3(
         name = "run",
@@ -656,7 +733,10 @@ impl PyBacktestEngine {
     }
 }
 
-fn pyobject_to_fill_model_any(_py: Python, obj: &Bound<'_, PyAny>) -> PyResult<FillModelAny> {
+pub(crate) fn pyobject_to_fill_model_any(
+    _py: Python,
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<FillModelAny> {
     if let Ok(m) = obj.extract::<DefaultFillModel>() {
         return Ok(FillModelAny::Default(m));
     }
@@ -707,7 +787,10 @@ fn pyobject_to_fill_model_any(_py: Python, obj: &Bound<'_, PyAny>) -> PyResult<F
     )))
 }
 
-fn pyobject_to_fee_model_any(_py: Python, obj: &Bound<'_, PyAny>) -> PyResult<FeeModelAny> {
+pub(crate) fn pyobject_to_fee_model_any(
+    _py: Python,
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<FeeModelAny> {
     if let Ok(m) = obj.extract::<FixedFeeModel>() {
         return Ok(FeeModelAny::Fixed(m));
     }
@@ -726,13 +809,13 @@ fn pyobject_to_fee_model_any(_py: Python, obj: &Bound<'_, PyAny>) -> PyResult<Fe
     )))
 }
 
-fn pyobject_to_simulation_module(
+pub(crate) fn pyobject_to_simulation_module_any(
     _py: Python,
     obj: &Bound<'_, PyAny>,
-) -> PyResult<Box<dyn SimulationModule>> {
+) -> PyResult<SimulationModuleAny> {
     if let Ok(cell) = obj.cast::<FXRolloverInterestModule>() {
         let module = cell.borrow().clone();
-        return Ok(Box::new(module));
+        return Ok(SimulationModuleAny::FXRolloverInterest(module));
     }
 
     let type_name = obj.get_type().name()?;
@@ -741,12 +824,12 @@ fn pyobject_to_simulation_module(
     )))
 }
 
-fn pyobject_to_latency_model(
+pub(crate) fn pyobject_to_latency_model_any(
     _py: Python,
     obj: &Bound<'_, PyAny>,
-) -> PyResult<Box<dyn LatencyModel>> {
+) -> PyResult<LatencyModelAny> {
     if let Ok(m) = obj.extract::<StaticLatencyModel>() {
-        return Ok(Box::new(m));
+        return Ok(LatencyModelAny::Static(m));
     }
 
     let type_name = obj.get_type().name()?;
@@ -755,7 +838,10 @@ fn pyobject_to_latency_model(
     )))
 }
 
-fn pyobject_to_margin_model_any(_py: Python, obj: &Bound<'_, PyAny>) -> PyResult<MarginModelAny> {
+pub(crate) fn pyobject_to_margin_model_any(
+    _py: Python,
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<MarginModelAny> {
     if let Ok(m) = obj.extract::<StandardMarginModel>() {
         return Ok(MarginModelAny::Standard(m));
     }
@@ -803,6 +889,10 @@ fn pyobject_to_data(_py: Python, obj: &Bound<'_, PyAny>) -> PyResult<Data> {
         return Ok(Data::IndexPriceUpdate(index));
     }
 
+    if let Ok(status) = obj.extract::<InstrumentStatus>() {
+        return Ok(Data::InstrumentStatus(status));
+    }
+
     if let Ok(close) = obj.extract::<InstrumentClose>() {
         return Ok(Data::InstrumentClose(close));
     }
@@ -830,6 +920,10 @@ fn pyobject_to_data(_py: Python, obj: &Bound<'_, PyAny>) -> PyResult<Data> {
 
     if let Ok(index) = IndexPriceUpdate::from_pyobject(obj) {
         return Ok(Data::IndexPriceUpdate(index));
+    }
+
+    if let Ok(status) = InstrumentStatus::from_pyobject(obj) {
+        return Ok(Data::InstrumentStatus(status));
     }
 
     if let Ok(close) = InstrumentClose::from_pyobject(obj) {

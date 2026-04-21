@@ -64,7 +64,7 @@ impl MarketOrder {
     /// Returns an error if:
     /// - The `quantity` is not positive.
     /// - The `time_in_force` is GTD (invalid for market orders).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new_checked(
         trader_id: TraderId,
         strategy_id: StrategyId,
@@ -85,7 +85,7 @@ impl MarketOrder {
         exec_algorithm_params: Option<IndexMap<Ustr, Ustr>>,
         exec_spawn_id: Option<ClientOrderId>,
         tags: Option<Vec<Ustr>>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, OrderError> {
         check_positive_quantity(quantity, stringify!(quantity))?;
         check_predicate_false(
             time_in_force == TimeInForce::Gtd,
@@ -139,7 +139,8 @@ impl MarketOrder {
     /// # Panics
     ///
     /// Panics if any order validation fails (see [`MarketOrder::new_checked`]).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new(
         trader_id: TraderId,
         strategy_id: StrategyId,
@@ -182,7 +183,7 @@ impl MarketOrder {
             exec_spawn_id,
             tags,
         )
-        .expect(FAILED)
+        .unwrap_or_else(|e| panic!("{FAILED}: {e}"))
     }
 }
 

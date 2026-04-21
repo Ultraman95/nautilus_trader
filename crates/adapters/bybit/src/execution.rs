@@ -377,7 +377,7 @@ impl ExecutionClient for BybitExecutionClient {
             for product_type in &product_types {
                 let instruments = self
                     .http_client
-                    .request_instruments(*product_type, None)
+                    .request_instruments(*product_type, None, None)
                     .await
                     .with_context(|| {
                         format!("failed to request Bybit instruments for {product_type:?}")
@@ -523,12 +523,12 @@ impl ExecutionClient for BybitExecutionClient {
         Ok(())
     }
 
-    fn query_account(&self, _cmd: &QueryAccount) -> anyhow::Result<()> {
+    fn query_account(&self, _cmd: QueryAccount) -> anyhow::Result<()> {
         self.update_account_state();
         Ok(())
     }
 
-    fn query_order(&self, cmd: &QueryOrder) -> anyhow::Result<()> {
+    fn query_order(&self, cmd: QueryOrder) -> anyhow::Result<()> {
         let instrument_id = cmd.instrument_id;
         let product_type = self.get_product_type_for_instrument(instrument_id);
         let client_order_id = cmd.client_order_id;
@@ -592,7 +592,10 @@ impl ExecutionClient for BybitExecutionClient {
             let mut all_instruments = Vec::new();
 
             for product_type in product_types {
-                match http_client.request_instruments(product_type, None).await {
+                match http_client
+                    .request_instruments(product_type, None, None)
+                    .await
+                {
                     Ok(instruments) => {
                         if instruments.is_empty() {
                             log::warn!("No instruments returned for {product_type:?}");
@@ -875,7 +878,7 @@ impl ExecutionClient for BybitExecutionClient {
         Ok(Some(mass_status))
     }
 
-    fn submit_order(&self, cmd: &SubmitOrder) -> anyhow::Result<()> {
+    fn submit_order(&self, cmd: SubmitOrder) -> anyhow::Result<()> {
         let order = {
             let cache = self.core.cache();
             let order = cache
@@ -1028,7 +1031,7 @@ impl ExecutionClient for BybitExecutionClient {
         Ok(())
     }
 
-    fn submit_order_list(&self, cmd: &SubmitOrderList) -> anyhow::Result<()> {
+    fn submit_order_list(&self, cmd: SubmitOrderList) -> anyhow::Result<()> {
         if cmd.order_list.client_order_ids.is_empty() {
             return Ok(());
         }
@@ -1246,7 +1249,7 @@ impl ExecutionClient for BybitExecutionClient {
         Ok(())
     }
 
-    fn modify_order(&self, cmd: &ModifyOrder) -> anyhow::Result<()> {
+    fn modify_order(&self, cmd: ModifyOrder) -> anyhow::Result<()> {
         let instrument_id = cmd.instrument_id;
         let product_type = self.get_product_type_for_instrument(instrument_id);
         let client_order_id = cmd.client_order_id;
@@ -1384,7 +1387,7 @@ impl ExecutionClient for BybitExecutionClient {
         Ok(())
     }
 
-    fn cancel_order(&self, cmd: &CancelOrder) -> anyhow::Result<()> {
+    fn cancel_order(&self, cmd: CancelOrder) -> anyhow::Result<()> {
         let instrument_id = cmd.instrument_id;
         let product_type = self.get_product_type_for_instrument(instrument_id);
         let client_order_id = cmd.client_order_id;
@@ -1471,7 +1474,7 @@ impl ExecutionClient for BybitExecutionClient {
         Ok(())
     }
 
-    fn cancel_all_orders(&self, cmd: &CancelAllOrders) -> anyhow::Result<()> {
+    fn cancel_all_orders(&self, cmd: CancelAllOrders) -> anyhow::Result<()> {
         if cmd.order_side != OrderSide::NoOrderSide {
             log::warn!(
                 "Bybit does not support order_side filtering for cancel all orders; \
@@ -1505,7 +1508,7 @@ impl ExecutionClient for BybitExecutionClient {
         Ok(())
     }
 
-    fn batch_cancel_orders(&self, cmd: &BatchCancelOrders) -> anyhow::Result<()> {
+    fn batch_cancel_orders(&self, cmd: BatchCancelOrders) -> anyhow::Result<()> {
         if cmd.cancels.is_empty() {
             return Ok(());
         }

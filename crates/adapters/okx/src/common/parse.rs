@@ -43,7 +43,7 @@ use nautilus_model::{
     },
     events::AccountState,
     identifiers::{
-        AccountId, ClientOrderId, InstrumentId, PositionId, Symbol, TradeId, Venue, VenueOrderId,
+        AccountId, ClientOrderId, InstrumentId, PositionId, Symbol, TradeId, VenueOrderId,
     },
     instruments::{CryptoFuture, CryptoOption, CryptoPerpetual, CurrencyPair, InstrumentAny},
     reports::{FillReport, OrderStatusReport, PositionStatusReport},
@@ -560,7 +560,7 @@ pub fn parse_candlestick(
 /// # Errors
 ///
 /// Returns an error if the average price cannot be converted to a valid `Decimal`.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub fn parse_order_status_report(
     order: &OKXOrderHistory,
     account_id: AccountId,
@@ -911,7 +911,6 @@ pub fn parse_spot_margin_position_from_balance(
 /// # Errors
 ///
 /// Returns an error if any numeric fields cannot be parsed into their target types.
-#[allow(clippy::too_many_lines)]
 pub fn parse_position_status_report(
     position: &OKXPosition,
     account_id: AccountId,
@@ -1912,7 +1911,12 @@ pub fn parse_option_instrument(
     let instrument_id = parse_instrument_id(definition.inst_id);
     let raw_symbol = Symbol::from_ustr_unchecked(definition.inst_id);
     let underlying = Currency::get_or_create_crypto_with_context(underlying_str, Some(&context));
-    let option_kind: OptionKind = definition.opt_type.into();
+    let option_kind: OptionKind = OptionKind::try_from(definition.opt_type).map_err(|kind| {
+        anyhow::anyhow!(
+            "Unsupported `optType` '{kind:?}' for {}: cannot map to Nautilus OptionKind",
+            definition.inst_id
+        )
+    })?;
     let strike_price = Price::from_str(&definition.stk).map_err(|e| {
         anyhow::anyhow!(
             "Failed to parse `stk` '{}' for {}: {e}",
@@ -2027,14 +2031,9 @@ pub fn parse_option_instrument(
 
 /// Parses an OKX account into a Nautilus account state.
 ///
-fn parse_balance_field(
-    value_str: &str,
-    field_name: &str,
-    currency: Currency,
-    ccy_str: &str,
-) -> Option<Money> {
+fn parse_balance_field(value_str: &str, field_name: &str, ccy_str: &str) -> Option<Decimal> {
     match Decimal::from_str(value_str) {
-        Ok(decimal) => Money::from_decimal(decimal, currency).ok(),
+        Ok(decimal) => Some(decimal),
         Err(e) => {
             log::warn!(
                 "Skipping balance detail for {ccy_str} with invalid {field_name} '{value_str}': {e}"
@@ -2066,17 +2065,20 @@ pub fn parse_account_state(
         let currency = Currency::get_or_create_crypto_with_context(ccy_str, Some("balance detail"));
 
         // Parse balance values, skip if invalid
-        let Some(total) = parse_balance_field(&b.cash_bal, "cash_bal", currency, ccy_str) else {
+        let Some(total) = parse_balance_field(&b.cash_bal, "cash_bal", ccy_str) else {
             continue;
         };
 
-        let Some(free) = parse_balance_field(&b.avail_bal, "avail_bal", currency, ccy_str) else {
+        let Some(free) = parse_balance_field(&b.avail_bal, "avail_bal", ccy_str) else {
             continue;
         };
 
-        let locked = total - free;
-        let balance = AccountBalance::new(total, locked, free);
-        balances.push(balance);
+        match AccountBalance::from_total_and_free(total, free, currency) {
+            Ok(balance) => balances.push(balance),
+            Err(e) => {
+                log::warn!("Skipping balance detail for {ccy_str} with invalid total/free: {e}");
+            }
+        }
     }
 
     // Ensure at least one balance exists (Nautilus requires non-empty balances)
@@ -2090,7 +2092,8 @@ pub fn parse_account_state(
 
     let mut margins = Vec::new();
 
-    // OKX provides account-level margin requirements (not per instrument)
+    // OKX reports aggregate cross-margin requirements (`imr` / `mmr`) in USD terms;
+    // emit as an account-wide margin entry keyed by USD.
     if !okx_account.imr.is_empty() && !okx_account.mmr.is_empty() {
         match (
             Decimal::from_str(&okx_account.imr),
@@ -2099,8 +2102,6 @@ pub fn parse_account_state(
             (Ok(imr_dec), Ok(mmr_dec)) => {
                 if !imr_dec.is_zero() || !mmr_dec.is_zero() {
                     let margin_currency = Currency::USD();
-                    let margin_instrument_id =
-                        InstrumentId::new(Symbol::new("ACCOUNT"), Venue::new("OKX"));
 
                     let initial_margin = Money::from_decimal(imr_dec, margin_currency)
                         .unwrap_or_else(|e| {
@@ -2113,13 +2114,7 @@ pub fn parse_account_state(
                             Money::zero(margin_currency)
                         });
 
-                    let margin_balance = MarginBalance::new(
-                        initial_margin,
-                        maintenance_margin,
-                        margin_instrument_id,
-                    );
-
-                    margins.push(margin_balance);
+                    margins.push(MarginBalance::new(initial_margin, maintenance_margin, None));
                 }
             }
             (Err(e1), _) => {
@@ -2222,20 +2217,19 @@ mod tests {
 
     #[rstest]
     fn test_parse_balance_field_valid() {
-        let result = parse_balance_field("100.5", "test_field", Currency::BTC(), "BTC");
-        assert!(result.is_some());
-        assert_eq!(result.unwrap().as_f64(), 100.5);
+        let result = parse_balance_field("100.5", "test_field", "BTC");
+        assert_eq!(result, Some(dec!(100.5)));
     }
 
     #[rstest]
     fn test_parse_balance_field_invalid_numeric() {
-        let result = parse_balance_field("not_a_number", "test_field", Currency::BTC(), "BTC");
+        let result = parse_balance_field("not_a_number", "test_field", "BTC");
         assert!(result.is_none());
     }
 
     #[rstest]
     fn test_parse_balance_field_empty() {
-        let result = parse_balance_field("", "test_field", Currency::BTC(), "BTC");
+        let result = parse_balance_field("", "test_field", "BTC");
         assert!(result.is_none());
     }
 
@@ -3077,8 +3071,7 @@ mod tests {
         assert_eq!(margin.initial, Money::new(500.25, Currency::USD()));
         assert_eq!(margin.maintenance, Money::new(250.75, Currency::USD()));
         assert_eq!(margin.currency, Currency::USD());
-        assert_eq!(margin.instrument_id.symbol.as_str(), "ACCOUNT");
-        assert_eq!(margin.instrument_id.venue.as_str(), "OKX");
+        assert!(margin.instrument_id.is_none());
 
         // Check the USDT balance details
         let usdt_balance = &account_state.balances[0];
@@ -4361,6 +4354,53 @@ mod tests {
             parse_futures_instrument(&instrument, None, None, None, None, UnixNanos::default());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Empty underlying"));
+    }
+
+    #[rstest]
+    fn test_parse_option_instrument_empty_opt_type_returns_error() {
+        let instrument = OKXInstrument {
+            inst_type: OKXInstrumentType::Option,
+            inst_id: Ustr::from("BTC-USD-250328-50000-C"),
+            uly: Ustr::from("BTC-USD"),
+            inst_family: Ustr::from("BTC-USD"),
+            base_ccy: Ustr::from(""),
+            quote_ccy: Ustr::from(""),
+            settle_ccy: Ustr::from("USD"),
+            ct_val: "0.01".to_string(),
+            ct_mult: "1".to_string(),
+            ct_val_ccy: "BTC".to_string(),
+            // OKX sends `optType=""` for non-option instruments and the
+            // occasional malformed payload, which deserializes to `None`.
+            opt_type: crate::common::enums::OKXOptionType::None,
+            stk: "50000".to_string(),
+            list_time: None,
+            exp_time: Some(1743004800000),
+            lever: String::new(),
+            tick_sz: "0.0005".to_string(),
+            lot_sz: "0.1".to_string(),
+            min_sz: "0.1".to_string(),
+            ct_type: OKXContractType::Linear,
+            state: crate::common::enums::OKXInstrumentStatus::Preopen,
+            rule_type: String::new(),
+            max_lmt_sz: String::new(),
+            max_mkt_sz: String::new(),
+            max_lmt_amt: String::new(),
+            max_mkt_amt: String::new(),
+            max_twap_sz: String::new(),
+            max_iceberg_sz: String::new(),
+            max_trigger_sz: String::new(),
+            max_stop_sz: String::new(),
+            inst_id_code: None,
+        };
+
+        let result =
+            parse_option_instrument(&instrument, None, None, None, None, UnixNanos::default());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Unsupported") && err_msg.contains("optType"),
+            "expected Unsupported optType error, was: {err_msg}"
+        );
     }
 
     #[rstest]

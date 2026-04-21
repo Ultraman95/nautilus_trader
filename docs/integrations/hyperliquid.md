@@ -251,6 +251,37 @@ For full protocol details, see the Hyperliquid docs:
 - [Asset IDs](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/asset-ids)
 - [Fees](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/fees)
 
+### Wildcard character sanitization
+
+Some HIP-3 dexes deploy assets whose venue names contain `*` or `?` bytes
+(for example `dex:STREAMABCD****-USD-PERP`). Those bytes collide with the
+Nautilus message bus pattern syntax (`*` = zero-or-more, `?` = one-char) and
+would corrupt subscription routing if embedded in topic strings unchanged.
+
+The Hyperliquid adapter substitutes both bytes with `x` when constructing the
+`InstrumentId.symbol`, so a HIP-3 asset named `dex:STREAMABCD****` is exposed
+to strategies as:
+
+```python
+InstrumentId.from_str("dex:STREAMABCDxxxx-USD-PERP.HYPERLIQUID")
+```
+
+The substitution applies only to the Nautilus-internal symbol used in topics,
+caches, logs, and config. The venue-official name is preserved on the
+instrument's `raw_symbol` field for HTTP and WebSocket wire calls, and order
+submissions reference the numeric asset index, so the round-trip with
+Hyperliquid is unaffected.
+
+When subscribing to a HIP-3 instrument with wildcard bytes in its venue name,
+use the sanitized form. Symbols without `*` or `?` are passed through
+unchanged.
+
+The substitution is lossy: two distinct venue names such as `dex:FOO*` and
+`dex:FOO?` would normalize onto the same Nautilus symbol. The instrument
+loader detects collisions, keeps the first definition, and logs a warning
+with the dropped venue name; the dropped instrument will not be tradeable
+through Nautilus until the venue rename resolves the collision.
+
 ## Instrument provider
 
 The instrument provider supports filtering when loading instruments via
@@ -421,6 +452,78 @@ Cancel all and batch cancel issue individual cancel requests per order.
 Orders placed outside NautilusTrader (e.g. via the Hyperliquid web UI or another client)
 are detected and tracked as external orders. They appear in order status reports and position
 reconciliation.
+:::
+
+### Modify as cancel-replace
+
+Hyperliquid implements order modification as a **cancel-replace**. The `modify` action on the
+[exchange endpoint](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#modify-an-order)
+cancels the original order (old `oid`) and opens a replacement with a new `oid`. Both legs
+share the same client order ID (`cloid`).
+
+The modify HTTP response only confirms success. The
+[`orderUpdates` WebSocket subscription](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions)
+then delivers an `ACCEPTED(new_oid)` status report, followed by a `CANCELED(old_oid)` for the
+original leg.
+
+The Rust-native `HyperliquidExecutionClient` (used through
+`HyperliquidExecutionClientFactory`) runs detection, deduplication, and event promotion on the
+Rust side via the
+[`WsDispatchState`](https://github.com/nautechsystems/nautilus_trader/tree/develop/crates/adapters/hyperliquid/src/websocket/dispatch.rs)
+owned by the execution client. On submission the client registers an `OrderIdentity` (strategy,
+instrument, side, type, quantity, last-known price) keyed by `client_order_id`. Each inbound
+status report or fill is routed through the dispatch: tracked orders emit typed
+`OrderEventAny::*` events via `ExecutionEventEmitter::send_order_event`; external orders fall
+back to the raw `OrderStatusReport` / `FillReport` so the engine can reconcile. The dispatch
+compares the report's `venue_order_id` against the last cached value for the `cloid`; when
+they differ it promotes the `ACCEPTED` to `OrderUpdated` and suppresses the paired stale cancel:
+
+:::note
+The Python `HyperliquidExecutionClient` in `nautilus_trader/adapters/hyperliquid/execution.py`
+still runs its own equivalent detection inside `_handle_order_status_report_pyo3` because the
+pyo3 WebSocket binding forwards raw reports to Python. The Rust dispatch described below is
+additive, for the Rust-native execution client.
+:::
+
+```mermaid
+sequenceDiagram
+    participant Strategy
+    participant ExecClient as HyperliquidExecutionClient (Rust)
+    participant Dispatch as WsDispatchState (Rust)
+    participant HTTP as Hyperliquid HTTP
+    participant WS as Hyperliquid WS
+
+    Strategy->>ExecClient: ModifyOrder(cloid, old_oid)
+    ExecClient->>HTTP: POST /exchange { action: "modify", oid: old_oid }
+    HTTP-->>ExecClient: { status: "ok" }
+    ExecClient->>Dispatch: mark_pending_modify(cloid, old_oid)
+    WS-->>ExecClient: ACCEPTED(new_oid, cloid)
+    ExecClient->>Dispatch: dispatch_order_status_report()
+    Dispatch->>Dispatch: cached_voi != new_oid -> promote to OrderUpdated,<br/>clear_pending_modify, record_venue_order_id(new_oid)
+    Dispatch-->>Strategy: OrderUpdated(venue_order_id=new_oid)
+    WS-->>ExecClient: CANCELED(old_oid, cloid)
+    ExecClient->>Dispatch: dispatch_order_status_report()
+    Dispatch->>Dispatch: cached_voi != old_oid -> Skip (stale cancel)
+```
+
+If Hyperliquid delivers `CANCELED(old_oid)` before `ACCEPTED(new_oid)` for an in-flight modify,
+the pending-modify marker lets the dispatch drop the old leg's cancel and still route the
+subsequent `ACCEPTED` through the `OrderUpdated` path. The marker is only set after a confirmed
+HTTP success, so a failed modify never leaves stale race state. Because detection otherwise
+relies on the cached `venue_order_id`, the adapter also recovers a modify that times out on the
+HTTP call but still reaches the venue: the eventual WS `ACCEPTED(new_oid)` sees the old cached
+`oid` and translates to `OrderUpdated`. See [GH-3827](https://github.com/nautechsystems/nautilus_trader/issues/3827).
+
+:::note
+One narrow edge case remains when all three conditions occur together:
+
+1. The modify HTTP call raises (transport timeout or connection error).
+2. Hyperliquid still processes the modify on the exchange side.
+3. Hyperliquid delivers `CANCELED(old_oid)` before `ACCEPTED(new_oid)` on the WebSocket.
+
+Under (1) the pending-modify marker is not installed, so the early `CANCELED(old_oid)` emits as
+`OrderCanceled` before the replacement `ACCEPTED(new_oid)` arrives. The periodic reconciliation
+cycle restores the correct order state against the exchange.
 :::
 
 ## Order books

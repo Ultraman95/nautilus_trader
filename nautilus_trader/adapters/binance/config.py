@@ -89,14 +89,14 @@ class BinanceDataClientConfig(LiveDataClientConfig, frozen=True):
         Only needed for RSA keys (set explicitly to ``BinanceKeyType.RSA``).
     account_type : BinanceAccountType, default BinanceAccountType.SPOT
         The account type for the client.
+    environment : BinanceEnvironment, optional
+        The Binance environment (LIVE, TESTNET, or DEMO). Defaults to LIVE.
     base_url_http : str, optional
         The HTTP client custom endpoint override.
     base_url_ws : str, optional
         The WebSocket client custom endpoint override.
     proxy_url : str, optional
         The proxy URL for HTTP requests.
-    environment : BinanceEnvironment, optional
-        The Binance environment (LIVE, TESTNET, or DEMO). Defaults to LIVE.
     us : bool, default False
         If client is connecting to Binance US.
     testnet : bool, default False
@@ -106,6 +106,9 @@ class BinanceDataClientConfig(LiveDataClientConfig, frozen=True):
     use_agg_trade_ticks : bool, default False
         Whether to use aggregated trade tick endpoints instead of raw trades.
         TradeId of ticks will be the Aggregate tradeId returned by Binance.
+        For Futures account types the WebSocket trade subscription always uses
+        ``@aggTrade`` (the non-aggregated ``@trade`` stream is not published),
+        but the HTTP ``request_trade_ticks`` path still honours this flag.
 
     """
 
@@ -114,10 +117,10 @@ class BinanceDataClientConfig(LiveDataClientConfig, frozen=True):
     api_secret: str | None = None
     key_type: BinanceKeyType = BinanceKeyType.HMAC
     account_type: BinanceAccountType = BinanceAccountType.SPOT
+    environment: BinanceEnvironment | None = None
     base_url_http: str | None = None
     base_url_ws: str | None = None
     proxy_url: str | None = None
-    environment: BinanceEnvironment | None = None
     us: bool = False
     testnet: bool = False
     update_instruments_interval_mins: PositiveInt | None = 60
@@ -143,6 +146,8 @@ class BinanceExecClientConfig(LiveExecClientConfig, frozen=True):
         Only needed for RSA keys (set explicitly to ``BinanceKeyType.RSA``).
     account_type : BinanceAccountType, default BinanceAccountType.SPOT
         The account type for the client.
+    environment : BinanceEnvironment, optional
+        The Binance environment (LIVE, TESTNET, or DEMO). Defaults to LIVE.
     base_url_http : str, optional
         The HTTP client custom endpoint override.
     base_url_ws : str, optional
@@ -152,8 +157,6 @@ class BinanceExecClientConfig(LiveExecClientConfig, frozen=True):
         Only applicable to futures account types. When ``None``, derived from the environment.
     proxy_url : str, optional
         The proxy URL for HTTP requests.
-    environment : BinanceEnvironment, optional
-        The Binance environment (LIVE, TESTNET, or DEMO). Defaults to LIVE.
     us : bool, default False
         If client is connecting to Binance US.
     testnet : bool, default False
@@ -201,11 +204,11 @@ class BinanceExecClientConfig(LiveExecClientConfig, frozen=True):
     api_secret: str | None = None
     key_type: BinanceKeyType = BinanceKeyType.HMAC
     account_type: BinanceAccountType = BinanceAccountType.SPOT
+    environment: BinanceEnvironment | None = None
     base_url_http: str | None = None
     base_url_ws: str | None = None
     base_url_ws_stream: str | None = None
     proxy_url: str | None = None
-    environment: BinanceEnvironment | None = None
     us: bool = False
     testnet: bool = False
     use_gtd: bool = True

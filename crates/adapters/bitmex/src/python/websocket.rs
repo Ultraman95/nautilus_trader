@@ -52,7 +52,10 @@ use ustr::Ustr;
 
 use crate::{
     common::{
-        enums::{BitmexExecType, BitmexInstrumentState, BitmexOrderType, BitmexPegPriceType},
+        enums::{
+            BitmexEnvironment, BitmexExecType, BitmexInstrumentState, BitmexOrderType,
+            BitmexPegPriceType,
+        },
         parse::{
             parse_contracts_quantity, parse_instrument_id, parse_optional_datetime_to_unix_nanos,
         },
@@ -100,17 +103,22 @@ impl Debug for PyBitmexWebSocketClient {
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl PyBitmexWebSocketClient {
     #[new]
-    #[pyo3(signature = (url=None, api_key=None, api_secret=None, account_id=None, heartbeat=5, testnet=false))]
+    #[pyo3(signature = (url=None, api_key=None, api_secret=None, account_id=None, heartbeat=5, environment=BitmexEnvironment::Mainnet))]
     fn py_new(
         url: Option<String>,
         api_key: Option<String>,
         api_secret: Option<String>,
         account_id: Option<AccountId>,
         heartbeat: u64,
-        testnet: bool,
+        environment: BitmexEnvironment,
     ) -> PyResult<Self> {
         let inner = BitmexWebSocketClient::new_with_env(
-            url, api_key, api_secret, account_id, heartbeat, testnet,
+            url,
+            api_key,
+            api_secret,
+            account_id,
+            heartbeat,
+            environment,
         )
         .map_err(to_pyvalue_err)?;
         Ok(Self {
@@ -209,7 +217,7 @@ impl PyBitmexWebSocketClient {
 
     #[pyo3(name = "connect")]
     #[pyo3(signature = (loop_, instruments, callback, trader_id=None))]
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     fn py_connect<'py>(
         &mut self,
         py: Python<'py>,
@@ -780,7 +788,7 @@ impl PyBitmexWebSocketClient {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_table_message(
     table_msg: BitmexTableMessage,
     instruments_cache: &Arc<AtomicMap<Ustr, InstrumentAny>>,
@@ -1069,7 +1077,7 @@ fn handle_instrument_messages(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_order_messages(
     data: Vec<OrderData>,
     instruments: &AHashMap<Ustr, InstrumentAny>,
@@ -1233,7 +1241,7 @@ fn handle_order_messages(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_execution_messages(
     data: Vec<BitmexExecutionMsg>,
     instruments: &AHashMap<Ustr, InstrumentAny>,
@@ -1326,7 +1334,7 @@ fn handle_execution_messages(
 }
 
 /// Dispatches a parsed order event to Python with lifecycle synthesis and deduplication.
-#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+#[expect(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 fn dispatch_order_event_to_python(
     event: ParsedOrderEvent,
     client_order_id: ClientOrderId,
@@ -1423,7 +1431,7 @@ fn dispatch_order_event_to_python(
 }
 
 /// Synthesizes and sends `OrderAccepted` to Python if one has not yet been emitted.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn ensure_accepted_to_python(
     client_order_id: ClientOrderId,
     account_id: AccountId,

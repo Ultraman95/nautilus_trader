@@ -88,9 +88,30 @@ pub fn duration_since_unix_epoch() -> Duration {
     // - This would affect the entire application's ability to function
     // - Alternative error handling would complicate all time-dependent code paths
     // - Such failures are extremely rare in practice and indicate hardware/OS problems
-    SystemTime::now()
+    wall_clock_now()
         .duration_since(UNIX_EPOCH)
         .expect("Error calling `SystemTime`")
+}
+
+/// Returns the current wall-clock time as [`SystemTime`].
+///
+/// Under simulation (`simulation` + `cfg(madsim)`), returns virtual wall-clock
+/// time from the madsim deterministic scheduler. Under normal builds, returns
+/// [`SystemTime::now()`].
+///
+/// This is the wall-clock seam. It preserves Unix-epoch semantics (unlike
+/// `tokio::time::Instant` which is monotonic and carries no epoch).
+#[inline(always)]
+#[must_use]
+fn wall_clock_now() -> SystemTime {
+    #[cfg(not(all(feature = "simulation", madsim)))]
+    {
+        SystemTime::now()
+    }
+    #[cfg(all(feature = "simulation", madsim))]
+    {
+        madsim::time::TimeHandle::current().now_time()
+    }
 }
 
 /// Returns the current UNIX time in nanoseconds, based on [`SystemTime::now()`].
@@ -100,6 +121,10 @@ pub fn duration_since_unix_epoch() -> Duration {
 /// Panics if the duration in nanoseconds exceeds `u64::MAX`.
 #[inline(always)]
 #[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "value is guarded by the assert above (ns <= u64::MAX)"
+)]
 pub fn nanos_since_unix_epoch() -> u64 {
     let ns = duration_since_unix_epoch().as_nanos();
     assert!(
@@ -196,7 +221,7 @@ impl AtomicTime {
 
     /// Returns the current time as seconds.
     #[must_use]
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         reason = "Precision loss acceptable for time conversion"
     )]
@@ -235,7 +260,7 @@ impl AtomicTime {
 
         debug_assert!(
             !self.realtime.load(Ordering::SeqCst),
-            "Invariant violated: mode switched to realtime during set_time"
+            "Invariant: clock must remain in static mode across `set_time`"
         );
     }
 
@@ -274,7 +299,7 @@ impl AtomicTime {
 
         debug_assert!(
             !self.realtime.load(Ordering::SeqCst),
-            "Invariant violated: mode switched to realtime during increment_time"
+            "Invariant: clock must remain in static mode across `increment_time`"
         );
 
         Ok(UnixNanos::from(previous + delta))
@@ -330,6 +355,10 @@ impl AtomicTime {
                 .compare_exchange(last, next, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                debug_assert!(
+                    next > last,
+                    "Invariant: time is strictly monotonic across CAS"
+                );
                 return UnixNanos::from(next);
             }
         }
@@ -518,7 +547,7 @@ mod tests {
     }
 
     #[rstest]
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
         reason = "Intentional cast for Python interop"
@@ -585,7 +614,7 @@ mod tests {
         assert!(delta.unwrap_or_default() < Duration::from_millis(100));
 
         // Check if the duration is greater than a certain value (assuming the test is run after that point)
-        assert!(duration > Duration::from_secs(1_650_000_000));
+        assert!(duration > Duration::from_mins(27_500_000));
     }
 
     #[rstest]

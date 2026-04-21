@@ -240,7 +240,7 @@ pub struct DeribitWsFeedHandler {
 
 impl DeribitWsFeedHandler {
     /// Creates a new feed handler.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         signal: Arc<AtomicBool>,
@@ -947,6 +947,7 @@ impl DeribitWsFeedHandler {
         if text == RECONNECTED {
             log::info!("Received reconnection signal");
 
+            self.auth_tracker.invalidate();
             self.clear_state();
 
             return Some(NautilusWsMessage::Reconnected);

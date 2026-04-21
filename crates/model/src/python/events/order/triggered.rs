@@ -29,8 +29,8 @@ use crate::{
 impl OrderTriggered {
     /// Represents an event where an order has triggered.
     ///
-    /// Applicable to `StopLimit` orders only.
-    #[allow(clippy::too_many_arguments)]
+    /// Applicable to `StopLimit`, `TrailingStopLimit`, and `LimitIfTouched` orders.
+    #[expect(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (trader_id, strategy_id, instrument_id, client_order_id, event_id, ts_event, ts_init, reconciliation, venue_order_id=None, account_id=None))]
     fn py_new(

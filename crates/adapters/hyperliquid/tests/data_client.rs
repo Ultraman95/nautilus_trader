@@ -49,6 +49,7 @@ use nautilus_common::{
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_hyperliquid::{
+    common::enums::HyperliquidEnvironment,
     config::HyperliquidDataClientConfig,
     data::HyperliquidDataClient,
     http::{
@@ -461,6 +462,8 @@ async fn handle_ws_socket(mut socket: WebSocket) {
                     }
                 }
             }
+            // Inner if consumes `data`, cannot hoist into a match guard
+            #[expect(clippy::collapsible_match)]
             Message::Ping(data) => {
                 if socket.send(Message::Pong(data)).await.is_err() {
                     break;
@@ -476,7 +479,7 @@ fn create_data_client_config(addr: SocketAddr) -> HyperliquidDataClientConfig {
     HyperliquidDataClientConfig {
         base_url_http: Some(format!("http://{addr}/info")),
         base_url_ws: Some(format!("ws://{addr}/ws")),
-        is_testnet: false,
+        environment: HyperliquidEnvironment::Mainnet,
         ..HyperliquidDataClientConfig::default()
     }
 }
@@ -588,7 +591,7 @@ async fn test_data_client_subscribe_trades() {
         None,
         None,
     );
-    client.subscribe_trades(&cmd).unwrap();
+    client.subscribe_trades(cmd).unwrap();
 
     // Drain until we get a trade (subscription is async via get_runtime)
     wait_until_async(
@@ -632,7 +635,7 @@ async fn test_data_client_subscribe_quotes() {
         None,
         None,
     );
-    client.subscribe_quotes(&cmd).unwrap();
+    client.subscribe_quotes(cmd).unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await
@@ -674,7 +677,7 @@ async fn test_data_client_subscribe_book_deltas() {
         None,
         None,
     );
-    client.subscribe_book_deltas(&cmd).unwrap();
+    client.subscribe_book_deltas(cmd).unwrap();
 
     let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
         .await

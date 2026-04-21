@@ -153,7 +153,7 @@ impl SocketClientInner {
 
         let mut backoff = ExponentialBackoff::new(
             Duration::from_millis(500),
-            Duration::from_millis(5000),
+            Duration::from_secs(5),
             2.0,
             250,
             false,
@@ -992,6 +992,7 @@ impl SocketClient {
                 }
 
                 tokio::select! {
+                    biased;
                     () = notified => {}
                     () = tokio::time::sleep(fallback_interval) => {}
                 }
@@ -1037,6 +1038,7 @@ impl SocketClient {
 
             loop {
                 tokio::select! {
+                    biased;
                     () = state_notify.notified() => {}
                     () = tokio::time::sleep(fallback_interval) => {}
                 }
@@ -1115,6 +1117,7 @@ impl SocketClient {
 
                     // Race reconnect against disconnect notification
                     let reconnect_result = tokio::select! {
+                        biased;
                         result = inner.reconnect() => Some(result),
                         () = async {
                             loop {
@@ -1160,6 +1163,7 @@ impl SocketClient {
                                 log::warn!("Backing off for {}s...", duration.as_secs_f64());
                                 // Race backoff sleep against disconnect
                                 tokio::select! {
+                                    biased;
                                     () = tokio::time::sleep(duration) => {}
                                     () = async {
                                         loop {
@@ -1956,7 +1960,7 @@ mod rust_tests {
             }
             // Drop listener entirely so reconnection fails completely
             drop(listener);
-            sleep(Duration::from_secs(60)).await;
+            sleep(Duration::from_mins(1)).await;
         });
 
         let config = SocketConfig {
@@ -2132,7 +2136,7 @@ mod rust_tests {
                 drop(sock.shutdown());
             }
             // Don't accept again so reconnect fails and enters backoff
-            sleep(Duration::from_secs(60)).await;
+            sleep(Duration::from_mins(1)).await;
         });
 
         let config = SocketConfig {

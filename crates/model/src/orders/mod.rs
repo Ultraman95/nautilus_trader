@@ -36,7 +36,10 @@ pub mod stubs;
 use ahash::AHashSet;
 use enum_dispatch::enum_dispatch;
 use indexmap::IndexMap;
-use nautilus_core::{UUID4, UnixNanos};
+use nautilus_core::{
+    UUID4, UnixNanos,
+    correctness::{CorrectnessError, check_predicate_false},
+};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
@@ -93,7 +96,7 @@ pub const LIMIT_ORDER_TYPES: &[OrderType] = &[
 
 /// Order types that support the TRIGGERED order status.
 ///
-/// Market-style stops (StopMarket, MarketIfTouched, TrailingStopMarket) execute
+/// Market-style stops (`StopMarket`, `MarketIfTouched`, `TrailingStopMarket`) execute
 /// immediately on trigger and have no intermediate TRIGGERED state.
 pub const TRIGGERABLE_ORDER_TYPES: &[OrderType] = &[
     OrderType::StopLimit,
@@ -153,10 +156,10 @@ pub enum OrderError {
     #[error("Duplicate fill: trade_id {0} already applied to order")]
     DuplicateFill(TradeId),
     #[error("{0}")]
-    Invariant(#[from] anyhow::Error),
+    Invariant(#[from] CorrectnessError),
 }
 
-/// Converts an IndexMap with `Ustr` keys and values to `String` keys and values.
+/// Converts an `IndexMap` with `Ustr` keys and values to `String` keys and values.
 #[must_use]
 pub fn ustr_indexmap_to_str(h: IndexMap<Ustr, Ustr>) -> IndexMap<String, String> {
     h.into_iter()
@@ -164,7 +167,7 @@ pub fn ustr_indexmap_to_str(h: IndexMap<Ustr, Ustr>) -> IndexMap<String, String>
         .collect()
 }
 
-/// Converts an IndexMap with `String` keys and values to `Ustr` keys and values.
+/// Converts an `IndexMap` with `String` keys and values to `Ustr` keys and values.
 #[must_use]
 pub fn str_indexmap_to_ustr(h: IndexMap<String, String>) -> IndexMap<Ustr, Ustr> {
     h.into_iter()
@@ -177,12 +180,8 @@ pub(crate) fn check_display_qty(
     display_qty: Option<Quantity>,
     quantity: Quantity,
 ) -> Result<(), OrderError> {
-    if let Some(q) = display_qty
-        && q > quantity
-    {
-        return Err(OrderError::Invariant(anyhow::anyhow!(
-            "`display_qty` may not exceed `quantity`"
-        )));
+    if let Some(q) = display_qty {
+        check_predicate_false(q > quantity, "`display_qty` may not exceed `quantity`")?;
     }
     Ok(())
 }
@@ -192,11 +191,10 @@ pub(crate) fn check_time_in_force(
     time_in_force: TimeInForce,
     expire_time: Option<UnixNanos>,
 ) -> Result<(), OrderError> {
-    if time_in_force == TimeInForce::Gtd && expire_time.unwrap_or_default() == 0 {
-        return Err(OrderError::Invariant(anyhow::anyhow!(
-            "`expire_time` is required for `GTD` order"
-        )));
-    }
+    check_predicate_false(
+        time_in_force == TimeInForce::Gtd && expire_time.unwrap_or_default() == 0,
+        "`expire_time` is required for `GTD` order",
+    )?;
     Ok(())
 }
 
@@ -377,7 +375,7 @@ pub trait Order: 'static + Send {
 
     fn has_price(&self) -> bool;
 
-    /// Returns `true` if a fill with matching trade_id, side, qty, and price already exists.
+    /// Returns `true` if a fill with matching `trade_id`, side, qty, and price already exists.
     fn is_duplicate_fill(&self, fill: &OrderFilled) -> bool {
         self.events().iter().any(|event| {
             if let OrderEventAny::Filled(existing) = event {
@@ -619,6 +617,7 @@ pub struct OrderCore {
 
 impl OrderCore {
     /// Creates a new [`OrderCore`] instance.
+    #[must_use]
     pub fn new(init: OrderInitialized) -> Self {
         let events: Vec<OrderEventAny> = vec![OrderEventAny::Initialized(init.clone())];
         Self {
@@ -676,19 +675,25 @@ impl OrderCore {
     /// `event.client_order_id()` or `event.strategy_id()` does not match the order.
     pub fn apply(&mut self, event: OrderEventAny) -> Result<(), OrderError> {
         if self.client_order_id != event.client_order_id() {
-            return Err(OrderError::Invariant(anyhow::anyhow!(
-                "Event client_order_id {} does not match order client_order_id {}",
-                event.client_order_id(),
-                self.client_order_id
-            )));
+            return Err(CorrectnessError::PredicateViolation {
+                message: format!(
+                    "Event client_order_id {} does not match order client_order_id {}",
+                    event.client_order_id(),
+                    self.client_order_id
+                ),
+            }
+            .into());
         }
 
         if self.strategy_id != event.strategy_id() {
-            return Err(OrderError::Invariant(anyhow::anyhow!(
-                "Event strategy_id {} does not match order strategy_id {}",
-                event.strategy_id(),
-                self.strategy_id
-            )));
+            return Err(CorrectnessError::PredicateViolation {
+                message: format!(
+                    "Event strategy_id {} does not match order strategy_id {}",
+                    event.strategy_id(),
+                    self.strategy_id
+                ),
+            }
+            .into());
         }
 
         // Save current status as previous_status for ALL transitions except:
@@ -859,6 +864,28 @@ impl OrderCore {
         }
 
         self.set_avg_px(event.last_qty, event.last_px);
+
+        debug_assert!(
+            matches!(
+                self.status,
+                OrderStatus::PartiallyFilled | OrderStatus::Filled
+            ),
+            "Invariant: status must be PartiallyFilled or Filled after fill handler (status={:?})",
+            self.status
+        );
+        debug_assert!(
+            self.venue_order_id.is_some()
+                && self.last_trade_id.is_some()
+                && !self.trade_ids.is_empty(),
+            "Invariant: venue_order_id, last_trade_id and trade_ids must be set after fill"
+        );
+        debug_assert!(
+            self.filled_qty.raw.saturating_add(self.leaves_qty.raw) >= self.quantity.raw,
+            "Invariant: filled_qty + leaves_qty >= quantity (filled={}, leaves={}, quantity={})",
+            self.filled_qty,
+            self.leaves_qty,
+            self.quantity
+        );
     }
 
     fn set_avg_px(&mut self, last_qty: Quantity, last_px: Price) {
@@ -871,6 +898,11 @@ impl OrderCore {
         let prev_filled_qty = (self.filled_qty - last_qty).as_f64();
         let last_qty_f64 = last_qty.as_f64();
         let total_qty = prev_filled_qty + last_qty_f64;
+
+        debug_assert!(
+            total_qty > 0.0,
+            "Invariant: avg_px calc requires positive total_qty (prev={prev_filled_qty}, last={last_qty_f64})"
+        );
 
         let avg_px = self
             .avg_px
@@ -920,7 +952,7 @@ impl OrderCore {
         match self.side {
             OrderSide::Buy => self.quantity.as_decimal(),
             OrderSide::Sell => -self.quantity.as_decimal(),
-            _ => panic!("Invalid order side"),
+            OrderSide::NoOrderSide => panic!("Invalid order side"),
         }
     }
 
@@ -1089,6 +1121,43 @@ mod tests {
         assert!(order.is_closed());
         assert_eq!(order.commission(&Currency::USD()), None);
         assert_eq!(order.commissions(), &IndexMap::new());
+    }
+
+    #[rstest]
+    fn test_order_life_cycle_fills_with_negative_prices() {
+        // Options and spreads can legitimately trade at negative prices. The
+        // weighted average-price update must not panic when `last_px` or the
+        // prior `avg_px` is below zero.
+        let init = OrderInitializedBuilder::default()
+            .quantity(Quantity::from(100_000))
+            .build()
+            .unwrap();
+        let submitted = OrderSubmittedBuilder::default().build().unwrap();
+        let accepted = OrderAcceptedBuilder::default().build().unwrap();
+        let fill1 = OrderFilledBuilder::default()
+            .last_qty(Quantity::from(50_000))
+            .last_px(Price::from("-5.00000"))
+            .trade_id(TradeId::from("TRADE-1"))
+            .build()
+            .unwrap();
+        let fill2 = OrderFilledBuilder::default()
+            .last_qty(Quantity::from(50_000))
+            .last_px(Price::from("-7.00000"))
+            .trade_id(TradeId::from("TRADE-2"))
+            .build()
+            .unwrap();
+
+        let mut order: MarketOrder = init.into();
+        order.apply(OrderEventAny::Submitted(submitted)).unwrap();
+        order.apply(OrderEventAny::Accepted(accepted)).unwrap();
+        order.apply(OrderEventAny::Filled(fill1)).unwrap();
+        order.apply(OrderEventAny::Filled(fill2)).unwrap();
+
+        assert_eq!(order.status(), OrderStatus::Filled);
+        assert_eq!(order.filled_qty(), Quantity::from(100_000));
+        assert_eq!(order.leaves_qty(), Quantity::from(0));
+        // Weighted avg: (50_000 * -5.0 + 50_000 * -7.0) / 100_000 = -6.0
+        assert_eq!(order.avg_px(), Some(-6.0));
     }
 
     #[rstest]
@@ -1545,6 +1614,37 @@ mod tests {
         // Order state should be unchanged after rejected duplicate
         assert_eq!(order.filled_qty(), Quantity::from(50_000));
         assert_eq!(order.status(), OrderStatus::PartiallyFilled);
+    }
+
+    #[rstest]
+    fn test_check_display_qty_returns_typed_invariant_with_stable_display() {
+        let error = check_display_qty(Some(Quantity::from(2)), Quantity::from(1)).unwrap_err();
+
+        match error {
+            OrderError::Invariant(CorrectnessError::PredicateViolation { ref message }) => {
+                assert_eq!(message, "`display_qty` may not exceed `quantity`");
+            }
+            other => panic!("Expected typed invariant error, was: {other:?}"),
+        }
+
+        assert_eq!(error.to_string(), "`display_qty` may not exceed `quantity`");
+    }
+
+    #[rstest]
+    fn test_check_time_in_force_returns_typed_invariant_with_stable_display() {
+        let error = check_time_in_force(TimeInForce::Gtd, None).unwrap_err();
+
+        match error {
+            OrderError::Invariant(CorrectnessError::PredicateViolation { ref message }) => {
+                assert_eq!(message, "`expire_time` is required for `GTD` order");
+            }
+            other => panic!("Expected typed invariant error, was: {other:?}"),
+        }
+
+        assert_eq!(
+            error.to_string(),
+            "`expire_time` is required for `GTD` order"
+        );
     }
 
     #[rstest]

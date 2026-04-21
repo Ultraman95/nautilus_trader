@@ -1578,7 +1578,7 @@ impl TimeBarAggregator {
     /// # Panics
     ///
     /// Panics if `bar_type.aggregation_source` is not `AggregationSource::Internal`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new<H: FnMut(Bar) + 'static>(
         bar_type: BarType,
         price_precision: u8,
@@ -1910,7 +1910,7 @@ impl BarAggregator for TimeBarAggregator {
         // Delegate to the implementation method
         // We use the struct name here to disambiguate from the trait method
         {
-            #[allow(clippy::use_self)]
+            #[expect(clippy::use_self)]
             TimeBarAggregator::build_bar(self, event);
         }
     }
@@ -2072,7 +2072,7 @@ impl SpreadQuoteAggregator {
     /// # Panics
     ///
     /// Panics if `legs` has fewer than 2 entries or any ratio is zero.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         spread_instrument_id: InstrumentId,
         legs: &[(InstrumentId, i64)],
@@ -3611,6 +3611,41 @@ mod tests {
         let bar = handler_guard.first().unwrap();
         assert_eq!(bar.ts_event, UnixNanos::default());
         assert_eq!(bar.ts_init, next_sec);
+    }
+
+    #[rstest]
+    fn test_time_bar_aggregator_stop_clears_timer_and_allows_restart(equity_aapl: Equity) {
+        let instrument = InstrumentAny::Equity(equity_aapl);
+        let bar_spec = BarSpecification::new(1, BarAggregation::Second, PriceType::Last);
+        let bar_type = BarType::new(instrument.id(), bar_spec, AggregationSource::Internal);
+        let timer_name = bar_type.to_string();
+        let clock = Rc::new(RefCell::new(TestClock::new()));
+
+        let aggregator = TimeBarAggregator::new(
+            bar_type,
+            instrument.price_precision(),
+            instrument.size_precision(),
+            clock.clone(),
+            |_bar: Bar| {},
+            true,
+            false,
+            BarIntervalType::LeftOpen,
+            None,
+            15,
+            false,
+        );
+
+        let boxed: Box<dyn BarAggregator> = Box::new(aggregator);
+        let rc = Rc::new(RefCell::new(boxed));
+
+        rc.borrow_mut().start_timer(Some(Rc::clone(&rc)));
+        assert_eq!(clock.borrow().timer_names(), vec![timer_name.as_str()]);
+
+        rc.borrow_mut().stop();
+        assert!(clock.borrow().timer_names().is_empty());
+
+        rc.borrow_mut().start_timer(Some(Rc::clone(&rc)));
+        assert_eq!(clock.borrow().timer_names(), vec![timer_name.as_str()]);
     }
 
     #[rstest]
@@ -5328,7 +5363,7 @@ mod tests {
             Box::new(move |q: QuoteTick| {
                 handler_clone.lock().expect(MUTEX_POISONED).push(q);
             }),
-            #[allow(clippy::redundant_clone)] // need clock for set_clock after
+            // need clock for set_clock after
             clock.clone(),
             true,
             Some(1),
@@ -5402,7 +5437,7 @@ mod tests {
             Box::new(move |q: QuoteTick| {
                 handler_clone.lock().expect(MUTEX_POISONED).push(q);
             }),
-            #[allow(clippy::redundant_clone)] // need clock for set_clock after
+            // need clock for set_clock after
             clock.clone(),
             true,
             Some(1),

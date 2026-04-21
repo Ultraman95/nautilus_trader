@@ -18,9 +18,13 @@
 //! Manages connection lifecycle, JWT-authenticated subscriptions, and dispatches
 //! parsed Nautilus messages through the [`FeedHandler`].
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU8, Ordering},
+use std::{
+    str::FromStr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU8, Ordering},
+    },
+    time::Duration,
 };
 
 use arc_swap::ArcSwap;
@@ -28,7 +32,7 @@ use nautilus_common::live::get_runtime;
 use nautilus_core::AtomicMap;
 use nautilus_model::{
     data::BarType,
-    identifiers::InstrumentId,
+    identifiers::{AccountId, InstrumentId},
     instruments::{Instrument, InstrumentAny},
 };
 use nautilus_network::{
@@ -52,7 +56,7 @@ use crate::{
 #[derive(Debug)]
 #[cfg_attr(
     feature = "python",
-    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.coinbase")
+    pyo3::pyclass(module = "nautilus_trader.core.nautilus_pyo3.coinbase", from_py_object)
 )]
 #[cfg_attr(
     feature = "python",
@@ -68,7 +72,26 @@ pub struct CoinbaseWebSocketClient {
     bar_types: ahash::AHashMap<String, BarType>,
     subscriptions: SubscriptionState,
     credential: Option<CoinbaseCredential>,
+    account_id: Option<AccountId>,
     task_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Clone for CoinbaseWebSocketClient {
+    fn clone(&self) -> Self {
+        Self {
+            url: self.url.clone(),
+            connection_mode: Arc::clone(&self.connection_mode),
+            signal: Arc::clone(&self.signal),
+            cmd_tx: Arc::clone(&self.cmd_tx),
+            out_rx: None,
+            instruments: Arc::clone(&self.instruments),
+            bar_types: self.bar_types.clone(),
+            subscriptions: self.subscriptions.clone(),
+            credential: self.credential.clone(),
+            account_id: self.account_id,
+            task_handle: None,
+        }
+    }
 }
 
 impl CoinbaseWebSocketClient {
@@ -88,6 +111,7 @@ impl CoinbaseWebSocketClient {
             bar_types: ahash::AHashMap::new(),
             subscriptions: SubscriptionState::new('|'),
             credential: None,
+            account_id: None,
             task_handle: None,
         }
     }
@@ -97,6 +121,36 @@ impl CoinbaseWebSocketClient {
         let mut client = Self::new(url);
         client.credential = Some(credential);
         client
+    }
+
+    /// Sets the account ID used when emitting user-channel execution reports.
+    ///
+    /// Propagates to the feed handler when the connection is active so that
+    /// subsequent user events carry the correct account identifier.
+    pub async fn set_account_id(&mut self, account_id: AccountId) {
+        self.account_id = Some(account_id);
+
+        let cmd_tx = self.cmd_tx.read().await;
+        if let Err(e) = cmd_tx.send(HandlerCommand::SetAccountId(account_id)) {
+            log::debug!("Failed to send SetAccountId: {e}");
+        }
+    }
+
+    /// Bulk-populates the instrument cache.
+    ///
+    /// Safe to call before or after [`Self::connect`]. When called before
+    /// connect, instruments are picked up by the initial `InitializeInstruments`
+    /// command the client sends to the handler; when called after, a fresh
+    /// `InitializeInstruments` command is sent to refresh the handler's cache.
+    pub async fn initialize_instruments(&self, instruments: Vec<InstrumentAny>) {
+        for instrument in &instruments {
+            self.instruments.insert(instrument.id(), instrument.clone());
+        }
+
+        let cmd_tx = self.cmd_tx.read().await;
+        if let Err(e) = cmd_tx.send(HandlerCommand::InitializeInstruments(instruments)) {
+            log::debug!("Failed to send InitializeInstruments: {e}");
+        }
     }
 
     /// Establishes the WebSocket connection and spawns the feed handler.
@@ -156,6 +210,12 @@ impl CoinbaseWebSocketClient {
             }) {
                 log::error!("Failed to restore bar type {key}: {e}");
             }
+        }
+
+        if let Some(account_id) = self.account_id
+            && let Err(e) = cmd_tx.send(HandlerCommand::SetAccountId(account_id))
+        {
+            log::error!("Failed to restore account_id: {e}");
         }
 
         // Replay retained subscriptions from previous session
@@ -289,7 +349,7 @@ impl CoinbaseWebSocketClient {
         self.signal.store(true, Ordering::Relaxed);
 
         if let Some(handle) = self.task_handle.take() {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+            match tokio::time::timeout(Duration::from_secs(5), handle).await {
                 Ok(_) => log::debug!("Feed handler task completed"),
                 Err(_) => log::warn!("Feed handler task did not complete within timeout"),
             }
@@ -336,6 +396,23 @@ impl CoinbaseWebSocketClient {
         }
     }
 
+    /// Takes the output message receiver, leaving `None` in its place.
+    ///
+    /// Used by the data client to move the receiver into a background consumption task.
+    pub fn take_out_rx(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::UnboundedReceiver<NautilusWsMessage>> {
+        self.out_rx.take()
+    }
+
+    /// Registers a bar type locally without notifying the handler.
+    ///
+    /// Used by the data client to persist registrations on the original client
+    /// before cloning for async command dispatch.
+    pub fn register_bar_type(&mut self, key: String, bar_type: BarType) {
+        self.bar_types.insert(key, bar_type);
+    }
+
     /// Registers a bar type for candle parsing.
     pub async fn add_bar_type(&mut self, key: String, bar_type: BarType) {
         self.bar_types.insert(key.clone(), bar_type);
@@ -371,17 +448,9 @@ fn resubscribe_all(
             None => (topic.as_str(), None),
         };
 
-        let channel_enum = match channel {
-            "level2" => CoinbaseWsChannel::Level2,
-            "market_trades" => CoinbaseWsChannel::MarketTrades,
-            "ticker" => CoinbaseWsChannel::Ticker,
-            "ticker_batch" => CoinbaseWsChannel::TickerBatch,
-            "candles" => CoinbaseWsChannel::Candles,
-            "user" => CoinbaseWsChannel::User,
-            "heartbeats" => CoinbaseWsChannel::Heartbeats,
-            "futures_balance_summary" => CoinbaseWsChannel::FuturesBalanceSummary,
-            "status" => CoinbaseWsChannel::Status,
-            _ => {
+        let channel_enum = match CoinbaseWsChannel::from_str(channel) {
+            Ok(ch) => ch,
+            Err(_) => {
                 log::warn!("Unknown channel in topic: {topic}");
                 continue;
             }

@@ -348,14 +348,14 @@ impl RiskEngine {
     }
 
     /// Executes a trading command through the risk management pipeline.
-    #[allow(clippy::needless_pass_by_value)] // Required by message bus dispatch
+    // Required by message bus dispatch
     pub fn execute(&mut self, command: TradingCommand) {
         // This will extend to other commands such as `RiskCommand`
         self.handle_command(command);
     }
 
     /// Processes an order event for risk monitoring and state updates.
-    #[allow(clippy::needless_pass_by_value)] // Required by message bus dispatch
+    #[expect(clippy::needless_pass_by_value)] // Required by message bus dispatch
     pub fn process(&mut self, event: OrderEventAny) {
         // This will extend to other events such as `RiskEvent`
         self.handle_event(&event);
@@ -1104,29 +1104,35 @@ impl RiskEngine {
                 order.quantity()
             };
 
-            // Check min/max quantity against effective quantity
-            if let Some(max_quantity) = instrument.max_quantity()
-                && effective_quantity > max_quantity
-            {
-                self.deny_order(
-                    order,
-                    &format!(
-                        "QUANTITY_EXCEEDS_MAXIMUM: effective_quantity={effective_quantity}, max_quantity={max_quantity}"
-                    ),
-                );
-                return false; // Denied
-            }
+            // Base-quantity bounds (`min_quantity`/`max_quantity`) do not apply to
+            // quote-denominated orders: the client-side conversion uses an estimated
+            // price and may differ from the venue fill, and some venues enforce
+            // distinct per-order-type minimums. The venue is authoritative for
+            // quote-denominated sizing; rely on `min_notional`/`max_notional` below.
+            if !order.is_quote_quantity() {
+                if let Some(max_quantity) = instrument.max_quantity()
+                    && effective_quantity > max_quantity
+                {
+                    self.deny_order(
+                        order,
+                        &format!(
+                            "QUANTITY_EXCEEDS_MAXIMUM: effective_quantity={effective_quantity}, max_quantity={max_quantity}"
+                        ),
+                    );
+                    return false; // Denied
+                }
 
-            if let Some(min_quantity) = instrument.min_quantity()
-                && effective_quantity < min_quantity
-            {
-                self.deny_order(
-                    order,
-                    &format!(
-                        "QUANTITY_BELOW_MINIMUM: effective_quantity={effective_quantity}, min_quantity={min_quantity}"
-                    ),
-                );
-                return false; // Denied
+                if let Some(min_quantity) = instrument.min_quantity()
+                    && effective_quantity < min_quantity
+                {
+                    self.deny_order(
+                        order,
+                        &format!(
+                            "QUANTITY_BELOW_MINIMUM: effective_quantity={effective_quantity}, min_quantity={min_quantity}"
+                        ),
+                    );
+                    return false; // Denied
+                }
             }
 
             let notional =

@@ -49,6 +49,9 @@
 
 pub mod common;
 pub mod config;
+pub mod data;
+pub mod execution;
+pub mod factories;
 pub mod http;
 pub mod provider;
 pub mod websocket;
@@ -58,6 +61,9 @@ pub mod python;
 
 pub use crate::{
     config::{CoinbaseDataClientConfig, CoinbaseExecClientConfig},
+    data::CoinbaseDataClient,
+    execution::CoinbaseExecutionClient,
+    factories::{CoinbaseDataClientFactory, CoinbaseExecutionClientFactory},
     http::client::{CoinbaseHttpClient, CoinbaseRawHttpClient},
     provider::CoinbaseInstrumentProvider,
 };

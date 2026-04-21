@@ -20,10 +20,14 @@
 //! The handler emits venue-specific types via [`BinanceFuturesWsStreamsMessage`].
 //! Data and execution client layers convert these to Nautilus domain types.
 
+use nautilus_core::serialization::{
+    deserialize_decimal_from_str, deserialize_optional_decimal_from_str,
+};
 use nautilus_model::identifiers::{
     ClientOrderId, InstrumentId, StrategyId, TraderId, VenueOrderId,
 };
 use nautilus_network::websocket::WebSocketClient;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
@@ -43,7 +47,6 @@ use crate::{
 /// events. The data and execution client layers convert these to Nautilus
 /// domain types using parse functions with instrument context.
 #[derive(Debug, Clone)]
-#[allow(clippy::large_enum_variant)]
 pub enum BinanceFuturesWsStreamsMessage {
     /// Aggregate trade stream.
     AggTrade(BinanceFuturesAggTradeMsg),
@@ -90,10 +93,6 @@ pub struct BinanceFuturesWsErrorMsg {
 
 /// Handler command for data client-handler communication.
 #[derive(Debug)]
-#[allow(
-    clippy::large_enum_variant,
-    reason = "Commands are ephemeral and immediately consumed"
-)]
 pub enum BinanceFuturesWsStreamsCommand {
     /// Set the WebSocket client reference.
     SetClient(WebSocketClient),
@@ -107,7 +106,7 @@ pub enum BinanceFuturesWsStreamsCommand {
 
 /// Handler command for execution client-handler communication.
 #[derive(Debug)]
-#[allow(
+#[expect(
     clippy::large_enum_variant,
     reason = "Commands are ephemeral and immediately consumed"
 )]
@@ -580,14 +579,18 @@ pub struct BalanceUpdate {
     #[serde(rename = "a")]
     pub asset: Ustr,
     /// Wallet balance.
-    #[serde(rename = "wb")]
-    pub wallet_balance: String,
+    #[serde(rename = "wb", deserialize_with = "deserialize_decimal_from_str")]
+    pub wallet_balance: Decimal,
     /// Cross wallet balance.
-    #[serde(rename = "cw")]
-    pub cross_wallet_balance: String,
+    #[serde(rename = "cw", deserialize_with = "deserialize_decimal_from_str")]
+    pub cross_wallet_balance: Decimal,
     /// Balance change (except for PnL and commission).
-    #[serde(rename = "bc", default)]
-    pub balance_change: Option<String>,
+    #[serde(
+        rename = "bc",
+        default,
+        deserialize_with = "deserialize_optional_decimal_from_str"
+    )]
+    pub balance_change: Option<Decimal>,
 }
 
 /// Position update within account update.

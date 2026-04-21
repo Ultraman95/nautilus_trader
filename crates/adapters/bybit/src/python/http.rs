@@ -34,6 +34,7 @@ use pyo3::{
     prelude::*,
     types::{PyDict, PyList},
 };
+use ustr::Ustr;
 
 use crate::{
     common::{
@@ -58,7 +59,7 @@ impl BybitRawHttpClient {
     /// returning venue-specific response types. It does not parse to Nautilus domain types.
     #[new]
     #[pyo3(signature = (api_key=None, api_secret=None, base_url=None, demo=false, testnet=false, timeout_secs=60, max_retries=3, retry_delay_ms=1000, retry_delay_max_ms=10_000, recv_window_ms=5_000, proxy_url=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn py_new(
         api_key: Option<String>,
         api_secret: Option<String>,
@@ -147,7 +148,7 @@ impl BybitRawHttpClient {
     /// - <https://bybit-exchange.github.io/docs/v5/order/open-order>
     #[pyo3(name = "get_open_orders")]
     #[pyo3(signature = (category, symbol=None, base_coin=None, settle_coin=None, order_id=None, order_link_id=None, open_only=None, order_filter=None, limit=None, cursor=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn py_get_open_orders<'py>(
         &self,
         py: Python<'py>,
@@ -200,7 +201,7 @@ impl BybitHttpClient {
     /// into Nautilus domain objects.
     #[new]
     #[pyo3(signature = (api_key=None, api_secret=None, base_url=None, demo=false, testnet=false, timeout_secs=60, max_retries=3, retry_delay_ms=1000, retry_delay_max_ms=10_000, recv_window_ms=5_000, proxy_url=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn py_new(
         api_key: Option<String>,
         api_secret: Option<String>,
@@ -453,19 +454,25 @@ impl BybitHttpClient {
     }
 
     /// Request instruments for a given product type.
+    ///
+    /// When `base_coin` is provided, the request is narrowed to that base coin.
+    /// This is required for `Option`: Bybit's API returns only `BTC` options when
+    /// `baseCoin` is omitted.
     #[pyo3(name = "request_instruments")]
-    #[pyo3(signature = (product_type, symbol=None))]
+    #[pyo3(signature = (product_type, symbol=None, base_coin=None))]
     fn py_request_instruments<'py>(
         &self,
         py: Python<'py>,
         product_type: BybitProductType,
         symbol: Option<String>,
+        base_coin: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.clone();
+        let base_coin = base_coin.map(|s| Ustr::from(&s));
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let instruments = client
-                .request_instruments(product_type, symbol)
+                .request_instruments(product_type, symbol, base_coin)
                 .await
                 .map_err(to_pyvalue_err)?;
 
@@ -566,7 +573,7 @@ impl BybitHttpClient {
         is_quote_quantity = false,
         is_leverage = false
     ))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn py_submit_order<'py>(
         &self,
         py: Python<'py>,
@@ -623,7 +630,7 @@ impl BybitHttpClient {
         quantity=None,
         price=None
     ))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn py_modify_order<'py>(
         &self,
         py: Python<'py>,
@@ -861,7 +868,7 @@ impl BybitHttpClient {
     /// <https://bybit-exchange.github.io/docs/v5/market/kline>
     #[pyo3(name = "request_bars")]
     #[pyo3(signature = (product_type, bar_type, start=None, end=None, limit=None, timestamp_on_close=true))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn py_request_bars<'py>(
         &self,
         py: Python<'py>,
@@ -958,7 +965,7 @@ impl BybitHttpClient {
     /// Orders for instruments not currently loaded in cache will be skipped.
     #[pyo3(name = "request_order_status_reports")]
     #[pyo3(signature = (account_id, product_type, instrument_id=None, open_only=false, start=None, end=None, limit=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn py_request_order_status_reports<'py>(
         &self,
         py: Python<'py>,
@@ -1006,7 +1013,7 @@ impl BybitHttpClient {
     /// <https://bybit-exchange.github.io/docs/v5/order/execution>
     #[pyo3(name = "request_fill_reports")]
     #[pyo3(signature = (account_id, product_type, instrument_id=None, start=None, end=None, limit=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn py_request_fill_reports<'py>(
         &self,
         py: Python<'py>,

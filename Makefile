@@ -15,6 +15,8 @@ CARGO_MACHETE_VERSION := $(shell bash scripts/cargo-tool-version.sh cargo-machet
 CARGO_NEXTEST_VERSION := $(shell bash scripts/cargo-tool-version.sh cargo-nextest)
 CARGO_VET_VERSION := $(shell bash scripts/cargo-tool-version.sh cargo-vet)
 LYCHEE_VERSION := $(shell bash scripts/cargo-tool-version.sh lychee)
+# Tool versions from tools.toml
+PREK_VERSION := $(shell bash scripts/tool-version.sh prek)
 UV_VERSION := $(shell bash scripts/uv-version.sh)
 
 V = 0  # 0 / 1 - verbose mode
@@ -198,20 +200,35 @@ build-dry-run:  #-- Show build commands without executing them
 .PHONY: clean
 clean: clean-build-artifacts clean-caches clean-builds  #-- Clean all build artifacts, caches, and builds
 
+.PHONY: ib-stop
+ib-stop:  #-- Stop local TWS/IBC processes and Docker IB Gateway containers
+	@echo "Stopping local TWS/IBC processes..."
+	@pkill -TERM -f "Trader Workstation" || true
+	@pkill -TERM -f "ibcstart.sh" || true
+	@pkill -TERM -f "displaybannerandlaunch.sh" || true
+	@echo "Stopping Docker IB Gateway containers..."
+	@docker ps --format '{{.Names}} {{.Image}}' | awk '/ib-gateway|ibgateway|Trader Workstation|tws/ {print $$1}' | xargs -r docker stop >/dev/null 2>&1 || true
+	@sleep 2
+	@pkill -KILL -f "Trader Workstation" || true
+	@pkill -KILL -f "ibcstart.sh" || true
+	@pkill -KILL -f "displaybannerandlaunch.sh" || true
+	@docker ps --format '{{.Names}} {{.Image}}' | awk '/ib-gateway|ibgateway|Trader Workstation|tws/ {print $$1}' | xargs -r docker kill >/dev/null 2>&1 || true
+	@echo "Done."
+
 .PHONY: clean-builds
 clean-builds:  #-- Clean distribution and target directories
-	$Q rm -rf dist target 2>/dev/null || true
+	$Q rm -rf dist target target-v2 2>/dev/null || true
 
 .PHONY: clean-build-artifacts
 clean-build-artifacts:  #-- Clean compiled artifacts (.so, .dll, .pyc, .c files)
 	@echo "Cleaning build artifacts..."
 	# Clean Rust build artifacts (keep final libraries)
-	find target -name "*.rlib" -delete 2>/dev/null || true
-	find target -name "*.rmeta" -delete 2>/dev/null || true
-	rm -rf target/*/build target/*/deps 2>/dev/null || true
+	find target target-v2 -name "*.rlib" -delete 2>/dev/null || true
+	find target target-v2 -name "*.rmeta" -delete 2>/dev/null || true
+	rm -rf target/*/build target/*/deps target-v2/*/build target-v2/*/deps 2>/dev/null || true
 	# Clean Python build artifacts
 	find . -type d -name "__pycache__" -not -path "./.venv*" -exec rm -rf {} + 2>/dev/null || true
-	find . -type f -name "*.c" -not -path "./.venv*" -not -path "./target/*" -exec rm -f {} + 2>/dev/null || true
+	find . -type f -name "*.c" -not -path "./.venv*" -not -path "./target/*" -not -path "./target-v2/*" -exec rm -f {} + 2>/dev/null || true
 	find . -type f -a \( -name "*.pyc" -o -name "*.pyo" \) -not -path "./.venv*" -exec rm -f {} + 2>/dev/null || true
 	find . -type f -a \( -name "*.so" -o -name "*.dll" -o -name "*.dylib" \) -not -path "./.venv*" -exec rm -f {} + 2>/dev/null || true
 	rm -rf build/ cython_debug/ 2>/dev/null || true
@@ -223,6 +240,7 @@ clean-caches:  #-- Clean pytest, mypy, ruff, uv, and cargo caches
 	rm -rf .pytest_cache .mypy_cache .ruff_cache 2>/dev/null || true
 	-uv cache prune --force
 	-cargo clean --workspace
+	-CARGO_TARGET_DIR=target-v2 cargo clean --workspace
 
 .PHONY: distclean
 distclean: clean  #-- Nuclear clean - remove all untracked files (requires FORCE=1)
@@ -318,11 +336,20 @@ outdated: check-edit-installed  #-- Check for outdated dependencies
 	[ $$outdated_count -eq 0 ] && printf "$(GREEN)  All tools up to date ✓$(RESET)\n"
 
 .PHONY: update
-update: cargo-update  #-- Update all dependencies (cargo and uv)
-	uv self update $(UV_VERSION) && uv lock --upgrade
+update: cargo-update update-uv  #-- Update all dependencies (cargo and uv)
+	uv lock --upgrade
+
+.PHONY: update-uv
+update-uv:  #-- Install or upgrade uv to the version pinned in pyproject.toml
+	$(info $(M) Ensuring uv $(UV_VERSION) is installed...)
+	@if [ "$$(uv --version 2>/dev/null | awk '{print $$2}')" = "$(UV_VERSION)" ]; then \
+		printf "$(GREEN)uv $(UV_VERSION) already installed$(RESET)\n"; \
+	else \
+		curl -LsSf https://astral.sh/uv/$(UV_VERSION)/install.sh | sh; \
+	fi
 
 .PHONY: install-tools
-install-tools:  #-- Install required development tools (Rust tools from Cargo.toml, uv from pyproject.toml)
+install-tools: check-binstall-installed update-uv  #-- Install required development tools (pinned versions from Cargo.toml, tools.toml, pyproject.toml)
 	cargo install cargo-deny --version $(CARGO_DENY_VERSION) --locked \
 	&& cargo install cargo-edit --version $(CARGO_EDIT_VERSION) --locked \
 	&& cargo install cargo-machete --version $(CARGO_MACHETE_VERSION) --locked \
@@ -331,7 +358,8 @@ install-tools:  #-- Install required development tools (Rust tools from Cargo.to
 	&& cargo install cargo-audit --version $(CARGO_AUDIT_VERSION) --locked \
 	&& cargo install cargo-vet --version $(CARGO_VET_VERSION) --locked \
 	&& cargo install lychee --version $(LYCHEE_VERSION) --locked \
-	&& uv self update $(UV_VERSION)
+	&& cargo binstall prek --version $(PREK_VERSION) --no-confirm --locked \
+	&& bash scripts/install-osv-scanner.sh
 
 #== Security
 
@@ -423,6 +451,15 @@ check-deny-installed:  #-- Verify cargo-deny is installed
 		exit 1; \
 	fi
 
+.PHONY: check-binstall-installed
+check-binstall-installed:  #-- Verify cargo-binstall is installed (one-off prerequisite for install-tools)
+	@if ! command -v cargo-binstall >/dev/null 2>&1; then \
+		printf "$(YELLOW)cargo-binstall is required but not installed$(RESET)\n"; \
+		printf "Install once per machine with: $(CYAN)cargo install cargo-binstall --locked$(RESET)\n"; \
+		printf "See: https://github.com/cargo-bins/cargo-binstall\n"; \
+		exit 1; \
+	fi
+
 .PHONY: check-vet-installed
 check-vet-installed:  #-- Verify cargo-vet is installed
 	@if ! cargo vet --version >/dev/null 2>&1; then \
@@ -474,7 +511,7 @@ check-edit-installed:  #-- Verify cargo-edit is installed
 
 .PHONY: check-features
 check-features: check-hack-installed  #-- Verify crate feature combinations compile correctly
-	cargo hack --workspace check --each-feature
+	cargo hack --workspace check --each-feature --all-targets
 
 .PHONY: check-capnp-schemas  #-- Verify Cap'n Proto schemas are up-to-date
 check-capnp-schemas:

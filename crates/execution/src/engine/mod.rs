@@ -151,7 +151,7 @@ impl ExecutionEngine {
             MessagingSwitchboard::exec_engine_execute(),
             TypedIntoHandler::from(move |cmd: TradingCommand| {
                 if let Some(rc) = weak1.upgrade() {
-                    rc.borrow().execute(&cmd);
+                    rc.borrow().execute(cmd);
                 }
             }),
         );
@@ -641,7 +641,7 @@ impl ExecutionEngine {
     }
 
     /// Starts the purge timers if configured.
-    #[allow(
+    #[expect(
         clippy::missing_panics_doc,
         reason = "timer registration is not expected to fail"
     )]
@@ -812,7 +812,7 @@ impl ExecutionEngine {
         }
     }
 
-    #[allow(clippy::await_holding_refcell_ref)]
+    #[expect(clippy::await_holding_refcell_ref)]
     /// Loads persistent state into cache and rebuilds indices.
     ///
     /// # Errors
@@ -1233,7 +1233,7 @@ impl ExecutionEngine {
     }
 
     /// Executes a trading command by routing it to the appropriate execution client.
-    pub fn execute(&self, command: &TradingCommand) {
+    pub fn execute(&self, command: TradingCommand) {
         self.execute_command(command);
     }
 
@@ -1270,7 +1270,7 @@ impl ExecutionEngine {
         log::info!("Disposed");
     }
 
-    fn execute_command(&self, command: &TradingCommand) {
+    fn execute_command(&self, command: TradingCommand) {
         if self.config.debug {
             log::debug!("{RECV}{CMD} {command:?}");
         }
@@ -1321,7 +1321,7 @@ impl ExecutionEngine {
                     let orders: Vec<OrderAny> = self
                         .cache
                         .borrow()
-                        .orders_for_ids(&cmd.order_list.client_order_ids, cmd);
+                        .orders_for_ids(&cmd.order_list.client_order_ids, &cmd);
 
                     for order in &orders {
                         self.deny_order(order, &reason);
@@ -1345,7 +1345,7 @@ impl ExecutionEngine {
         }
     }
 
-    fn handle_submit_order(&self, client: &dyn ExecutionClient, cmd: &SubmitOrder) {
+    fn handle_submit_order(&self, client: &dyn ExecutionClient, cmd: SubmitOrder) {
         let client_order_id = cmd.client_order_id;
 
         let order = {
@@ -1397,11 +1397,11 @@ impl ExecutionEngine {
         }
     }
 
-    fn handle_submit_order_list(&self, client: &dyn ExecutionClient, cmd: &SubmitOrderList) {
+    fn handle_submit_order_list(&self, client: &dyn ExecutionClient, cmd: SubmitOrderList) {
         let orders: Vec<OrderAny> = self
             .cache
             .borrow()
-            .orders_for_ids(&cmd.order_list.client_order_ids, cmd);
+            .orders_for_ids(&cmd.order_list.client_order_ids, &cmd);
 
         if orders.len() != cmd.order_list.client_order_ids.len() {
             for order in &orders {
@@ -1463,37 +1463,37 @@ impl ExecutionEngine {
         }
     }
 
-    fn handle_modify_order(&self, client: &dyn ExecutionClient, cmd: &ModifyOrder) {
+    fn handle_modify_order(&self, client: &dyn ExecutionClient, cmd: ModifyOrder) {
         if let Err(e) = client.modify_order(cmd) {
             log::error!("Error modifying order: {e}");
         }
     }
 
-    fn handle_cancel_order(&self, client: &dyn ExecutionClient, cmd: &CancelOrder) {
+    fn handle_cancel_order(&self, client: &dyn ExecutionClient, cmd: CancelOrder) {
         if let Err(e) = client.cancel_order(cmd) {
             log::error!("Error canceling order: {e}");
         }
     }
 
-    fn handle_cancel_all_orders(&self, client: &dyn ExecutionClient, cmd: &CancelAllOrders) {
+    fn handle_cancel_all_orders(&self, client: &dyn ExecutionClient, cmd: CancelAllOrders) {
         if let Err(e) = client.cancel_all_orders(cmd) {
             log::error!("Error canceling all orders: {e}");
         }
     }
 
-    fn handle_batch_cancel_orders(&self, client: &dyn ExecutionClient, cmd: &BatchCancelOrders) {
+    fn handle_batch_cancel_orders(&self, client: &dyn ExecutionClient, cmd: BatchCancelOrders) {
         if let Err(e) = client.batch_cancel_orders(cmd) {
             log::error!("Error batch canceling orders: {e}");
         }
     }
 
-    fn handle_query_account(&self, client: &dyn ExecutionClient, cmd: &QueryAccount) {
+    fn handle_query_account(&self, client: &dyn ExecutionClient, cmd: QueryAccount) {
         if let Err(e) = client.query_account(cmd) {
             log::error!("Error querying account: {e}");
         }
     }
 
-    fn handle_query_order(&self, client: &dyn ExecutionClient, cmd: &QueryOrder) {
+    fn handle_query_order(&self, client: &dyn ExecutionClient, cmd: QueryOrder) {
         if let Err(e) = client.query_order(cmd) {
             log::error!("Error querying order: {e}");
         }
@@ -1580,9 +1580,7 @@ impl ExecutionEngine {
                 let position_id = self.determine_position_id(*fill, oms_type, Some(&order));
 
                 let mut fill = *fill;
-                if fill.position_id.is_none() {
-                    fill.position_id = Some(position_id);
-                }
+                fill.position_id = Some(position_id);
 
                 if self.apply_fill_to_order(&mut order, fill).is_ok() {
                     self.handle_order_fill(&order, fill, oms_type);
@@ -1620,11 +1618,89 @@ impl ExecutionEngine {
         oms_type: OmsType,
         order: Option<&OrderAny>,
     ) -> PositionId {
-        match oms_type {
+        let cache = self.cache.borrow();
+        let cached_position_id = cache.position_id(&fill.client_order_id()).copied();
+        drop(cache);
+
+        if self.config.debug {
+            log::debug!(
+                "Determining position ID for {}, position_id={:?}",
+                fill.client_order_id(),
+                cached_position_id,
+            );
+        }
+
+        if let Some(position_id) = cached_position_id {
+            if let Some(fill_position_id) = fill.position_id
+                && fill_position_id != position_id
+            {
+                log::warn!(
+                    "Incorrect position ID assigned to fill: \
+                     cached={position_id}, assigned={fill_position_id}; \
+                     re-assigning from cache",
+                );
+            }
+
+            if self.config.debug {
+                log::debug!("Assigned {position_id} to {}", fill.client_order_id());
+            }
+
+            return position_id;
+        }
+
+        let position_id = match oms_type {
             OmsType::Hedging => self.determine_hedging_position_id(fill, order),
             OmsType::Netting => self.determine_netting_position_id(fill),
-            _ => self.determine_netting_position_id(fill), // Default to netting
+            _ => self.determine_netting_position_id(fill),
+        };
+
+        let order = if let Some(o) = order {
+            o.clone()
+        } else {
+            let cache = self.cache.borrow();
+            cache
+                .order(&fill.client_order_id())
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Order for {} not found to determine position ID",
+                        fill.client_order_id()
+                    )
+                })
+        };
+
+        if order.exec_algorithm_id().is_some()
+            && let Some(exec_spawn_id) = order.exec_spawn_id()
+        {
+            let cache = self.cache.borrow();
+            let primary = if let Some(p) = cache.order(&exec_spawn_id) {
+                p.clone()
+            } else {
+                log::warn!(
+                    "Primary exec spawn order {exec_spawn_id} not found, \
+                     skipping position ID propagation"
+                );
+                return position_id;
+            };
+            let primary_already_indexed = cache.position_id(&primary.client_order_id()).is_some();
+            drop(cache);
+
+            if primary.position_id().is_none() && !primary_already_indexed {
+                let mut cache = self.cache.borrow_mut();
+                if let Some(primary_mut) = cache.mut_order(&exec_spawn_id) {
+                    primary_mut.set_position_id(Some(position_id));
+                }
+                let _ = cache.add_position_id(
+                    &position_id,
+                    &primary.instrument_id().venue,
+                    &primary.client_order_id(),
+                    &primary.strategy_id(),
+                );
+                log::debug!("Assigned primary order {position_id}");
+            }
         }
+
+        position_id
     }
 
     fn determine_hedging_position_id(

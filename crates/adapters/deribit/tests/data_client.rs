@@ -49,7 +49,8 @@ use nautilus_common::{
 };
 use nautilus_core::{UUID4, UnixNanos};
 use nautilus_deribit::{
-    config::DeribitDataClientConfig, data::DeribitDataClient, http::models::DeribitProductType,
+    common::enums::DeribitEnvironment, config::DeribitDataClientConfig, data::DeribitDataClient,
+    http::models::DeribitProductType,
 };
 use nautilus_model::{
     data::Data,
@@ -397,7 +398,7 @@ fn create_test_config(addr: SocketAddr) -> DeribitDataClientConfig {
         product_types: vec![DeribitProductType::Future],
         base_url_http: Some(format!("http://{addr}/api/v2")),
         base_url_ws: Some(format!("ws://{addr}/ws/api/v2")),
-        use_testnet: true,
+        environment: DeribitEnvironment::Testnet,
         http_timeout_secs: 10,
         max_retries: 1,
         retry_delay_initial_ms: 100,
@@ -461,7 +462,7 @@ async fn test_data_client_subscribe_trades() {
         None,
         None,
     );
-    client.subscribe_trades(&cmd).unwrap();
+    client.subscribe_trades(cmd).unwrap();
 
     wait_until_async(
         || async { !state.subscription_events.lock().await.is_empty() },
@@ -511,7 +512,7 @@ async fn test_data_client_subscribe_quotes() {
         None,
         None,
     );
-    client.subscribe_quotes(&cmd).unwrap();
+    client.subscribe_quotes(cmd).unwrap();
 
     wait_until_async(
         || async {
@@ -571,7 +572,7 @@ async fn test_data_client_subscribe_book_deltas() {
         None,
         None,
     );
-    client.subscribe_book_deltas(&cmd).unwrap();
+    client.subscribe_book_deltas(cmd).unwrap();
 
     wait_until_async(
         || async {

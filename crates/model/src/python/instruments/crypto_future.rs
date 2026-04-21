@@ -28,6 +28,7 @@ use rust_decimal::Decimal;
 use crate::{
     identifiers::{InstrumentId, Symbol},
     instruments::CryptoFuture,
+    python::instruments::register_crypto_currencies_from_dict,
     types::{Currency, Money, Price, Quantity},
 };
 
@@ -35,7 +36,7 @@ use crate::{
 #[pyo3_stub_gen::derive::gen_stub_pymethods]
 impl CryptoFuture {
     /// Represents a deliverable futures contract instrument, with crypto assets as underlying and for settlement.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[new]
     #[pyo3(signature = (instrument_id, raw_symbol, underlying, quote_currency, settlement_currency, is_inverse, activation_ns, expiration_ns, price_precision, size_precision, price_increment, size_increment,ts_event, ts_init, multiplier=None, lot_size=None, max_quantity=None, min_quantity=None, max_notional=None, min_notional=None, max_price=None, min_price=None, margin_init=None, margin_maint=None, maker_fee=None, taker_fee=None, info=None))]
     fn py_new(
@@ -304,6 +305,7 @@ impl CryptoFuture {
     #[staticmethod]
     #[pyo3(name = "from_dict")]
     fn py_from_dict(py: Python<'_>, values: Py<PyDict>) -> PyResult<Self> {
+        register_crypto_currencies_from_dict(py, &values, &["underlying"]);
         from_dict_pyo3(py, values)
     }
 
@@ -386,7 +388,11 @@ mod tests {
     use pyo3::{prelude::*, types::PyDict};
     use rstest::rstest;
 
-    use crate::instruments::{CryptoFuture, stubs::*};
+    use crate::{
+        enums::CurrencyType,
+        instruments::{CryptoFuture, stubs::*},
+        types::Currency,
+    };
 
     #[rstest]
     fn test_dict_round_trip(crypto_future_btcusdt: CryptoFuture) {
@@ -397,6 +403,24 @@ mod tests {
             let values: Py<PyDict> = values.extract(py).unwrap();
             let new_crypto_future = CryptoFuture::py_from_dict(py, values).unwrap();
             assert_eq!(crypto_future, new_crypto_future);
+        });
+    }
+
+    #[rstest]
+    fn test_from_dict_unknown_underlying_registers_as_crypto(crypto_future_btcusdt: CryptoFuture) {
+        // Regression: newly listed underlyings must round-trip through `from_dict`
+        // without requiring prior registration of the currency in the Rust map.
+        Python::initialize();
+        Python::attach(|py| {
+            let values = crypto_future_btcusdt.py_to_dict(py).unwrap();
+            let values: Py<PyDict> = values.extract(py).unwrap();
+            values.bind(py).set_item("underlying", "NEWFUT").unwrap();
+
+            let new_future = CryptoFuture::py_from_dict(py, values).unwrap();
+            assert_eq!(new_future.underlying.code.as_str(), "NEWFUT");
+            assert_eq!(new_future.underlying.precision, 8);
+            assert_eq!(new_future.underlying.currency_type, CurrencyType::Crypto);
+            assert!(Currency::try_from_str("NEWFUT").is_some());
         });
     }
 }

@@ -70,7 +70,10 @@ use super::{extract_optional_string, extract_optional_trigger_type};
 use crate::{
     common::{
         consts::{OKX_FIELD_CLORDID, OKX_FIELD_SCODE, OKX_FIELD_SMSG, OKX_SUCCESS_CODE},
-        enums::{OKXBookAction, OKXInstrumentStatus, OKXInstrumentType, OKXTradeMode, OKXVipLevel},
+        enums::{
+            OKXBookAction, OKXGreeksType, OKXInstrumentStatus, OKXInstrumentType, OKXTradeMode,
+            OKXVipLevel,
+        },
         models::OKXInstrument,
         parse::{
             okx_status_to_market_action, parse_account_state, parse_instrument_any,
@@ -298,7 +301,7 @@ impl OKXWebSocketClient {
     }
 
     #[pyo3(name = "connect")]
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     fn py_connect<'py>(
         &mut self,
         py: Python<'py>,
@@ -333,7 +336,6 @@ impl OKXWebSocketClient {
                 let mut fee_cache: AHashMap<Ustr, Money> = AHashMap::new();
                 let mut filled_qty_cache: AHashMap<Ustr, Quantity> = AHashMap::new();
                 let option_greeks_subs_arc = client.option_greeks_subs().clone();
-                let _client = client;
                 tokio::pin!(stream);
 
                 while let Some(msg) = stream.next().await {
@@ -425,7 +427,7 @@ impl OKXWebSocketClient {
                                 &code,
                                 &msg,
                                 &data,
-                                &_client,
+                                &client,
                                 account_id,
                                 clock,
                                 &call_soon,
@@ -443,7 +445,7 @@ impl OKXWebSocketClient {
                                 client_order_id,
                                 op.as_ref(),
                                 &error,
-                                &_client,
+                                &client,
                                 account_id,
                                 clock,
                                 &call_soon,
@@ -870,6 +872,18 @@ impl OKXWebSocketClient {
         self.add_option_greeks_sub(instrument_id);
     }
 
+    #[pyo3(name = "add_option_greeks_sub_with_conventions")]
+    fn py_add_option_greeks_sub_with_conventions(
+        &self,
+        instrument_id: InstrumentId,
+        conventions: Vec<OKXGreeksType>,
+    ) {
+        self.add_option_greeks_sub_with_conventions(
+            instrument_id,
+            conventions.into_iter().collect(),
+        );
+    }
+
     #[pyo3(name = "remove_option_greeks_sub")]
     fn py_remove_option_greeks_sub(&self, instrument_id: InstrumentId) {
         self.remove_option_greeks_sub(&instrument_id);
@@ -1114,7 +1128,7 @@ impl OKXWebSocketClient {
         px_usd=None,
         px_vol=None,
     ))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn py_submit_order<'py>(
         &self,
         py: Python<'py>,
@@ -1174,7 +1188,6 @@ impl OKXWebSocketClient {
         client_order_id=None,
         venue_order_id=None,
     ))]
-    #[allow(clippy::too_many_arguments)]
     fn py_cancel_order<'py>(
         &self,
         py: Python<'py>,
@@ -1212,7 +1225,7 @@ impl OKXWebSocketClient {
         new_px_usd=None,
         new_px_vol=None,
     ))]
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn py_modify_order<'py>(
         &self,
         py: Python<'py>,
@@ -1246,7 +1259,7 @@ impl OKXWebSocketClient {
         })
     }
 
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     #[pyo3(name = "batch_submit_orders")]
     fn py_batch_submit_orders<'py>(
         &self,
@@ -1459,7 +1472,7 @@ fn handle_book_data(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_channel_data(
     channel: &OKXWsChannel,
     inst_id: Option<Ustr>,
@@ -1467,7 +1480,7 @@ fn handle_channel_data(
     instruments_by_symbol: &mut AHashMap<Ustr, InstrumentAny>,
     quote_cache: &mut QuoteCache,
     funding_cache: &mut AHashMap<Ustr, (Ustr, u64)>,
-    option_greeks_subs: &AHashSet<InstrumentId>,
+    option_greeks_subs: &AHashMap<InstrumentId, AHashSet<OKXGreeksType>>,
     clock: &AtomicTime,
     call_soon: &Py<PyAny>,
     callback: &Py<PyAny>,
@@ -1482,23 +1495,35 @@ fn handle_channel_data(
                         continue;
                     };
                     let instrument_id = instrument.id();
-                    if !option_greeks_subs.contains(&instrument_id) {
+                    let Some(conventions) = option_greeks_subs.get(&instrument_id) else {
                         continue;
-                    }
+                    };
 
-                    match parse_option_summary_greeks(msg, &instrument_id, ts_init) {
-                        Ok(greeks) => {
-                            Python::attach(|py| match greeks.into_py_any(py) {
-                                Ok(py_obj) => {
-                                    call_python_threadsafe(py, call_soon, callback, py_obj);
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to convert OptionGreeks to Python: {e}");
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            log::error!("Failed to parse option summary for {}: {e}", msg.inst_id);
+                    for greeks_type in conventions {
+                        match parse_option_summary_greeks(
+                            msg,
+                            &instrument_id,
+                            *greeks_type,
+                            ts_init,
+                        ) {
+                            Ok(greeks) => {
+                                Python::attach(|py| match greeks.into_py_any(py) {
+                                    Ok(py_obj) => {
+                                        call_python_threadsafe(py, call_soon, callback, py_obj);
+                                    }
+                                    Err(e) => {
+                                        log::error!(
+                                            "Failed to convert OptionGreeks to Python: {e}"
+                                        );
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                log::error!(
+                                    "Failed to parse option summary for {} ({greeks_type:?}): {e}",
+                                    msg.inst_id
+                                );
+                            }
                         }
                     }
                 }
@@ -1582,7 +1607,7 @@ fn handle_channel_data(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_bbo_tbt(
     data: serde_json::Value,
     instrument_id: InstrumentId,
@@ -1681,7 +1706,7 @@ fn handle_instruments(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_orders(
     order_msgs: &[OKXOrderMsg],
     account_id: AccountId,
@@ -1783,7 +1808,7 @@ fn handle_positions(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_order_response(
     id: Option<&str>,
     op: &OKXWsOperation,
@@ -1940,7 +1965,7 @@ fn handle_order_response(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn handle_send_failed(
     request_id: &str,
     client_order_id: Option<ClientOrderId>,

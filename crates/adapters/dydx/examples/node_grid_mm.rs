@@ -19,7 +19,7 @@
 //! - Set `DYDX_PRIVATE_KEY` (or `DYDX_TESTNET_PRIVATE_KEY` for testnet)
 //! - Optionally set `DYDX_WALLET_ADDRESS` (or `DYDX_TESTNET_WALLET_ADDRESS` for testnet)
 //!
-//! Run with: `cargo run --example dydx-grid-mm --package nautilus-dydx`
+//! Run with: `cargo run --example dydx-grid-mm --package nautilus-dydx --features examples`
 
 use log::LevelFilter;
 use nautilus_common::{enums::Environment, logging::logger::LoggerConfig};
@@ -39,12 +39,7 @@ use nautilus_trading::examples::strategies::{GridMarketMaker, GridMarketMakerCon
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
-    let is_testnet = false;
-    let network = if is_testnet {
-        DydxNetwork::Testnet
-    } else {
-        DydxNetwork::Mainnet
-    };
+    let network = DydxNetwork::Mainnet;
 
     let environment = Environment::Live;
     let trader_id = TraderId::from("TESTER-001");
@@ -53,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instrument_id = InstrumentId::from("ETH-USD-PERP.DYDX");
 
     let data_config = DydxDataClientConfig {
-        is_testnet,
+        network,
         ..Default::default()
     };
 

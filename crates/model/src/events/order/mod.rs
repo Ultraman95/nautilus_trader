@@ -30,9 +30,11 @@ use crate::{
 };
 
 pub mod accepted;
+pub mod accepted_batch;
 pub mod any;
 pub mod cancel_rejected;
 pub mod canceled;
+pub mod canceled_batch;
 pub mod denied;
 pub mod emulated;
 pub mod expired;
@@ -45,6 +47,7 @@ pub mod rejected;
 pub mod released;
 pub mod snapshot;
 pub mod submitted;
+pub mod submitted_batch;
 pub mod triggered;
 pub mod updated;
 

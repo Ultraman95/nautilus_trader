@@ -34,8 +34,8 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_deribit::{
-    config::DeribitDataClientConfig, factories::DeribitDataClientFactory,
-    http::models::DeribitProductType,
+    common::enums::DeribitEnvironment, config::DeribitDataClientConfig,
+    factories::DeribitDataClientFactory, http::models::DeribitProductType,
 };
 use nautilus_live::node::LiveNode;
 use nautilus_model::{
@@ -163,6 +163,7 @@ impl DataActor for OptionChainTester {
             strike_range,
             snapshot_interval_ms,
             Some(client_id),
+            None,
         );
 
         self.series_id = Some(series_id);
@@ -255,7 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         api_key: None,    // Will use 'DERIBIT_API_KEY' env var
         api_secret: None, // Will use 'DERIBIT_API_SECRET' env var
         product_types: vec![DeribitProductType::Option, DeribitProductType::Future],
-        use_testnet: false,
+        environment: DeribitEnvironment::Mainnet,
         ..Default::default()
     };
 
